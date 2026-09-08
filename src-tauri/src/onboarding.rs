@@ -311,17 +311,26 @@ fn build_readiness(
             status.whisper_model && status.whisper_native_built,
             status.whisper_native_built,
             false,
-            "Локальная диктовка, ~574 МБ",
+            if status.whisper_native_built {
+                "Локальная диктовка, ~574 МБ"
+            } else {
+                "Нужна сборка Jarvis с поддержкой Whisper"
+            },
         ),
         ReadinessItem::new(
             "qwen3-runtime",
             "Qwen3-ASR",
-            status.qwen3_sidecar
+            install::model_install_support("qwen3-runtime").is_ok()
+                && status.qwen3_sidecar
                 && (install::qwen_weights_present("qwen3-0.6b")
                     || install::qwen_weights_present("qwen3-1.7b")),
-            true,
+            install::model_install_support("qwen3-runtime").is_ok(),
             false,
-            "MLX runtime + проверенный комплект весов",
+            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                "MLX runtime + проверенный комплект весов"
+            } else {
+                "Требуется Mac с Apple Silicon"
+            },
         ),
         ReadinessItem::new(
             "silero",
@@ -334,10 +343,14 @@ fn build_readiness(
         ReadinessItem::new(
             "hey_jarvis",
             "Wake word",
-            status.wakeword_models,
-            true,
+            status.wakeword_models && install::model_install_support("hey_jarvis").is_ok(),
+            install::model_install_support("hey_jarvis").is_ok(),
             false,
-            "Опциональная голосовая активация",
+            if cfg!(feature = "wakeword-ort") {
+                "Опциональная голосовая активация"
+            } else {
+                "Нужна сборка Jarvis с голосовой активацией"
+            },
         ),
     ];
     ReadinessSnapshot {
@@ -362,7 +375,7 @@ fn readiness_snapshot(app: &AppHandle) -> ReadinessSnapshot {
 }
 
 fn emit_both(app: &AppHandle, event: &str, payload: Value) {
-    let _ = app.emit_to("main", event, payload.clone());
+    crate::windows::emit_to_panel(app, event, &payload);
     let _ = app.emit_to("onboarding", event, payload);
 }
 
@@ -386,8 +399,11 @@ pub fn onboarding_run(app: AppHandle, proxy: Option<String>) -> InstallJobSnapsh
     if let Some(proxy) = proxy {
         let mut service = Map::new();
         service.insert("proxy".into(), Value::String(proxy.trim().to_string()));
-        d.settings.set_block("service", service);
-        d.settings.remove_top("proxy");
+        if let Err(error) = d.settings.try_set_block("service", service) {
+            let failed = finish_job(vec![error]);
+            emit_both(&app, "install_job_changed", serde_json::to_value(&failed).unwrap_or(Value::Null));
+            return failed;
+        }
     }
     std::thread::spawn(move || {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -404,7 +420,9 @@ pub fn onboarding_run(app: AppHandle, proxy: Option<String>) -> InstallJobSnapsh
         let failures = match outcome {
             Ok(health) if health.ok() => Vec::new(),
             Ok(_) => vec!["Core integration не прошла итоговую readiness-проверку".into()],
-            Err(_) => vec!["Core installer аварийно остановился; безопасно повтори установку".into()],
+            Err(_) => {
+                vec!["Core installer аварийно остановился; безопасно повтори установку".into()]
+            }
         };
         finish_job(failures);
         let readiness = readiness_snapshot(&app);
@@ -488,8 +506,8 @@ pub fn model_delete(app: AppHandle, id: String) -> Result<IntegrationInfo, Strin
 
 /// Включить/выключить тихий режим (разработчик) из настроек.
 #[tauri::command]
-pub fn quiet_set(app: AppHandle, on: bool) {
-    crate::daemon::Daemon::get(&app).set_quiet(on);
+pub fn quiet_set(app: AppHandle, on: bool) -> Result<(), String> {
+    crate::daemon::Daemon::get(&app).set_quiet(on)
 }
 
 /// Скачать модель Whisper large-v3-turbo-q5 (~574 МБ) по запросу из настроек.
@@ -497,20 +515,21 @@ pub fn quiet_set(app: AppHandle, on: bool) {
 /// умолчанию ничего не тянем, как и просил пользователь). Фоном, fail-safe:
 /// прогресс → `stt_install_progress`, финал → `stt_install_done` (kind=whisper).
 #[tauri::command]
-pub fn stt_install_whisper(app: AppHandle) {
+pub fn stt_install_whisper(app: AppHandle) -> Result<(), String> {
+    install::model_install_support("whisper-turbo")?;
     let d = crate::daemon::Daemon::get(&app);
     let proxy = d.settings.proxy();
     std::thread::spawn(move || {
         let r = install::install_whisper(
             &|step: Step| {
-                let _ = app.emit_to("main", "stt_install_progress", step);
+                crate::windows::emit_to_panel(&app, "stt_install_progress", &step);
             },
             proxy.as_deref(),
         );
-        let _ = app.emit_to(
-            "main",
+        crate::windows::emit_to_panel(
+            &app,
             "stt_install_done",
-            serde_json::json!({
+            &serde_json::json!({
                 "kind": "whisper",
                 "ok": r.is_ok(),
                 "error": r.err(),
@@ -518,6 +537,7 @@ pub fn stt_install_whisper(app: AppHandle) {
             }),
         );
     });
+    Ok(())
 }
 
 /// Установить Qwen3-ASR MLX-сайдкар (venv + зависимости, ~2.6 ГБ) по запросу из
@@ -525,20 +545,21 @@ pub fn stt_install_whisper(app: AppHandle) {
 /// fail-safe; прогресс → `stt_install_progress`, финал → `stt_install_done`
 /// (kind=qwen3).
 #[tauri::command]
-pub fn stt_install_sidecar(app: AppHandle) {
+pub fn stt_install_sidecar(app: AppHandle) -> Result<(), String> {
+    install::model_install_support("qwen3-runtime")?;
     let d = crate::daemon::Daemon::get(&app);
     let proxy = d.settings.proxy();
     std::thread::spawn(move || {
         let r = install::install_stt_sidecar(
             &|step: Step| {
-                let _ = app.emit_to("main", "stt_install_progress", step);
+                crate::windows::emit_to_panel(&app, "stt_install_progress", &step);
             },
             proxy.as_deref(),
         );
-        let _ = app.emit_to(
-            "main",
+        crate::windows::emit_to_panel(
+            &app,
             "stt_install_done",
-            serde_json::json!({
+            &serde_json::json!({
                 "kind": "qwen3",
                 "ok": r.is_ok(),
                 "error": r.err(),
@@ -546,6 +567,7 @@ pub fn stt_install_sidecar(app: AppHandle) {
             }),
         );
     });
+    Ok(())
 }
 
 /// Установить Codex-SDK сайдкар (venv + `openai-codex`) — служебный LLM «под
@@ -558,14 +580,14 @@ pub fn codex_install_sidecar(app: AppHandle) {
     std::thread::spawn(move || {
         let r = install::install_codex_sdk_sidecar(
             &|step: Step| {
-                let _ = app.emit_to("main", "codex_install_progress", step);
+                crate::windows::emit_to_panel(&app, "codex_install_progress", &step);
             },
             proxy.as_deref(),
         );
-        let _ = app.emit_to(
-            "main",
+        crate::windows::emit_to_panel(
+            &app,
             "codex_install_done",
-            serde_json::json!({
+            &serde_json::json!({
                 "ok": r.is_ok(),
                 "error": r.err(),
                 "ready": install::status().codex_sdk_sidecar,
@@ -577,26 +599,28 @@ pub fn codex_install_sidecar(app: AppHandle) {
 /// Скачать 3 ONNX-модели wake-word (инкр. 10) с прогрессом в панель. Фоном,
 /// fail-safe; по завершении — событие `wake_install_done` со статусом.
 #[tauri::command]
-pub fn wake_install_models(app: AppHandle) {
+pub fn wake_install_models(app: AppHandle) -> Result<(), String> {
+    install::model_install_support("hey_jarvis")?;
     let d = crate::daemon::Daemon::get(&app);
     let proxy = d.settings.proxy();
     std::thread::spawn(move || {
         let r = install::install_wakeword(
             &|step: Step| {
-                let _ = app.emit_to("main", "wake_install_progress", step);
+                crate::windows::emit_to_panel(&app, "wake_install_progress", &step);
             },
             proxy.as_deref(),
         );
-        let _ = app.emit_to(
-            "main",
+        crate::windows::emit_to_panel(
+            &app,
             "wake_install_done",
-            serde_json::json!({
+            &serde_json::json!({
                 "ok": r.is_ok(),
                 "error": r.err(),
                 "models_present": install::status().wakeword_models,
             }),
         );
     });
+    Ok(())
 }
 
 /// Установить голос Silero (venv + torch/deps + модель) по запросу из раздела
@@ -609,14 +633,14 @@ pub fn voice_install_silero(app: AppHandle) {
     std::thread::spawn(move || {
         let r = install::install_silero(
             &|step: Step| {
-                let _ = app.emit_to("main", "stt_install_progress", step);
+                crate::windows::emit_to_panel(&app, "stt_install_progress", &step);
             },
             proxy.as_deref(),
         );
-        let _ = app.emit_to(
-            "main",
+        crate::windows::emit_to_panel(
+            &app,
             "stt_install_done",
-            serde_json::json!({
+            &serde_json::json!({
                 "kind": "silero",
                 "ok": r.is_ok(),
                 "error": r.err(),
@@ -631,22 +655,26 @@ pub fn voice_install_silero(app: AppHandle) {
 /// локально, без похода в HF. Фоном, fail-safe; прогресс → `stt_install_progress`,
 /// финал → `stt_install_done` (kind = ключ модели).
 #[tauri::command]
-pub fn stt_install_qwen(app: AppHandle, key: String) {
+pub fn stt_install_qwen(app: AppHandle, key: String) -> Result<(), String> {
+    if !matches!(key.as_str(), "qwen3-0.6b" | "qwen3-1.7b") {
+        return Err(format!("Неизвестная модель Qwen: {key}"));
+    }
+    install::model_install_support(&key)?;
     let d = crate::daemon::Daemon::get(&app);
     let proxy = d.settings.proxy();
     std::thread::spawn(move || {
         let r = install::preload_qwen(
             &key,
             &|step: Step| {
-                let _ = app.emit_to("main", "stt_install_progress", step);
+                crate::windows::emit_to_panel(&app, "stt_install_progress", &step);
             },
             proxy.as_deref(),
         );
         let ready = install::qwen_weights_present(&key);
-        let _ = app.emit_to(
-            "main",
+        crate::windows::emit_to_panel(
+            &app,
             "stt_install_done",
-            serde_json::json!({
+            &serde_json::json!({
                 "kind": key,
                 "ok": r.is_ok(),
                 "error": r.err(),
@@ -654,6 +682,7 @@ pub fn stt_install_qwen(app: AppHandle, key: String) {
             }),
         );
     });
+    Ok(())
 }
 
 /// Скачать НАБОР моделей последовательно в фоне (онбординг и панель «Модели»).
@@ -661,14 +690,19 @@ pub fn stt_install_qwen(app: AppHandle, key: String) {
 /// `model_install_done {id, ok, error}`, в конце `models_install_all_done`.
 /// Сбой одной модели НЕ прерывает очередь — остальные качаются дальше.
 #[tauri::command]
-pub fn models_install(app: AppHandle, ids: Vec<String>) -> InstallJobSnapshot {
+pub fn models_install(app: AppHandle, ids: Vec<String>) -> Result<InstallJobSnapshot, String> {
+    // Validate the entire request before spawning any installer, even when a
+    // stale UI or direct IPC caller submits a model unavailable in this build.
+    for id in &ids {
+        install::model_install_support(id)?;
+    }
     let d = crate::daemon::Daemon::get(&app);
     let proxy = d.settings.proxy();
-    let plan = install::plan_install(&ids, &install::installed_state());
+    let plan = install::plan_install_checked(&ids, &install::installed_state())?;
     let tasks: Vec<String> = plan.iter().map(|task| task.id.clone()).collect();
     let started = match start_job("models", tasks) {
         Ok(started) => started,
-        Err(running) => return running,
+        Err(running) => return Ok(running),
     };
     std::thread::spawn(move || {
         let mut failures = Vec::new();
@@ -707,7 +741,7 @@ pub fn models_install(app: AppHandle, ids: Vec<String>) -> InstallJobSnapshot {
         emit_both(&app, "install_job_changed", payload.clone());
         emit_both(&app, "models_install_all_done", payload);
     });
-    started
+    Ok(started)
 }
 
 #[cfg(test)]
@@ -768,5 +802,85 @@ mod tests {
         );
         health.hook_bin = true;
         assert!(build_readiness(health, status, done_job, true).core_ready);
+    }
+
+    #[test]
+    fn cached_artifacts_do_not_claim_features_absent_from_this_build() {
+        let health = install::IntegrationHealth {
+            jarvis_dir: "/tmp/jarvis-onboarding-test".into(),
+            hook_bin: true,
+            socket: true,
+            claude_present: true,
+            claude_hooks_ok: true,
+            codex_present: false,
+            codex_hooks_ok: false,
+            claude_shim: false,
+            codex_shim: false,
+        };
+        let status = Status {
+            whisper_model: true,
+            whisper_native_built: false,
+            wakeword_models: true,
+            qwen3_sidecar: true,
+            ..Status::default()
+        };
+        let readiness = build_readiness(health, status, InstallJobSnapshot::default(), false);
+        for capability in &readiness.capabilities {
+            if !capability.available {
+                assert!(
+                    !capability.ready,
+                    "{} cannot run in this build",
+                    capability.id
+                );
+            }
+        }
+        let whisper = readiness
+            .capabilities
+            .iter()
+            .find(|item| item.id == "whisper-turbo")
+            .unwrap();
+        assert!(!whisper.ready && !whisper.available);
+        let wake = readiness
+            .capabilities
+            .iter()
+            .find(|item| item.id == "hey_jarvis")
+            .unwrap();
+        assert_eq!(wake.available, cfg!(feature = "wakeword-ort"));
+        assert_eq!(wake.ready, wake.available);
+        let qwen = readiness
+            .capabilities
+            .iter()
+            .find(|item| item.id == "qwen3-runtime")
+            .unwrap();
+        assert_eq!(
+            qwen.available,
+            cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        );
+    }
+
+    #[test]
+    fn voice_capabilities_are_ready_without_installed_cli_agents() {
+        let health = install::IntegrationHealth {
+            jarvis_dir: "/tmp/jarvis-onboarding-test".into(),
+            hook_bin: false,
+            socket: false,
+            claude_present: false,
+            claude_hooks_ok: false,
+            codex_present: false,
+            codex_hooks_ok: false,
+            claude_shim: false,
+            codex_shim: false,
+        };
+        let status = Status {
+            silero: true,
+            ..Status::default()
+        };
+        let readiness = build_readiness(health, status, InstallJobSnapshot::default(), false);
+        assert!(!readiness.core_ready);
+        assert!(readiness.agents.iter().all(|agent| !agent.ready));
+        assert!(readiness
+            .capabilities
+            .iter()
+            .any(|item| item.id == "silero" && item.ready));
     }
 }

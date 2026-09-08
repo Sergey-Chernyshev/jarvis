@@ -24,7 +24,10 @@ fn host_for(d: &Arc<Daemon>, b: &Bundle) -> Result<Host, String> {
         return Ok(Host::Local);
     }
     match d.remotes.node(m) {
-        Some(node) => Ok(Host::Ssh { machine: m.to_string(), host: node.cfg.ssh_host.clone() }),
+        Some(node) => Ok(Host::ConfiguredSsh {
+            machine: m.to_string(),
+            connection: node.cfg.connection(),
+        }),
         None => Err(format!("узел «{m}» не найден в настройках удалённых машин")),
     }
 }
@@ -37,7 +40,11 @@ fn session_of(d: &Arc<Daemon>, machine: &str, worktree: &str) -> Option<crate::m
     sessions
         .values()
         .find(|s| {
-            let same_host = if local { s.remote.is_none() } else { s.remote.as_deref() == Some(machine) };
+            let same_host = if local {
+                s.remote.is_none()
+            } else {
+                s.remote.as_deref() == Some(machine)
+            };
             same_host && s.cwd.as_deref() == Some(worktree)
         })
         .cloned()
@@ -47,7 +54,7 @@ fn session_of(d: &Arc<Daemon>, machine: &str, worktree: &str) -> Option<crate::m
 async fn send_to_hand(d: &Arc<Daemon>, b: &Bundle, pane: &str, text: &str) -> Result<(), String> {
     match host_for(d, b)? {
         Host::Local => crate::tmux::reply(pane, text).await,
-        Host::Ssh { machine, .. } => {
+        Host::Ssh { machine, .. } | Host::ConfiguredSsh { machine, .. } => {
             let node = d.remotes.node(&machine).ok_or("узел пропал из настроек")?;
             node.client()?.reply(pane, text).await
         }
@@ -209,7 +216,10 @@ pub fn bundle_draft() -> Value {
 #[tauri::command]
 pub async fn bundle_places(app: AppHandle, machine: String) -> Value {
     let d = Daemon::get(&app);
-    let probe = Bundle { machine: machine.clone(), ..Default::default() };
+    let probe = Bundle {
+        machine: machine.clone(),
+        ..Default::default()
+    };
     let host = match host_for(&d, &probe) {
         Ok(h) => h,
         Err(e) => return json!({ "ok": false, "error": e }),
@@ -259,7 +269,10 @@ async fn known_dirs(d: &Arc<Daemon>, machine: &str) -> Vec<String> {
 #[tauri::command]
 pub async fn bundle_browse(app: AppHandle, machine: String, path: String) -> Value {
     let d = Daemon::get(&app);
-    let probe = Bundle { machine, ..Default::default() };
+    let probe = Bundle {
+        machine,
+        ..Default::default()
+    };
     let host = match host_for(&d, &probe) {
         Ok(h) => h,
         Err(e) => return json!({ "ok": false, "error": e }),
@@ -270,7 +283,7 @@ pub async fn bundle_browse(app: AppHandle, machine: String, path: String) -> Val
             Err(e) => return json!({ "ok": false, "error": e }),
         }
     } else {
-        path.trim().trim_end_matches('/').to_string()
+        browse_path(&path)
     };
     match host.list_dirs(&path).await {
         Ok(dirs) => json!({
@@ -280,6 +293,30 @@ pub async fn bundle_browse(app: AppHandle, machine: String, path: String) -> Val
             "dirs": dirs,
         }),
         Err(e) => json!({ "ok": false, "error": e, "path": path }),
+    }
+}
+
+fn browse_path(path: &str) -> String {
+    let path = path.trim();
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() && path.starts_with('/') { "/".into() } else { trimmed.into() }
+}
+
+#[cfg(test)]
+mod project_browser_tests {
+    use super::*;
+
+    #[test]
+    fn browse_path_keeps_filesystem_root_when_trimming_slashes() {
+        assert_eq!(browse_path("/"), "/");
+        assert_eq!(browse_path(" /// "), "/");
+        assert_eq!(browse_path(" /repo/// "), "/repo");
+        assert_eq!(browse_path(""), "");
+    }
+
+    #[tokio::test]
+    async fn local_browser_can_list_root() {
+        assert!(crate::bundle::host::Host::Local.list_dirs(&browse_path("/")).await.is_ok());
     }
 }
 
@@ -296,7 +333,8 @@ pub fn bundle_save(app: AppHandle, item: Value) -> Value {
         b.id = format!("bundle-{}", crate::util::now_ms());
         b.created_at = crate::util::now_ms();
     }
-    b.hands.retain(|h| !h.task.trim().is_empty() || h.state != HandState::New);
+    b.hands
+        .retain(|h| !h.task.trim().is_empty() || h.state != HandState::New);
     for (i, h) in b.hands.iter_mut().enumerate() {
         if h.id.is_empty() {
             h.id = format!("hand-{}-{i}", crate::util::now_ms());
@@ -317,9 +355,12 @@ pub fn bundle_save(app: AppHandle, item: Value) -> Value {
             b.last_merge_at = old.last_merge_at;
         }
     }
+    let Some(_operation) = d.bundles.claim_operation(&b.id) else {
+        return json!({ "ok": false, "error": "дождись текущей операции перед сохранением связки" });
+    };
     let problems = b.problems();
     let id = b.id.clone();
-    d.bundles.store.save(b);
+    d.bundles.store.save_form(b);
     push(&d);
     json!({ "ok": true, "id": id, "problems": problems })
 }
@@ -328,9 +369,15 @@ pub fn bundle_save(app: AppHandle, item: Value) -> Value {
 #[tauri::command]
 pub async fn bundle_start(app: AppHandle, id: String) -> Value {
     let d = Daemon::get(&app);
+    let Some(operation) = d.bundles.claim_operation(&id) else {
+        return json!({ "ok": false, "error": "связка ещё выполняет предыдущую операцию" });
+    };
     let Some(b) = d.bundles.store.get(&id) else {
         return json!({ "ok": false, "error": "связка не найдена" });
     };
+    if b.paused {
+        return json!({ "ok": false, "error": "сначала сними связку с паузы" });
+    }
     let problems = b.problems();
     if !problems.is_empty() {
         return json!({ "ok": false, "error": problems.join("; ") });
@@ -339,8 +386,13 @@ pub async fn bundle_start(app: AppHandle, id: String) -> Value {
         Ok(h) => h,
         Err(e) => return json!({ "ok": false, "error": e }),
     };
+    if let Err(error) =
+        launch::preflight(&host, b.provider(), d.settings.bool("launchDangerous")).await
+    {
+        return json!({ "ok": false, "error": error });
+    }
     let dir = b.dir.trim().to_string();
-    if matches!(host, Host::Ssh { .. }) && !dir.starts_with('/') {
+    if matches!(host, Host::Ssh { .. } | Host::ConfiguredSsh { .. }) && !dir.starts_with('/') {
         return json!({ "ok": false, "error": "на узле нужен абсолютный путь — ~ раскрывать некому" });
     }
     // Директория — как в «Проектах»: нет каталога — создадим, нет git —
@@ -359,13 +411,18 @@ pub async fn bundle_start(app: AppHandle, id: String) -> Value {
     };
     d.bundles.store.with(&id, |b| b.base = base.clone());
 
-    let launching: Vec<Hand> =
-        b.hands.iter().filter(|h| h.state == HandState::New && !h.task.trim().is_empty()).cloned().collect();
+    let launching: Vec<Hand> = b
+        .hands
+        .iter()
+        .filter(|h| h.state == HandState::New && !h.task.trim().is_empty())
+        .cloned()
+        .collect();
     if launching.is_empty() {
         return json!({ "ok": false, "error": "нет рук к запуску — все уже подняты" });
     }
     let dd = d.clone();
     tauri::async_runtime::spawn(async move {
+        let _operation = operation;
         for hand in launching {
             launch_hand(&dd, &id, &hand).await;
             push(&dd);
@@ -376,7 +433,12 @@ pub async fn bundle_start(app: AppHandle, id: String) -> Value {
 
 /// Поднять одну руку: worktree → ветка → tmux → первое сообщение.
 async fn launch_hand(d: &Arc<Daemon>, bid: &str, hand: &Hand) {
-    let Some(b) = d.bundles.store.get(bid) else { return };
+    let Some(b) = d.bundles.store.get(bid) else {
+        return;
+    };
+    if b.paused {
+        return;
+    }
     let host = match host_for(d, &b) {
         Ok(h) => h,
         Err(e) => {
@@ -385,6 +447,13 @@ async fn launch_hand(d: &Arc<Daemon>, bid: &str, hand: &Hand) {
             return;
         }
     };
+    if let Err(error) =
+        launch::preflight(&host, b.provider(), d.settings.bool("launchDangerous")).await
+    {
+        set_hand(d, bid, &hand.id, |h| h.state = HandState::Failed);
+        add_event(d, bid, format!("{}: {error}", hand.name));
+        return;
+    }
     let dir = b.dir.trim().to_string();
     let slug = unique_slug(&b, &hand.name, &hand.task);
     let branch = format!("team/{slug}");
@@ -407,7 +476,7 @@ async fn launch_hand(d: &Arc<Daemon>, bid: &str, hand: &Hand) {
             .canonicalize()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or(wt.clone()),
-        Host::Ssh { .. } => wt.clone(),
+        Host::Ssh { .. } | Host::ConfiguredSsh { .. } => wt.clone(),
     };
     // Задача + правила руки. Коммиты — не пожелание: очередь слияний видит
     // только закоммиченное, рука без коммитов не станет готовой никогда.
@@ -425,10 +494,19 @@ async fn launch_hand(d: &Arc<Daemon>, bid: &str, hand: &Hand) {
             b.gates.iter().map(|g| g.command.as_str()).collect::<Vec<_>>().join("; ")
         },
     );
+    // Retain the worktree even if CLI startup fails: the retry/report must
+    // not orphan its location or erase files during bundle removal.
+    set_hand(d, bid, &hand.id, |h| {
+        h.branch = branch.clone();
+        h.worktree = wt_canon.clone();
+    });
+    if d.bundles.store.get(bid).is_none_or(|b| b.paused) {
+        return fail(d, "запуск остановлен паузой; песочница сохранена".into());
+    }
     let dangerous = d.settings.bool("launchDangerous");
     let pane = match &host {
         Host::Local => {
-            let cmd = match launch::hand_command(dangerous) {
+            let cmd = match launch::hand_command(b.provider(), dangerous) {
                 Ok(c) => c,
                 Err(e) => return fail(d, e),
             };
@@ -437,10 +515,10 @@ async fn launch_hand(d: &Arc<Daemon>, bid: &str, hand: &Hand) {
                 Err(e) => return fail(d, e),
             }
         }
-        Host::Ssh { machine, .. } => {
+        Host::Ssh { machine, .. } | Host::ConfiguredSsh { machine, .. } => {
             // На узле бинарь агента резолвит сам узел (он добавляет PATH), а
             // вопрос доверия к папке подтверждает его launch — как в «Проектах».
-            let cmd = crate::launch::agent_command("claude", None, dangerous);
+            let cmd = crate::launch::agent_command(b.provider(), None, dangerous);
             let node = match d.remotes.node(machine) {
                 Some(n) => n,
                 None => return fail(d, "узел пропал из настроек".into()),
@@ -455,6 +533,13 @@ async fn launch_hand(d: &Arc<Daemon>, bid: &str, hand: &Hand) {
             }
         }
     };
+    set_hand(d, bid, &hand.id, |h| h.pane = pane.clone());
+    if d.bundles.store.get(bid).is_none_or(|b| b.paused) {
+        if matches!(host, Host::Local) {
+            let _ = crate::tmux::tmux_j(&["kill-pane", "-t", &pane]).await;
+        }
+        return fail(d, "запуск остановлен паузой; задача не отправлена".into());
+    }
     if let Err(e) = send_to_hand(d, &b, &pane, &brief).await {
         return fail(d, format!("сессия поднялась, но задача не доехала: {e}"));
     }
@@ -485,15 +570,25 @@ fn unique_slug(b: &Bundle, name: &str, task: &str) -> String {
 
 /// Добавить руку в живую связку — и сразу поднять.
 #[tauri::command]
-pub async fn bundle_add_hand(app: AppHandle, id: String, task: String, name: Option<String>) -> Value {
+pub async fn bundle_add_hand(
+    app: AppHandle,
+    id: String,
+    task: String,
+    name: Option<String>,
+) -> Value {
     let d = Daemon::get(&app);
+    let Some(operation) = d.bundles.claim_operation(&id) else {
+        return json!({ "ok": false, "error": "связка ещё выполняет предыдущую операцию" });
+    };
     let task = task.trim().to_string();
     if task.is_empty() {
         return json!({ "ok": false, "error": "пустая задача" });
     }
     let hand = Hand {
         id: format!("hand-{}", crate::util::now_ms()),
-        name: name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| super::hand_name(&task)),
+        name: name
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| super::hand_name(&task)),
         task,
         ..Default::default()
     };
@@ -504,6 +599,7 @@ pub async fn bundle_add_hand(app: AppHandle, id: String, task: String, name: Opt
     let dd = d.clone();
     let bid = id.clone();
     tauri::async_runtime::spawn(async move {
+        let _operation = operation;
         launch_hand(&dd, &bid, &hand_for_launch).await;
         push(&dd);
     });
@@ -516,20 +612,23 @@ pub async fn bundle_pause(app: AppHandle, id: String, on: bool) -> Value {
     let d = Daemon::get(&app);
     let Some(b) = d.bundles.store.with(&id, |b| {
         b.paused = on;
-        b.event(if on { "пауза всем".into() } else { "связка продолжает".to_string() });
+        b.event(if on {
+            "пауза всем".into()
+        } else {
+            "связка продолжает".to_string()
+        });
     }) else {
         return json!({ "ok": false, "error": "связка не найдена" });
     };
     if on {
-        for h in b.hands.iter().filter(|h| h.state == HandState::Working && !h.pane.is_empty()) {
-            let working = session_of(&d, &b.machine, &h.worktree)
-                .is_some_and(|s| s.status == crate::model::Status::Working);
-            if !working {
-                continue;
-            }
+        for h in b
+            .hands
+            .iter()
+            .filter(|h| h.state == HandState::Working && !h.pane.is_empty())
+        {
             match host_for(&d, &b) {
                 Ok(Host::Local) | Err(_) => launch::interrupt(&h.pane).await,
-                Ok(Host::Ssh { machine, .. }) => {
+                Ok(Host::Ssh { machine, .. } | Host::ConfiguredSsh { machine, .. }) => {
                     if let Some(node) = d.remotes.node(&machine) {
                         if let Ok(c) = node.client() {
                             let _ = c.keys(&h.pane, vec![json!({ "key": "Escape" })]).await;
@@ -548,6 +647,9 @@ pub async fn bundle_pause(app: AppHandle, id: String, on: bool) -> Value {
 #[tauri::command]
 pub async fn bundle_merge(app: AppHandle, id: String, hand: String) -> Value {
     let d = Daemon::get(&app);
+    let Some(_operation) = d.bundles.claim_operation(&id) else {
+        return json!({ "ok": false, "error": "связка ещё выполняет предыдущую операцию" });
+    };
     let Some(b) = d.bundles.store.get(&id) else {
         return json!({ "ok": false, "error": "связка не найдена" });
     };
@@ -578,7 +680,10 @@ pub async fn bundle_merge(app: AppHandle, id: String, hand: String) -> Value {
             h.merged_at = crate::util::now_ms();
         }
         b.last_merge_at = crate::util::now_ms();
-        b.event(format!("ты влил {branch} → {} · хвост переребейзится сам", b.base));
+        b.event(format!(
+            "ты влил {branch} → {} · хвост переребейзится сам",
+            b.base
+        ));
     });
     push(&d);
     json!({ "ok": true })
@@ -589,15 +694,19 @@ pub async fn bundle_merge(app: AppHandle, id: String, hand: String) -> Value {
 #[tauri::command]
 pub async fn bundle_remove(app: AppHandle, id: String) -> Value {
     let d = Daemon::get(&app);
+    let Some(_operation) = d.bundles.claim_operation(&id) else {
+        return json!({ "ok": false, "error": "связка ещё выполняет предыдущую операцию" });
+    };
     let Some(b) = d.bundles.store.get(&id) else {
         return json!({ "ok": false, "error": "связка не найдена" });
     };
     if let Ok(host) = host_for(&d, &b) {
         for h in &b.hands {
-            if h.worktree.is_empty() {
+            if h.worktree.is_empty() || !matches!(h.state, HandState::Merged | HandState::Failed) {
                 continue;
             }
-            let _ = host.git(&b.dir, &["worktree", "remove", "--force", &h.worktree]).await;
+            // No --force: uncommitted work and live trees must survive removal.
+            let _ = host.git(&b.dir, &["worktree", "remove", &h.worktree]).await;
         }
     }
     d.bundles.store.remove(&id);
@@ -614,6 +723,9 @@ pub async fn tick(d: &Arc<Daemon>) {
     }
     let bundles = d.bundles.store.all();
     for b in bundles.iter().filter(|b| b.active() && !b.paused) {
+        let Some(_operation) = d.bundles.claim_operation(&b.id) else {
+            continue;
+        };
         tick_bundle(d, b).await;
     }
     d.bundles.release_tick();
@@ -643,17 +755,22 @@ async fn tick_bundle(d: &Arc<Daemon>, b: &Bundle) {
 /// живости паны: агент мог ещё не прислать ни одного хука.
 async fn busy(d: &Arc<Daemon>, b: &Bundle, h: &Hand, host: &Host) -> bool {
     match session_of(d, &b.machine, &h.worktree) {
-        Some(s) => matches!(s.status, crate::model::Status::Working | crate::model::Status::Waiting),
+        Some(s) => matches!(
+            s.status,
+            crate::model::Status::Working | crate::model::Status::Waiting
+        ),
         None => match host {
             Host::Local => crate::tmux::pane_alive(&h.pane).await,
-            Host::Ssh { machine, .. } => match d.remotes.node(machine).and_then(|n| n.client().ok()) {
-                Some(c) => c
-                    .panes()
-                    .await
-                    .map(|r| r.panes.iter().any(|p| p.pane == h.pane))
-                    .unwrap_or(false),
-                None => false,
-            },
+            Host::Ssh { machine, .. } | Host::ConfiguredSsh { machine, .. } => {
+                match d.remotes.node(machine).and_then(|n| n.client().ok()) {
+                    Some(c) => c
+                        .panes()
+                        .await
+                        .map(|r| r.panes.iter().any(|p| p.pane == h.pane))
+                        .unwrap_or(false),
+                    None => false,
+                }
+            }
         },
     }
 }
@@ -694,7 +811,11 @@ async fn tick_ready(d: &Arc<Daemon>, b: &Bundle, h: &Hand, host: &Host) -> bool 
             h.state = HandState::Working;
             h.gates_ok = false;
         });
-        add_event(d, &b.id, format!("{}: агент снова работает — вышла из очереди", h.name));
+        add_event(
+            d,
+            &b.id,
+            format!("{}: агент снова работает — вышла из очереди", h.name),
+        );
         return true;
     }
     if git::rebased(host, &b.dir, &b.base, &h.branch).await {
@@ -707,7 +828,11 @@ async fn tick_ready(d: &Arc<Daemon>, b: &Bundle, h: &Hand, host: &Host) -> bool 
     }
     match git::try_rebase(host, &h.worktree, &b.base).await {
         Ok(git::Rebase::Clean) => {
-            add_event(d, &b.id, format!("{}: авторебейз на свежий {} — гейты заново", h.name, b.base));
+            add_event(
+                d,
+                &b.id,
+                format!("{}: авторебейз на свежий {} — гейты заново", h.name, b.base),
+            );
             run_gates_and_queue(d, b, h, host).await;
             true
         }
@@ -728,8 +853,13 @@ async fn tick_conflict(d: &Arc<Daemon>, b: &Bundle, h: &Hand, host: &Host) -> bo
     if busy(d, b, h, host).await {
         return false;
     }
-    if git::rebased(host, &b.dir, &b.base, &h.branch).await && !git::dirty(host, &h.worktree).await {
-        add_event(d, &b.id, format!("{}: конфликт решён — гейты и обратно в очередь", h.name));
+    if git::rebased(host, &b.dir, &b.base, &h.branch).await && !git::dirty(host, &h.worktree).await
+    {
+        add_event(
+            d,
+            &b.id,
+            format!("{}: конфликт решён — гейты и обратно в очередь", h.name),
+        );
         return run_gates_and_queue(d, b, h, host).await;
     }
     false
@@ -748,7 +878,11 @@ async fn to_conflict(d: &Arc<Daemon>, b: &Bundle, h: &Hand, files: Vec<String>) 
     add_event(
         d,
         &b.id,
-        format!("{}: конфликт при ребейзе — {} · чинит сам, попытка {attempt}", h.name, files.join(", ")),
+        format!(
+            "{}: конфликт при ребейзе — {} · чинит сам, попытка {attempt}",
+            h.name,
+            files.join(", ")
+        ),
     );
     let msg = format!(
         "Конфликт при ребейзе на {base}: {files}. Сделай `git rebase {base}` в своём worktree, \
@@ -758,7 +892,11 @@ async fn to_conflict(d: &Arc<Daemon>, b: &Bundle, h: &Hand, files: Vec<String>) 
         files = files.join(", "),
     );
     if let Err(e) = send_to_hand(d, b, &h.pane, &msg).await {
-        add_event(d, &b.id, format!("{}: не смог передать конфликт агенту — {e}", h.name));
+        add_event(
+            d,
+            &b.id,
+            format!("{}: не смог передать конфликт агенту — {e}", h.name),
+        );
     }
 }
 
@@ -790,7 +928,11 @@ async fn run_gates_and_queue(d: &Arc<Daemon>, b: &Bundle, h: &Hand, host: &Host)
     } else {
         let red = runs.iter().find(|g| !g.ok);
         let name = red.map(|g| g.name.as_str()).unwrap_or("гейт");
-        add_event(d, &b.id, format!("{}: красный гейт «{name}» — вернул агенту", h.name));
+        add_event(
+            d,
+            &b.id,
+            format!("{}: красный гейт «{name}» — вернул агенту", h.name),
+        );
         let msg = format!(
             "Гейт «{name}» красный:\n{}\nПочини и закоммить — без зелёных проверок рука не встанет в очередь.",
             crate::loops::runner::tail(&red.map(|g| g.output.clone()).unwrap_or_default(), 25),
@@ -802,7 +944,11 @@ async fn run_gates_and_queue(d: &Arc<Daemon>, b: &Bundle, h: &Hand, host: &Host)
 
 /// Прогнать гейты по порядку — там, где живёт связка. Первый красный
 /// останавливает: гонять остальные нечего.
-async fn run_gates(host: &Host, gates: &[crate::loops::model::Gate], cwd: &str) -> Vec<crate::loops::model::GateRun> {
+async fn run_gates(
+    host: &Host,
+    gates: &[crate::loops::model::Gate],
+    cwd: &str,
+) -> Vec<crate::loops::model::GateRun> {
     let mut out = Vec::new();
     for g in gates {
         let (code, text) = host.sh(cwd, &g.command, Duration::from_secs(1800)).await;

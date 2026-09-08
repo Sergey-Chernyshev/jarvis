@@ -33,6 +33,7 @@ impl Status {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct QuestionOption {
+    pub id: String,
     pub label: String,
     pub description: String,
 }
@@ -40,10 +41,30 @@ pub struct QuestionOption {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct QuestionItem {
+    pub id: String,
     pub question: String,
     pub header: String,
     pub multi_select: bool,
     pub options: Vec<QuestionOption>,
+    /// An explicit capability of this question, not an assumption about its agent.
+    pub custom_allowed: Option<bool>,
+    /// notes retains the selected option; alternative replaces it.
+    pub custom_mode: String,
+    pub is_secret: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ScreenQuestionState {
+    /// Content identity excludes cursor and checkbox state.
+    pub fingerprint: String,
+    pub cursor: u32,
+    pub selected: Vec<u32>,
+    /// Original terminal option numbers, including gaps left by Other.
+    pub option_numbers: Vec<u32>,
+    pub custom_index: Option<u32>,
+    pub picker: String,
+    pub editing: bool,
 }
 
 /// Вопрос, ждущий ответа: из хука AskUserQuestion либо распознанный на экране
@@ -51,6 +72,14 @@ pub struct QuestionItem {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Question {
+    pub request_id: String,
+    pub revision: u64,
+    /// tmux, codex-rpc, or external (readable but not owned by this connection).
+    pub transport: String,
+    pub provider_turn_id: Option<String>,
+    pub provider_item_id: Option<String>,
+    pub rpc_request_id: Option<serde_json::Value>,
+    pub screen: Option<ScreenQuestionState>,
     pub at: i64,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub from_screen: bool,
@@ -121,12 +150,37 @@ pub struct Session {
     pub created_at: i64,
     pub updated_at: i64,
 
+    /// Локальная ревизия хода для асинхронных эффектов; после рестарта
+    /// незавершённых задач в памяти уже нет, на диск её писать незачем.
+    #[serde(skip)]
+    pub lifecycle_revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_turn_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// Provider configuration identity is independent of the raw provider SID.
+    /// Two accounts may contain copies of the same conversation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_home: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    /// `hook` or `rollout`: monitoring does not imply a writable transport.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monitor_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_event_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hook_last_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tmux_pane: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -217,6 +271,9 @@ impl Session {
     /// ничего не знает, и подсказка с ним отправляет человека выполнять
     /// команду, которая заведомо не сработает.
     pub fn agent_id(&self) -> &str {
+        if let Some(id) = self.provider_session_id.as_deref().filter(|id| !id.is_empty()) {
+            return id;
+        }
         match &self.remote {
             Some(node) => self.id.strip_prefix(&format!("{node}:")).unwrap_or(&self.id),
             None => &self.id,

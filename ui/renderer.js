@@ -30,7 +30,7 @@ const PASTED_IMG_RE = new RegExp(String.raw`(^|\s)(\/[^\s]*\/jarvis-paste\/[^\s]
 // печати в чате стирал завершённые сессии (clearFinished). См. обработчик ниже.
 function editingText(el = document.activeElement) {
   if (!el) return false;
-  return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable === true;
+  return window.jarvisKeys.editing(el);
 }
 const footerLeftEl = document.getElementById('footerLeft');
 const tabSessionsEl = document.getElementById('tabSessions');
@@ -52,8 +52,15 @@ const STATUS_LABEL = {
 
 let state = [];
 let sel = 0;
-let view = 'list'; // list | chat | settings
+let view = 'home'; // root command list, then one module at a time
+const navigation = window.createJarvisNavigation({ view: 'home' });
 let chatSessionId = null;
+let chatOpenSequence = 0;
+let pendingChat = null;
+let stateReceived = false;
+let sessionsLoadState = 'loading';
+let sessionsLoadError = '';
+const deliveryStates = new Map();
 
 /* ---------- helpers ---------- */
 
@@ -128,42 +135,97 @@ const detailEmptyEl = document.getElementById('detailEmpty');
  *  который ставит theme.js из настроек; так режим виден и до ответа моста. */
 const windowMode = () => document.documentElement.dataset.mode === 'window';
 
-function setView(next) {
+function routeSnapshot() {
+  return { view, query: queryEl.value, sel, sessionId: chatSessionId,
+    project: chatTitleEl.textContent, draft: view === 'chat' ? replyEl.value : undefined,
+    moduleSelection: window.jarvisWorkspace?.selection(),
+    projects: view === 'history' ? window.jarvisProjects?.snapshot() : undefined,
+    history: view === 'history' ? { machine: histMachine, project: histProject, selected: histSel, trail: histTrail.map(route => ({ ...route })) } : undefined,
+    focusId: document.activeElement?.id || null };
+}
+
+function goBack() {
+  if (view === 'history' && window.jarvisProjects) {
+    if (window.jarvisProjects.back()) return;
+  } else
+  if (view === 'history') {
+    if (histNewOpen) { histNewOpen = false; renderHistory(); return; }
+    if (histBack()) return;
+  }
+  if (window.jarvisModuleBack?.[view]?.()) return;
+  if (view === 'home') {
+    if (queryEl.value) { queryEl.value = ''; window.jarvisWorkspace.refresh(); queryEl.focus(); }
+    else if (!windowMode()) window.jarvis.hidePanel();
+    return;
+  }
+  const route = navigation.back();
+  if (route.view === 'chat' && state.some(s => s.id === route.sessionId)) {
+    openChat(route.sessionId, route.project, { restore: route });
+  } else {
+    setView(route.view === 'chat' || route.view === 'question' ? 'home' : route.view, { restore: route });
+    render();
+  }
+}
+
+function setView(next, options = {}) {
+  const changed = view !== next;
+  if (options.restore) navigation.replace({ ...options.restore, view: next });
+  else navigation.go({ view: next, sessionId: next === 'chat' ? chatSessionId : undefined }, options.fromRoute || routeSnapshot());
+  if (changed) queryEl.value = options.restore?.query || '';
+  if (options.restore?.sel != null) sel = options.restore.sel;
+  if (next !== 'chat') {
+    if (pendingChat && view !== 'chat') window.jarvis.closeChat();
+    chatOpenSequence++; pendingChat = null;
+  }
   if (view === 'chat' && next !== 'chat') {
+    window.jarvisSessionWorkspace?.saveDraft(chatSessionId, replyEl.value, pendingImages);
     window.jarvis.closeChat();
     chatSessionId = null;
   }
   if (view === 'question' && next !== 'question') qSessionId = null;
   // вкладка всегда открывается с верхнего уровня: выбор машины (или сразу
   // проекты локальной, если узлов не настроено)
-  if (next === 'history' && view !== 'history') { histProject = null; histMachine = null; histNewOpen = false; }
+  if (next === 'history' && changed) {
+    window.jarvisProjects?.enter(options.restore?.projects, changed);
+    histProject = options.restore?.history?.project || null;
+    histMachine = options.restore?.history?.machine || null;
+    histSel = options.restore?.history?.selected || 0;
+    histTrail = options.restore?.history?.trail?.map(route => ({ ...route })) || [];
+    histNewOpen = false;
+  }
   view = next;
+  window.jarvisWorkspace?.changed(next, options.restore);
+  window.jarvisSessionWorkspace?.changed(next);
   closeActions();
   // Оконный режим (14h): список слева живёт всегда, поиск и вкладки — тоже.
   // В накладке остаётся прежний фокус-режим: чат и вопрос занимают панель целиком.
   const win = windowMode();
-  const minimal = !win && (next === 'chat' || next === 'question');
-  document.querySelector('.cmdrow').hidden = minimal;
-  document.querySelector('.tabs').hidden = minimal;
-  listEl.hidden = win ? false : next !== 'list';
-  // правая колонка окна пустует, пока сессия не выбрана
-  contentEl.hidden = win && next === 'list';
-  detailEmptyEl.hidden = !(win && next === 'list');
+  document.querySelector('.cmdrow').hidden = !['home', 'list', 'history'].includes(next);
+  queryEl.placeholder = next === 'home' ? 'Найти команду или чат…' : next === 'history' ? 'Найти проект…' : 'Найти чат…';
+  document.getElementById('pageNavigation').hidden = next === 'home';
+  document.getElementById('launcher').hidden = next !== 'home';
+  listEl.hidden = next !== 'list';
+  contentEl.hidden = ['home', 'list'].includes(next);
+  detailEmptyEl.hidden = true;
   chatEl.hidden = next !== 'chat';
   qviewEl.hidden = next !== 'question';
   settingsEl.hidden = next !== 'settings';
+  document.getElementById('machines').hidden = next !== 'machines';
   statsEl.hidden = next !== 'stats';
   voicehistEl.hidden = next !== 'voicehist';
+  document.getElementById('meetings').hidden = next !== 'meetings';
   loopsEl.hidden = next !== 'loops';
   bundlePaneEl.hidden = next !== 'bundle';
   historyEl.hidden = next !== 'history';
   // чат и вопрос несут собственные нижние бары — парящий футер только тут.
   // В окне полоска не парит, а стоит в сетке под обеими колонками — она нужна всегда.
   footerEl.hidden = !win && (next === 'chat' || next === 'question');
-  if (next === 'list') { primaryLabelEl.textContent = 'Открыть чат'; primaryKeyEl.textContent = '↵'; }
+  if (next === 'home') { primaryLabelEl.textContent = 'Открыть'; primaryKeyEl.textContent = '↵'; }
+  else if (next === 'list') { primaryLabelEl.textContent = 'Открыть чат'; primaryKeyEl.textContent = '↵'; }
   else if (next === 'history') { primaryLabelEl.textContent = 'Открыть проект'; primaryKeyEl.textContent = '↵'; }
   else { primaryLabelEl.textContent = 'Назад'; primaryKeyEl.textContent = 'esc'; }
   tabSettingsEl.classList.toggle('active', next === 'settings');
+  document.getElementById('tabMachines').classList.toggle('active', next === 'machines');
   document.getElementById('tlSettings').classList.toggle('active', next === 'settings');
   tabStatsEl.classList.toggle('active', next === 'stats');
   tabHistoryEl.classList.toggle('active', next === 'history');
@@ -185,7 +247,7 @@ function setView(next) {
     // человека перед экраном. Поэтому меряем и считаем нарисованное.
     const audit = () => {
       const ms = Date.now() - at;
-      if (!host) return;
+      if (!host || !host.isConnected || host.hidden || view !== next) return;
       const kids = host.childElementCount;
       // Высота нужна отдельно от числа детей: «белый экран» бывает и при
       // непустом DOM — когда раздел отрисовался, но схлопнут в нулевую высоту
@@ -213,6 +275,8 @@ function setView(next) {
     } catch (e) { blame(e); }
   };
   if (next === 'settings') safely('settings', loadSettings);
+  if (next === 'machines') safely('machines', () => window.initMachines(document.getElementById('machines')), document.getElementById('machines'));
+  if (next === 'meetings') safely('meetings', () => window.initMeetings(document.getElementById('meetings')), document.getElementById('meetings'));
   if (next === 'stats') safely('stats', renderStats, statsEl);
   if (next === 'voicehist') {
     voicehistEl.style.cssText = 'padding:0;height:100%;overflow:hidden';
@@ -227,14 +291,19 @@ function setView(next) {
   }
   if (next === 'history') safely('history', renderHistory, historyEl);
   else if (recording) { recording = false; recordingBtn.classList.remove('recording'); }
-  if (next === 'list') queryEl.focus();
+  if (['home', 'list', 'history'].includes(next)) queryEl.focus();
+  else document.getElementById('pageBack').focus();
+  if (options.restore?.focusId) requestAnimationFrame(() => {
+    const target = document.getElementById(options.restore.focusId);
+    if (target && !target.closest('[hidden]')) target.focus();
+  });
 }
 
 // Клик/Enter по сессии: всегда открываем чат; если у сессии есть вопрос —
 // сразу поднимаем слайд-овер вариантов поверх чата (видно переписку И варианты).
 function openSession(s) {
   openChat(s.id, s.project).then(() => {
-    if (questionOf(s)) openVarPanel();
+    if (chatSessionId === s.id && view === 'chat' && questionOf(s)) openVarPanel();
   });
 }
 
@@ -310,6 +379,9 @@ function filtered() {
 }
 
 function render() {
+  window.jarvisSessionWorkspace?.refresh(state);
+  window.jarvisProjects?.stateChanged();
+  if (view === 'home') { window.jarvisWorkspace?.refresh(); footerLeftEl.textContent = footerText(); return; }
   // Гейт — видимость списка, а не имя вида. В оконном режиме список стоит
   // рядом с открытым чатом, и прежняя проверка «вид — не список» замораживала
   // его на всё время чата: статусы не обновлялись, а открытый чат никак не
@@ -344,13 +416,16 @@ function render() {
     empty.className = 'empty';
     empty.textContent = state.length
       ? 'Ничего не найдено'
-      : 'Нет активных сессий — запусти claude в любом терминале, они появятся здесь сами.';
+      : 'Здесь появятся твои чаты. Начни задачу в разделе «Проекты» или запусти Claude / Codex в терминале.';
     listEl.appendChild(empty);
     return;
   }
 
   list.forEach((s, i) => {
     const row = document.createElement('div');
+    row.setAttribute('role', 'button');
+    row.tabIndex = 0;
+    row.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); openSession(s); } });
     row.className = `row ${s.status}${i === sel ? ' selected' : ''}`;
     row.title = [s.remote ? `узел ${s.remote}` : null, s.cwd, s.title, ...(s.todoList || [])]
       .filter(Boolean).join('\n');
@@ -392,7 +467,7 @@ function render() {
     badge.className = 'badge';
     // claude: s.model||'claude' (как было). codex: модель из payload, иначе «…»
     // (не дублируем «codex» — его показывает agentBadge).
-    badge.textContent = s.model || (!s.agent || s.agent === 'claude' ? 'claude' : '…');
+    badge.textContent = visibleModel(s.model) || (!s.agent || s.agent === 'claude' ? 'claude' : '…');
 
     const host = hostLabel(s);
     let hostBadge = null;
@@ -669,10 +744,20 @@ function bumpCount(chip) {
 
 function addToolChip(label) {
   if (!toolsGroup) {
+    const disclosure = document.createElement('details');
+    disclosure.className = 'tool-disclosure';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Действия агента';
+    disclosure.appendChild(summary);
     toolsGroup = document.createElement('div');
     toolsGroup.className = 'msg tools';
-    turnTarget().appendChild(toolsGroup);
+    disclosure.appendChild(toolsGroup);
+    turnTarget().appendChild(disclosure);
   }
+  const summary = toolsGroup.parentElement.querySelector('summary');
+  const count = Number(toolsGroup.dataset.count || 0) + 1;
+  toolsGroup.dataset.count = String(count);
+  summary.textContent = `Действия агента · ${count}`;
   const last = toolsGroup.lastElementChild;
   if (last && last.dataset.label === label) { bumpCount(last); return; }
 
@@ -694,6 +779,13 @@ function addToolChip(label) {
     a.textContent = arg;
     chip.appendChild(a);
   }
+  if (arg && ['read','write','edit','multiedit','notebookedit'].includes(tool.toLowerCase())) {
+    const sessionId=chatSessionId, path=window.JarvisArtifacts?.filePath(arg.replace(/:\d+(?::\d+)?$/, ''));
+    if(path){chip.tabIndex=0;chip.setAttribute('role','button');chip.setAttribute('aria-label','Открыть '+path);
+      const preview=()=>window.JarvisArtifacts.open({sessionId,path,source:state.find(s=>s.id===sessionId)?.remote||'Этот компьютер'});
+      chip.addEventListener('click',preview);chip.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();preview();}});
+    }
+  }
   toolsGroup.appendChild(chip);
 }
 
@@ -713,9 +805,13 @@ function extractAttachments(raw) {
   text = text.replace(/\[Image #(\d+)\]/g, (_, n) => { chips.push({ type: 'image', label: `Image #${n}` }); return ''; });
   // путь к картинке, вставленной из Jarvis (только наш temp-каталог jarvis-paste —
   // произвольные пути, набранные юзером руками, из текста не выдёргиваем)
-  text = text.replace(PASTED_IMG_RE, (m, pre, p) => { chips.push({ type: 'image', label: p.split('/').pop() }); return pre; });
+  text = text.replace(PASTED_IMG_RE, (m, pre, p) => { chips.push({ type: 'image', label: p.split('/').pop(), path: p }); return pre; });
   // @file: только если выглядит как путь (есть точка или слэш) — не трогаем @everyone и т.п.
-  text = text.replace(/(^|\s)@([\w./\-]*[./][\w./\-]*)/g, (m, pre, p) => { chips.push({ type: 'file', label: `@${p}` }); return pre; });
+  text = text.replace(/(^|\s)@([\w./\-]*[./][\w./\-]*)/g, (m, pre, p) => { chips.push({ type: 'file', label: `@${p}`, path: p }); return pre; });
+  text = text.replace(/Вложения \(пути к файлам на машине агента\):\n((?:"[^\n]+"(?:\n|$))+)/g, (_, paths) => {
+    for (const line of paths.trim().split('\n')) { try { const path = JSON.parse(line); chips.push({ type: 'file', label: path.split('/').pop(), path }); } catch {} }
+    return '';
+  });
   return { chips, text: text.replace(/[ \t]{2,}/g, ' ').trim() };
 }
 
@@ -734,7 +830,7 @@ function makeImageIcon() {
   return svg;
 }
 
-function userBubble(rawText) {
+function userBubble(rawText, sessionId = chatSessionId, files = []) {
   const { chips, text } = extractAttachments(rawText);
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
@@ -742,8 +838,9 @@ function userBubble(rawText) {
     const wrap = document.createElement('div');
     wrap.className = 'attachs';
     for (const c of chips) {
-      const chip = document.createElement('div');
+      const chip = document.createElement(c.path ? 'button' : 'div');
       chip.className = 'attach';
+      if (c.path) { chip.type = 'button'; chip.addEventListener('click', () => window.JarvisArtifacts.open({ sessionId, path: c.path, source: state.find(s => s.id === sessionId)?.remote || 'Этот компьютер' })); }
       if (c.type === 'image') chip.appendChild(makeImageIcon());
       const lbl = document.createElement('span');
       lbl.textContent = c.label;
@@ -752,6 +849,7 @@ function userBubble(rawText) {
     }
     bubble.appendChild(wrap);
   }
+  window.JarvisArtifacts?.chips(bubble, files.length ? files : window.JarvisArtifacts.references(rawText).filter(ref => !chips.some(chip => chip.path === ref.path)), sessionId, state.find(s => s.id === sessionId)?.remote || 'Этот компьютер');
   // если после выноса вложений остался текст — отдельным блоком под чипами
   if (text || !chips.length) {
     const body = document.createElement('div');
@@ -768,7 +866,8 @@ function assistantMsg(it) {
   head.className = 'mhead';
   const who = document.createElement('span');
   who.className = 'mwho';
-  who.textContent = 'Jarvis';
+  const agent = state.find(s => s.id === chatSessionId)?.agent || 'claude';
+  who.textContent = agent === 'claude' ? 'Claude' : agent === 'codex' ? 'Codex' : agent;
   head.appendChild(who);
   const tm = fmtClock(it.ts);
   if (tm) {
@@ -777,10 +876,36 @@ function assistantMsg(it) {
     t.textContent = tm;
     head.appendChild(t);
   }
+  const copy = document.createElement('button');
+  copy.className = 'msg-copy'; copy.type = 'button'; copy.textContent = 'Копировать';
+  copy.setAttribute('aria-label', 'Копировать ответ целиком');
+  copy.addEventListener('click', async () => {
+    try {
+      const result = await window.jarvis.copyText(String(it.text || ''));
+      if (result?.ok === false) throw new Error(result.error);
+      showToast('Ответ скопирован');
+    } catch (error) { showToast(error.message || String(error)); }
+  });
+  head.appendChild(copy);
   msg.appendChild(head);
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
   renderMarkdown(bubble, it.text);
+  window.JarvisArtifacts?.chips(bubble, window.JarvisArtifacts.references(it.text), chatSessionId, curSession()?.remote || 'Этот компьютер');
+  for (const pre of bubble.querySelectorAll('pre')) {
+    const code = pre.querySelector('code');
+    const text = code?.textContent ?? pre.textContent;
+    const button = document.createElement('button');
+    button.className = 'code-copy'; button.type = 'button'; button.textContent = 'Копировать код';
+    button.addEventListener('click', async () => {
+      try {
+        const result = await window.jarvis.copyText(text);
+        if (result?.ok === false) throw new Error(result.error);
+        showToast('Код скопирован');
+      } catch (error) { showToast(error.message || String(error)); }
+    });
+    pre.prepend(button);
+  }
   msg.appendChild(bubble);
   return msg;
 }
@@ -912,23 +1037,60 @@ function applyCard(key, card) {
 }
 
 // оптимистично показанные ответы юзера, ждут «эха» из транскрипта (для дедупа)
-let pendingReplies = [];
+const pendingRepliesBySession = new Map();
+const observedUserItems = new Map();
+const trackedLaunchMessages = new Set();
+const userItemKey = it => JSON.stringify([it.ts, it.text.trim()]);
+function pendingFor(sessionId) {
+  if (!pendingRepliesBySession.has(sessionId)) pendingRepliesBySession.set(sessionId, []);
+  return pendingRepliesBySession.get(sessionId);
+}
+function removePending(pending) {
+  pending.el.remove();
+  const list = pendingFor(pending.sessionId), index = list.indexOf(pending);
+  if (index >= 0) list.splice(index, 1);
+}
+function restorePendingReplies() {
+  const list = pendingFor(chatSessionId);
+  if (list.length) chatlogEl.querySelector('.chatempty')?.remove();
+  for (const pending of list) chatlogEl.append(pending.el);
+}
 
 // сразу показать отправленную реплику в ленте — иначе при занятой сессии она
 // уходит в очередь Claude и в чате до обработки не видна («ничего не происходит»)
-function appendPendingReply(text, queued) {
-  chatlogEl.querySelector('.chatempty')?.remove();
-  toolsGroup = null;
+function appendPendingReply(text, queued, sessionId = chatSessionId, matchText = text, files = []) {
+  if (view === 'chat' && sessionId === chatSessionId) {
+    chatlogEl.querySelector('.chatempty')?.remove();
+    toolsGroup = null;
+  }
   const msg = document.createElement('div');
   msg.className = 'msg user pending';
-  msg.appendChild(userBubble(text));
+  msg.appendChild(userBubble(text, sessionId, files));
   const st = document.createElement('div');
   st.className = 'msg-status';
   st.textContent = queued ? 'в очереди — доставлю, как освободится' : 'отправлено';
   msg.appendChild(st);
-  chatlogEl.appendChild(msg);
-  chatlogEl.scrollTop = chatlogEl.scrollHeight;
-  pendingReplies.push({ text: text.trim(), el: msg });
+  if (view === 'chat' && sessionId === chatSessionId) {
+    chatlogEl.appendChild(msg);
+    chatlogEl.scrollTop = chatlogEl.scrollHeight;
+  }
+  const pending = { sessionId, text: matchText.trim(), el: msg, seen: new Set(observedUserItems.get(sessionId) || []) };
+  pendingFor(sessionId).push(pending);
+  return pending;
+}
+
+
+// Keep the first task visible while the remote transcript catches up. Repeated
+// launch events update delivery status, even if the user has opened another chat.
+function trackLaunchMessage(sessionId, message) {
+  let pending = pendingFor(sessionId).find(p => p.launchKey === message.key);
+  if (!trackedLaunchMessages.has(message.key) && message.displayText != null) {
+    trackedLaunchMessages.add(message.key);
+    pending = appendPendingReply(message.displayText, false, sessionId, message.text, message.files);
+    pending.launchKey = message.key;
+  }
+  if (!pending) return; // The transcript has already acknowledged this task.
+  window.JarvisAsyncState.status(pending.el.querySelector('.msg-status'), message.status, message.kind);
 }
 
 /* Сколько верхних блоков держим в ленте чата.
@@ -963,8 +1125,11 @@ function appendChatItems(items) {
     toolsGroup = null;
     if (it.role === 'user') {
       // реальная реплика из транскрипта пришла — снимаем оптимистичный дубль
-      const pi = pendingReplies.findIndex((p) => p.text === it.text.trim());
-      if (pi >= 0) { pendingReplies[pi].el.remove(); pendingReplies.splice(pi, 1); }
+      const key = userItemKey(it);
+      const pending = pendingFor(chatSessionId).find(p => p.text === it.text.trim() && !p.seen.has(key));
+      if (pending) removePending(pending);
+      if (!observedUserItems.has(chatSessionId)) observedUserItems.set(chatSessionId, new Set());
+      observedUserItems.get(chatSessionId).add(key);
       const msg = document.createElement('div');
       msg.className = 'msg user';
       msg.appendChild(userBubble(it.text));
@@ -981,7 +1146,7 @@ function appendChatItems(items) {
 function updateChatChannelMark() {
   const s = state.find((x) => x.id === chatSessionId);
   // модель — бейдж рядом с именем проекта (как в строке списка)
-  const model = s && (s.model || s.agent);
+  const model = s && (visibleModel(s.model) || s.agent);
   chatModelEl.textContent = model || '';
   chatModelEl.hidden = !model;
   // рука связки: ветка в шапке + пометка конфликта. Человек, открывший чат из
@@ -1017,13 +1182,13 @@ function updateChatChannelMark() {
   // откроется, а обещать превью и не показать его хуже, чем не обещать.
   if (previewBtn) previewBtn.hidden = !s || !s.cwd || !!s.remote;
   // tmux-сессии — без пометки; вне tmux помечаем
-  chatChannelEl.hidden = !s || !!s.tmuxPane;
+  chatChannelEl.hidden = !s || !!s.tmuxPane || s.controlMode === 'external';
   // статус-точка справа — цвет по состоянию, пульс если работает
   chatDotEl.className = `chatdot ${s ? s.status : ''}`;
   // правый край: расход сессии (или ветка, пока usage грузится) — тихо, моно
   const subEl = document.getElementById('chatSub');
   subEl.textContent = s && s.branch ? `⎇ ${s.branch}` : '';
-  if (s) {
+  if (s && !window.jarvisSessionWorkspace) {
     window.jarvis.getSessionUsage(s.id).then((us) => {
       if (!us || chatSessionId !== s.id) return;
       const money = (us.billing && us.billing !== 'plan') ? `$${us.cost.toFixed(2)}` : `~$${us.cost.toFixed(2)}`;
@@ -1049,6 +1214,13 @@ function modelsFor(agent) {
   return agent === 'codex' ? MODELS_CODEX : MODELS;
 }
 
+function visibleModel(value) {
+  if (window.JarvisSessionState?.modelName) return window.JarvisSessionState.modelName(value);
+  // Legacy/standalone surfaces may not load the workspace module.
+  if (typeof value !== 'string' || value.length > 256 || /[\x00-\x1f\x7f<>]/.test(value)) return '';
+  return /^synthetic$/i.test(value.trim()) ? '' : value.trim();
+}
+
 // базовые уровни приезжают из `claude --help` через демона (не отстаём от CLI);
 // ultracode в help не публикуется — это знание с живого слайдера Fable/Opus
 let effortBase = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -1068,19 +1240,23 @@ function effortsFor(model) {
 // вне tmux ответ недоступен — гасим поле и показываем, что запустить
 function gateReply(s) {
   const isTmux = !!(s && s.tmuxPane);
-  tmuxHintEl.hidden = !s || isTmux;
-  replyEl.disabled = !isTmux;
-  replyEl.placeholder = isTmux ? 'Ответить агенту…  ( / — команды )' : 'Сессия вне tmux';
-  if (!s || isTmux) return;
+  const external = s?.controlMode === 'external';
+  tmuxHintEl.hidden = !s || isTmux || external;
+  replyEl.disabled = !isTmux || external || sendingSessions.has(s?.id) || pendingChat?.sessionId === s?.id;
+  replyEl.placeholder = external ? 'Только просмотр' : isTmux ? 'Ответить агенту…  ( / — команды )' : 'Ответ недоступен';
+  if (!s || isTmux || external) return;
   tmuxHintEl.textContent = '';
+  const details = document.createElement('details');
+  const summary = document.createElement('summary'); summary.textContent = 'Подключить ответы из Jarvis'; details.append(summary);
+  const hint = document.createElement('div'); details.append(hint); tmuxHintEl.append(details);
   const where = s.remote ? `Сессия на узле «${s.remote}» не в tmux — управлять из Jarvis нельзя. Запусти ТАМ: `
     : 'Сессия не в tmux — управлять из Jarvis нельзя. Запусти в терминале: ';
-  tmuxHintEl.appendChild(document.createTextNode(where));
+  hint.appendChild(document.createTextNode(where));
   const code = document.createElement('code');
   code.className = 'tmuxcmd';
   // id, под которым сессию знает САМ агент: у сессии с узла ключ реестра
   // выглядит как «<узел>:<id>», и `--resume` с ним не найдёт ничего
-  const sid = s.remote && s.id.startsWith(s.remote + ':') ? s.id.slice(s.remote.length + 1) : s.id;
+  const sid = s.providerSessionId || (s.remote && s.id.startsWith(s.remote + ':') ? s.id.slice(s.remote.length + 1) : s.id);
   // команда возобновления зависит от агента: codex resume <id> vs claude --resume <id>.
   // Раньше было захардкожено «claude --resume» — для codex-сессий это вело не туда.
   const resumeCmd = resumeBase(s.agent, sid);
@@ -1090,8 +1266,8 @@ function gateReply(s) {
     navigator.clipboard?.writeText(resumeCmd);
     showToast('Скопировано');
   });
-  tmuxHintEl.appendChild(code);
-  tmuxHintEl.appendChild(document.createTextNode(s.remote
+  hint.appendChild(code);
+  hint.appendChild(document.createTextNode(s.remote
     ? ' — под tmux -L jarvis, иначе Jarvis до неё не дотянется.'
     : ' — shim подхватит её в tmux.'));
 }
@@ -1129,8 +1305,7 @@ function updateChatStatus(s) {
   }
 }
 
-/* ---------- экран вопроса AskUserQuestion (клавиатурный пикер) ---------- */
-
+/* ---------- вопросы агента: черновик привязан к requestId + revision ---------- */
 const qviewEl = document.getElementById('qview');
 const qOptsEl = document.getElementById('qOpts');
 const qHeaderEl = document.getElementById('qHeader');
@@ -1138,187 +1313,199 @@ const qTitleEl = document.getElementById('qTitle');
 const qFootEl = document.getElementById('qFoot');
 const qCustomRowEl = document.getElementById('qCustomRow');
 const qCustomEl = document.getElementById('qCustom');
-let qSessionId = null;
-let qData = null;        // текущий вопрос визарда
-let qSel = 0;
-let qChosen = new Set();
-let qItems = [];         // все вопросы опроса (s.question.questions)
-let qIdx = 0;            // индекс текущего вопроса
-let qAnswers = [];       // собранные выборы по каждому вопросу: number[][]
-let qTexts = [];         // свои ответы по каждому вопросу: (string|null)[]
-
-function keycap(text) {
-  const k = document.createElement('span');
-  k.className = 'keycap';
-  k.textContent = text;
-  return k;
+let qSessionId = null, qData = null, qRequest = null, qDraft = null;
+let qSel = 0, qChosen = new Set(), qItems = [], qIdx = 0, qAnswers = [], qTexts = [];
+let qPending = false, qReview = false, qMessage = '', qUnknown = false;
+let activeQOpts = qOptsEl, activeQCustom = null;
+const qDrafts = JarvisQuestionAnswer.createDraftStore();
+function keycap(text) { const k = document.createElement('span'); k.className = 'keycap'; k.textContent = text; return k; }
+function saveQDraft() {
+  if (!qDraft) return;
+  qDraft.answers = qAnswers; qDraft.texts = qTexts; qDraft.index = qIdx;
+  qDraft.selections[qIdx] = qSel; qDraft.review = qReview;
+  qDraft.message = qMessage; qDraft.unknown = qUnknown;
 }
-
-function openQuestion(s) {
-  qSessionId = s.id;
-  qItems = (s.question && s.question.questions) || [];
-  qIdx = 0;
-  qAnswers = qItems.map(() => []);
-  qTexts = qItems.map(() => null);
-  loadQ();
-  setView('question');
-  render(); // выделение в оконном списке — за открытым вопросом
-  renderQuestion();
-  qOptsEl.focus?.();
-}
-
-// Загрузить текущий вопрос визарда в общее состояние рендера.
 function loadQ() {
   qData = qItems[qIdx] || null;
-  qSel = 0;
+  qSel = qDraft?.selections[qIdx] ?? 0;
   qChosen = new Set(qAnswers[qIdx] || []);
 }
-
-let activeQOpts = qOptsEl; // контейнер опций: полноэкранный qview или слайд-овер вариантов
-let activeQCustom = null;  // видимое поле «Свой ответ…» активного контейнера (null — скрыто)
-
-function paintQOptions() {
-  for (const [i, btn] of [...activeQOpts.children].entries()) {
-    btn.classList.toggle('sel', i === qSel);
-    btn.classList.toggle('chosen', qChosen.has(i + 1));
-  }
-  activeQOpts.children[qSel]?.scrollIntoView({ block: 'nearest' });
-}
-
-// Рендер списка вариантов и подсказок в заданные контейнеры — общий для
-// полноэкранного экрана вопроса и слайд-овера вариантов поверх чата.
-function renderQOpts(optsEl, footEl) {
-  optsEl.textContent = '';
-  qData.options.forEach((o, i) => {
-    const btn = document.createElement('div');
-    btn.className = 'qopt';
-    const num = document.createElement('span');
-    num.className = 'qnum';
-    num.textContent = String(i + 1);
-    const body = document.createElement('span');
-    body.className = 'qbody';
-    const label = document.createElement('span');
-    label.className = 'qlabel';
-    label.textContent = o.label;
-    body.appendChild(label);
-    if (o.description) {
-      const desc = document.createElement('span');
-      desc.className = 'qdesc';
-      desc.textContent = o.description;
-      body.appendChild(desc);
-    }
-    btn.append(num, body);
-    if (qData.multiSelect) {
-      const ck = document.createElement('span');
-      ck.className = 'qcheck';
-      ck.textContent = '✓';
-      btn.appendChild(ck);
-    }
-    btn.addEventListener('mouseenter', () => { qSel = i; paintQOptions(); });
-    btn.addEventListener('click', () => { qSel = i; activateQ(); });
-    optsEl.appendChild(btn);
-  });
-  paintQOptions();
-
-  footEl.textContent = '';
-  const hint = (cap, text) => {
-    const h = document.createElement('span');
-    h.appendChild(keycap(cap));
-    h.appendChild(document.createTextNode(text));
-    return h;
-  };
-  footEl.appendChild(hint('↑↓', 'выбрать'));
-  if (qData.multiSelect) {
-    footEl.appendChild(hint('␣', 'отметить'));
-    footEl.appendChild(hint('↵', 'отправить'));
-  } else {
-    footEl.appendChild(hint('↵', 'ответить'));
-    footEl.appendChild(hint('1–9', 'быстрый выбор'));
-  }
-  footEl.appendChild(hint('esc', 'назад'));
-}
-
-// Поле «Свой ответ…» под опциями — аналог строки Other пикера Claude;
-// в codex-сессии скрыто (у codex-пикера строки Other нет).
-function renderQCustom(rowEl, inputEl) {
-  const s = state.find((x) => x.id === qSessionId);
-  rowEl.hidden = !JarvisQuestionAnswer.customAllowed(s && s.agent);
-  inputEl.value = qTexts[qIdx] || '';
-  activeQCustom = rowEl.hidden ? null : inputEl;
-}
-
-function renderQuestion() {
-  qHeaderEl.textContent = qData.header || '';
-  qHeaderEl.hidden = !qData.header;
-  qTitleEl.textContent = qData.question;
-  const prog = document.getElementById('qProgress');
-  if (qItems.length > 1) { prog.textContent = `${qIdx + 1}/${qItems.length}`; prog.hidden = false; }
-  else prog.hidden = true;
-  activeQOpts = qOptsEl;
-  renderQOpts(qOptsEl, qFootEl);
-  renderQCustom(qCustomRowEl, qCustomEl);
-}
-
-function toggleQ(i) {
-  const n = i + 1;
-  if (qChosen.has(n)) qChosen.delete(n);
-  else qChosen.add(n);
-  paintQOptions();
-}
-
-function activateQ() {
-  if (qData.multiSelect) toggleQ(qSel);
-  else submitQ();
-}
-
-// Записать выбор текущего вопроса и пойти дальше (или отправить весь опрос).
-// В single-select свой текст приоритетен (это выбор строки Other), в
-// multiSelect он добавляется к тогглам — логика в JarvisQuestionAnswer.
-function commitCurrentQ() {
-  const res = JarvisQuestionAnswer.commitRow({
-    multiSelect: qData.multiSelect,
-    chosen: qChosen,
-    sel: qSel,
-    text: activeQCustom ? activeQCustom.value : qTexts[qIdx],
-  });
-  if (!res) { showToast('Отметь хотя бы один вариант'); return false; }
-  qAnswers[qIdx] = res.row;
-  qTexts[qIdx] = res.text;
+function beginQ(s) {
+  if (!s?.question?.questions?.length) return false;
+  saveQDraft();
+  qSessionId = s.id; qRequest = s.question; qItems = qRequest.questions;
+  qDraft = qDrafts.get(s.id, qRequest); qIdx = Math.min(qDraft.index, qItems.length - 1);
+  qAnswers = qDraft.answers; qTexts = qDraft.texts; qReview = qDraft.review;
+  qMessage = qDraft.message; qUnknown = qDraft.unknown; qPending = !!qDraft.pending; loadQ();
   return true;
 }
-
-function advanceQ() {
-  if (qIdx + 1 < qItems.length) {
-    qIdx += 1;
-    loadQ();
-    if (varOpen) renderVarPanel(curSession()); else renderQuestion();
+function openQuestion(s) {
+  if (!beginQ(s)) return;
+  setView('question'); render(); renderQuestion();
+  qOptsEl.focus();
+}
+function questionWritable() { return !['external', 'codex-rpc'].includes(qRequest?.transport); }
+function paintQOptions() {
+  for (const [i, btn] of [...activeQOpts.querySelectorAll('.qopt')].entries()) {
+    const custom = qData?.customMode !== 'notes' && JarvisQuestionAnswer.normalizeText(qTexts[qIdx]);
+    const chosen = qData?.multiSelect ? qChosen.has(i + 1) : !custom && i === qSel;
+    btn.classList.toggle('sel', i === qSel); btn.classList.toggle('chosen', chosen);
+    btn.setAttribute('aria-checked', String(chosen));
+    btn.tabIndex = i === qSel ? 0 : -1;
+  }
+  activeQOpts.querySelectorAll('.qopt')[qSel]?.scrollIntoView({ block: 'nearest' });
+}
+function questionError(text) { qMessage = text; saveQDraft(); paintQStatus(); }
+function paintQStatus() {
+  const foot = varOpen ? qpFootEl : qFootEl;
+  const status = foot.querySelector('.q-status');
+  if (status) status.textContent = qPending ? 'Отправляю · жду подтверждения агента…' : qMessage;
+  foot.querySelectorAll('button[data-q-submit]').forEach(b => { b.disabled = qPending || qUnknown || !questionWritable(); });
+  activeQOpts.querySelectorAll('button').forEach(b => { b.disabled = qPending || qUnknown; });
+  if (activeQCustom) activeQCustom.disabled = qPending || qUnknown;
+}
+function renderQOpts(optsEl, footEl) {
+  optsEl.replaceChildren(); optsEl.tabIndex = 0;
+  optsEl.setAttribute('role', qReview ? 'group' : qData.multiSelect ? 'group' : 'radiogroup');
+  optsEl.setAttribute('aria-label', qReview ? 'Проверка ответов' : qData.question);
+  if (qReview) {
+    qItems.forEach((item, index) => {
+      const row = document.createElement('div'); row.className = 'q-review-row';
+      const title = document.createElement('strong'); title.textContent = item.header || item.question;
+      const answer = document.createElement('div'); answer.className = 'q-review-answer';
+      const labels = (qAnswers[index] || []).map(n => item.options[n - 1]?.label).filter(Boolean);
+      if (qTexts[index]?.trim()) labels.push(item.isSecret ? '••••••••' : qTexts[index].trim());
+      answer.textContent = labels.join('\n');
+      const edit = document.createElement('button'); edit.className = 'q-edit'; edit.textContent = 'Изменить'; edit.disabled = qPending;
+      edit.addEventListener('click', () => { qReview = false; qIdx = index; loadQ(); saveQDraft(); redrawQ(); });
+      row.append(title, answer, edit); optsEl.append(row);
+    });
   } else {
-    finalizeQ();
+    qData.options.forEach((o, i) => {
+      const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'qopt';
+      btn.setAttribute('role', qData.multiSelect ? 'checkbox' : 'radio');
+      const num = document.createElement('span'); num.className = 'qnum'; num.textContent = String(i + 1);
+      const body = document.createElement('span'); body.className = 'qbody';
+      const label = document.createElement('span'); label.className = 'qlabel'; label.textContent = o.label; body.append(label);
+      if (o.description) { const desc = document.createElement('span'); desc.className = 'qdesc'; desc.textContent = o.description; body.append(desc); }
+      btn.append(num, body);
+      if (qData.multiSelect) { const ck = document.createElement('span'); ck.className = 'qcheck'; ck.textContent = '✓'; btn.append(ck); }
+      btn.addEventListener('focus', () => { qSel = i; paintQOptions(); });
+      btn.addEventListener('click', () => { if (qPending || qUnknown) return; qSel = i; activateQ(); });
+      optsEl.append(btn);
+    });
+    paintQOptions();
+  }
+  footEl.replaceChildren();
+  const status = document.createElement('div'); status.className = 'q-status'; status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+  const controls = document.createElement('div'); controls.className = 'q-controls';
+  if (qReview || qIdx > 0) {
+    const back = document.createElement('button'); back.className = 'q-secondary'; back.textContent = 'Назад'; back.disabled = qPending;
+    back.addEventListener('click', backQ); controls.append(back);
+  }
+  const hint = document.createElement('span'); hint.className = 'q-key-hint';
+  hint.textContent = qReview ? '⌘/Ctrl + Enter — отправить' : '↑↓ — вариант · пробел — выбрать · Esc — назад';
+  controls.append(hint);
+  const send = document.createElement('button'); send.className = 'q-primary'; send.dataset.qSubmit = 'true';
+  send.textContent = qReview ? 'Отправить ответы' : qIdx + 1 < qItems.length ? 'Далее' : 'Проверить ответы';
+  send.addEventListener('click', submitQ); controls.append(send);
+  footEl.append(status, controls);
+  if (!questionWritable()) {
+    qMessage = 'Вопрос открыт в Codex. Ответь в приложении агента; твой черновик остаётся здесь.';
+    const open = document.createElement('button'); open.className = 'q-secondary'; open.textContent = 'Открыть в Codex';
+    open.addEventListener('click', () => focusTerminal(qSessionId, state.find(s => s.id === qSessionId)?.project)); controls.append(open);
   }
 }
-
+function renderQCustom(rowEl, inputEl) {
+  const s = state.find(x => x.id === qSessionId);
+  rowEl.hidden = qReview || !JarvisQuestionAnswer.customAllowed(s?.agent, qData, qRequest);
+  if (inputEl.value !== (qTexts[qIdx] || '')) inputEl.value = qTexts[qIdx] || '';
+  inputEl.placeholder = qData?.customMode === 'notes' ? 'Пояснение к выбранному варианту…' : 'Свой ответ…';
+  inputEl.setAttribute('aria-label', inputEl.placeholder);
+  inputEl.classList.toggle('q-secret', !!qData?.isSecret);
+  inputEl.setAttribute('autocomplete', 'off');
+  activeQCustom = rowEl.hidden ? null : inputEl;
+  paintQStatus();
+}
+function renderQuestion() {
+  if (!qData) return;
+  qHeaderEl.textContent = qData.header || ''; qHeaderEl.hidden = !qData.header;
+  qTitleEl.textContent = qReview ? 'Проверь ответы перед отправкой' : qData.question;
+  const prog = document.getElementById('qProgress'); prog.textContent = qReview ? 'Проверка' : `${qIdx + 1} / ${qItems.length}`; prog.hidden = false;
+  activeQOpts = qOptsEl; renderQOpts(qOptsEl, qFootEl); renderQCustom(qCustomRowEl, qCustomEl);
+}
+function redrawQ() { if (varOpen) renderVarPanel(curSession()); else renderQuestion(); }
+function toggleQ(i) {
+  if (qPending || qUnknown || qReview || !qData.options[i]) return;
+  const n = i + 1; if (qChosen.has(n)) qChosen.delete(n); else qChosen.add(n);
+  qAnswers[qIdx] = [...qChosen]; saveQDraft(); paintQOptions();
+}
+function activateQ() {
+  if (!qData?.options[qSel]) return;
+  if (qData.multiSelect) toggleQ(qSel);
+  else {
+    // Selecting a predefined answer intentionally switches away from Other.
+    if (qData.customMode !== 'notes') { qTexts[qIdx] = ''; if (activeQCustom) activeQCustom.value = ''; }
+    qAnswers[qIdx] = [qSel + 1]; saveQDraft(); paintQOptions();
+  }
+}
+function commitCurrentQ() {
+  const res = JarvisQuestionAnswer.commitRow({ multiSelect: qData.multiSelect, chosen: qChosen, sel: qSel,
+    text: activeQCustom ? activeQCustom.value : qTexts[qIdx], customMode: qData.customMode, optionCount: qData.options.length });
+  if (!res) { questionError('Выбери вариант или напиши ответ.'); return false; }
+  qAnswers[qIdx] = res.row; qTexts[qIdx] = res.text || ''; qMessage = ''; saveQDraft(); return true;
+}
+function advanceQ() {
+  if (qIdx + 1 < qItems.length) { qIdx++; loadQ(); } else qReview = true;
+  saveQDraft(); redrawQ();
+}
+function backQ() {
+  if (qPending) return;
+  saveQDraft();
+  if (qReview) qReview = false;
+  else if (qIdx > 0) { qIdx--; loadQ(); }
+  else { if (varOpen) closeVarPanel(); else goBack(); return; }
+  saveQDraft(); redrawQ();
+}
 async function finalizeQ() {
-  const sid = qSessionId;
-  const payload = JarvisQuestionAnswer.buildPayload(qAnswers, qTexts);
-  const res = await window.jarvis.answerQuestion(sid, payload);
-  if (res.ok) {
-    if (varOpen) closeVarPanel();
-    else { setView('list'); render(); }
-  } else showToast(res.error || 'Не удалось ответить');
+  if (qPending || qUnknown || !qRequest || !questionWritable()) return;
+  const sid = qSessionId, request = qRequest, draft = qDraft;
+  const payload = JarvisQuestionAnswer.buildPayload(qAnswers, qTexts, request, draft.submissionId);
+  qPending = true; draft.pending = true; qMessage = ''; paintQStatus();
+  try {
+    const res = await window.jarvis.answerQuestion(sid, payload);
+    draft.pending = false;
+    draft.unknown = res.delivery === 'unknown' || res.delivery === 'sending' || (res.ok && res.delivery !== 'confirmed');
+    draft.message = res.error || (draft.unknown ? 'Агент ещё не подтвердил ответ. Проверь терминал.' : '');
+    if (res.ok && res.delivery === 'confirmed') qDrafts.delete(sid, request);
+    if (qRequest !== request || qSessionId !== sid) return;
+    if (res.ok && res.delivery === 'confirmed') {
+      qDrafts.delete(sid, request); qDraft = null;
+      if (varOpen) closeVarPanel(); else { setView('list'); render(); }
+    } else {
+      qUnknown = res.delivery === 'unknown' || res.delivery === 'sending' || res.ok;
+      questionError(res.error || 'Агент ещё не подтвердил ответ. Проверь терминал.');
+    }
+  } catch (error) {
+    draft.unknown = true; draft.message = 'Связь прервалась. Ответ мог дойти; проверь терминал. Черновик сохранён.';
+    if (qRequest === request) { qUnknown = true; questionError(draft.message); }
+  } finally { draft.pending = false; if (qRequest === request) { qPending = false; saveQDraft(); paintQStatus(); } }
 }
-
-// Совместимость с существующими обработчиками (Enter / кнопка «Отправить»).
 function submitQ() {
-  if (commitCurrentQ()) advanceQ();
+  if (qPending || qUnknown) return;
+  if (qReview) finalizeQ(); else if (commitCurrentQ()) advanceQ();
 }
+document.getElementById('qBack').addEventListener('click', backQ);
 
-document.getElementById('qBack').addEventListener('click', () => { setView('list'); render(); });
-
-async function openChat(sessionId, project) {
-  const res = await window.jarvis.openChat(sessionId);
-  if (!res.ok) { showToast(res.error || 'Не удалось открыть чат'); return; }
+async function openChat(sessionId, project, navigationOptions = {}) {
+  if (view === 'chat') window.jarvisSessionWorkspace?.saveDraft(chatSessionId, replyEl.value, pendingImages);
+  const fromRoute = routeSnapshot();
+  const request = ++chatOpenSequence;
+  pendingChat = { sessionId, items: [] };
   chatSessionId = sessionId;
-  chatTitleEl.textContent = res.project || project || '';
+  const openedSession = state.find(s => s.id === sessionId);
+  chatTitleEl.textContent = window.JarvisSessionState?.titleOf(openedSession || { project }) || openedSession?.title || project || 'Чат';
+  chatTitleEl.title = chatTitleEl.textContent;
   boardExpanded = 0;
   closeBoard(); // доска прошлого чата не должна оставаться открытой
   closeVarPanel(); // и слайд-овер вариантов прошлого чата
@@ -1328,20 +1515,45 @@ async function openChat(sessionId, project) {
   toolsGroup = null;
   curTurn = null;
   turnFacts.clear();
-  chatLlmOk = !!res.llm;
+  chatLlmOk = false;
   chatlogEl.classList.toggle('sum', summaryModeOn());
-  pendingReplies = []; // оптимистичные реплики прошлого чата не тащим в новый
-  replyEl.value = ''; // черновик прошлого чата не должен уехать в этот
+  restorePendingReplies(); // исходящие сообщения принадлежат сессии, а не открытому экрану
+  const savedDraft = window.jarvisSessionWorkspace?.draft(sessionId);
+  replyEl.value = savedDraft?.text || '';
   autoGrowReply();
-  pendingImages = []; // и вставленные картинки прошлого чата тоже не тащим
+  pendingImages = savedDraft?.images?.slice() || [];
   renderAttachments();
   hidePalette();
   loadCommands();
-  setView('chat');
+  setView('chat', { fromRoute, ...navigationOptions });
+  if (navigationOptions.restore?.draft) { replyEl.value = navigationOptions.restore.draft; autoGrowReply(); }
   // В оконном режиме список стоит рядом: выделение должно переехать на
   // открытый чат сейчас, а не со следующим пушем состояния.
   render();
   replyEl.focus();
+  const loading = window.JarvisAsyncState.skeleton('history', 'Загружаем историю…');
+  chatlogEl.setAttribute('aria-busy', 'true'); chatlogEl.append(loading);
+  const slow = setTimeout(() => { if (request === chatOpenSequence && pendingChat) loading.append(window.JarvisAsyncState.message({ title: 'История загружается дольше обычного', detail: 'Можно открыть другой чат — загрузка не блокирует навигацию.' })); }, 8000);
+  let res;
+  try {
+    for (let attempt = 0; attempt < 30; attempt++) {
+      if (request !== chatOpenSequence) { clearTimeout(slow); return; }
+      res = await window.jarvis.openChat(sessionId);
+      if (!res.retryable) break;
+      loading.setAttribute('aria-label', res.error || 'Ждём историю новой сессии…');
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  } catch (error) { res = { ok: false, error: String(error) }; }
+  clearTimeout(slow);
+  if (request !== chatOpenSequence) return;
+  chatlogEl.setAttribute('aria-busy', 'false');
+  const earlyItems = pendingChat?.items || []; pendingChat = null;
+  gateReply(curSession()); window.jarvisSessionWorkspace?.composerChanged();
+  if (!res.ok) {
+    loading.replaceWith(window.JarvisAsyncState.message({ title: 'Не удалось загрузить историю', detail: res.error || 'Проверь подключение и повтори попытку.', kind: 'error', action: 'Повторить', onAction: () => openChat(sessionId, project) }));
+    return;
+  }
+  loading.remove(); chatLlmOk = !!res.llm;
   if (res.items.length) {
     appendChatItems(res.items);
     const sess = state.find((x) => x.id === chatSessionId);
@@ -1358,15 +1570,18 @@ async function openChat(sessionId, project) {
       applyCard(sp.key, card);
     }
     chatlogEl.scrollTop = chatlogEl.scrollHeight;
-  } else {
-    const empty = document.createElement('div');
-    empty.className = 'chatempty';
-    empty.textContent = 'Пока пусто — новые реплики появятся здесь по мере работы агента.';
+  } else if (!pendingFor(sessionId).length && !earlyItems.length) {
+    const waiting = curSession()?.status === 'working';
+    const empty = window.JarvisAsyncState.message({ title: waiting ? 'Синхронизируем сообщения…' : 'В этом чате пока нет сообщений', detail: waiting ? 'Агент работает. История появится после синхронизации.' : curSession()?.controlMode === 'external' ? 'История появится после синхронизации с агентом.' : 'Напиши задачу или прикрепи файл, чтобы начать.', action: !waiting && curSession()?.tmuxPane ? 'Написать сообщение' : null, onAction: () => replyEl.focus() });
+    empty.classList.add('chatempty');
     chatlogEl.appendChild(empty);
   }
+  if (earlyItems.length) appendChatItems(earlyItems);
+  restorePendingReplies();
 }
 
 window.jarvis.onChatAppend(({ sessionId, items }) => {
+  if (pendingChat?.sessionId === sessionId) { pendingChat.items.push(...items); return; }
   if (view === 'chat' && sessionId === chatSessionId) appendChatItems(items);
 });
 
@@ -1374,7 +1589,7 @@ window.jarvis.onChatSummary(({ sessionId, turnKey, card }) => {
   if (view === 'chat' && sessionId === chatSessionId) applyCard(turnKey, card);
 });
 
-document.getElementById('chatBack').addEventListener('click', () => { closeBoard(); setView('list'); render(); });
+document.getElementById('chatBack').addEventListener('click', () => { closeBoard(); goBack(); });
 
 /* ---------- доска задач (инкремент 6) ----------
  * ГРАНИЦА: панель ЧИТАЕТ доску из состояния сессии (источник — оркестратор) и
@@ -1436,6 +1651,7 @@ document.getElementById('tpClose').addEventListener('click', closeBoard);
 document.getElementById('taskScrim').addEventListener('click', closeBoard);
 // Esc закрывает доску раньше, чем сработает «назад» (capture-фаза)
 window.addEventListener('keydown', (e) => {
+  if (window.jarvisShortcutRecording || !document.getElementById('commandDialog').hidden) return;
   if (e.key === 'Escape' && boardOpen) { e.preventDefault(); e.stopImmediatePropagation(); closeBoard(); }
 }, true);
 
@@ -1462,48 +1678,37 @@ function renderVarBtn(s) {
   if (!q) { varBtn.hidden = true; if (varOpen) closeVarPanel(); return; }
   varBtn.hidden = false;
   const n = q.options.length;
-  varBtnLabel.textContent = `${n} ${plural(n, 'вариант', 'варианта', 'вариантов')}`;
+  const count = s.question.questions.length;
+  varBtnLabel.textContent = count > 1 ? `${count} ${plural(count, 'вопрос', 'вопроса', 'вопросов')}` : n ? `${n} ${plural(n, 'вариант', 'варианта', 'вариантов')}` : 'Написать ответ';
   varBtn.classList.toggle('open', varOpen);
   if (varOpen) renderVarPanel(s);
 }
 
 function renderVarPanel(s) {
-  const q = qItems[qIdx];
-  if (!q) { closeVarPanel(); return; }
-  qData = q;
-  const prog = qItems.length > 1 ? ` (${qIdx + 1}/${qItems.length})` : '';
-  qpHeaderEl.textContent = (q.header || '') + prog;
-  qpHeaderEl.hidden = !q.header && !prog;
-  qpTitleEl.textContent = q.question;
-  activeQOpts = qpOptsEl;
-  renderQOpts(qpOptsEl, qpFootEl);
-  renderQCustom(qpCustomRowEl, qpCustomEl);
-  if (q.multiSelect) { // мульти-выбор: клик-сабмит (на полноэкранном экране это Enter)
-    const send = document.createElement('button');
-    send.className = 'qp-send';
-    send.textContent = qIdx + 1 < qItems.length ? 'Далее' : 'Отправить';
-    send.addEventListener('click', submitQ);
-    qpFootEl.appendChild(send);
+  if (!qData || !qRequest) { closeVarPanel(); return; }
+  const current = s?.question;
+  if (current && JarvisQuestionAnswer.draftKey(s.id, current) !== JarvisQuestionAnswer.draftKey(qSessionId, qRequest)) {
+    if (qPending) return;
+    beginQ(s); qMessage = 'Агент задал новый вопрос. Предыдущий черновик сохранён.';
   }
+  qpHeaderEl.textContent = qReview ? 'Проверка' : `${qIdx + 1} / ${qItems.length}`; qpHeaderEl.hidden = false;
+  qpTitleEl.textContent = qReview ? 'Проверь ответы перед отправкой' : qData.question;
+  activeQOpts = qpOptsEl;
+  // State heartbeats must not rebuild the focused textarea or option controls.
+  const key = JSON.stringify([JarvisQuestionAnswer.draftKey(qSessionId, qRequest), qIdx, qReview]);
+  if (qpOptsEl.dataset.questionRender !== key) {
+    qpOptsEl.dataset.questionRender = key;
+    renderQOpts(qpOptsEl, qpFootEl); renderQCustom(qpCustomRowEl, qpCustomEl);
+  } else paintQStatus();
 }
-
 function openVarPanel() {
-  const s = curSession();
-  if (!s || !s.question || !s.question.questions || !s.question.questions.length) return;
-  qSessionId = s.id;
-  qItems = s.question.questions;
-  qIdx = 0;
-  qAnswers = qItems.map(() => []);
-  qTexts = qItems.map(() => null);
-  loadQ();
-  varOpen = true;
-  qWrap.hidden = false;
-  varBtn.classList.add('open');
-  replyEl.blur?.(); // освобождаем поле ввода — клавиши уходят пикеру
-  renderVarPanel(s);
+  if (!beginQ(curSession())) return;
+  varOpen = true; qWrap.hidden = false; varBtn.classList.add('open'); replyEl.blur();
+  delete qpOptsEl.dataset.questionRender; renderVarPanel(curSession()); qpOptsEl.focus();
 }
 
 function closeVarPanel() {
+  saveQDraft();
   varOpen = false;
   qWrap.hidden = true;
   varBtn.classList.remove('open');
@@ -1518,24 +1723,26 @@ document.getElementById('qScrim').addEventListener('click', closeVarPanel);
 // пикера (stopPropagation режет window-обработчики); Enter — отправить,
 // Esc — вернуть клавиши пикеру.
 for (const el of [qCustomEl, qpCustomEl]) {
-  el.addEventListener('input', () => { qTexts[qIdx] = JarvisQuestionAnswer.normalizeText(el.value); });
+  el.addEventListener('input', () => { qTexts[qIdx] = el.value; saveQDraft(); paintQOptions(); });
   el.addEventListener('keydown', (e) => {
     e.stopPropagation();
-    if (e.key === 'Enter') { e.preventDefault(); submitQ(); }
-    else if (e.key === 'Escape') { e.preventDefault(); el.blur(); }
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.isComposing) { e.preventDefault(); submitQ(); }
+    else if (e.key === 'Escape') { e.preventDefault(); el.blur(); activeQOpts.focus(); }
   });
 }
 
 // Клавиатура слайд-овера — capture-фаза, чтобы перехватить раньше обработчиков чата
 window.addEventListener('keydown', (e) => {
+  if (window.jarvisShortcutRecording || !document.getElementById('commandDialog').hidden) return;
   if (!varOpen) return;
   if (e.target === qpCustomEl || e.target === qCustomEl) return; // печать в «Свой ответ» — клавиши полю
-  if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); closeVarPanel(); return; }
-  if (!qData) return;
+  if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); backQ(); return; }
+  if (!qData || qPending || qUnknown) return;
   const stop = () => { e.preventDefault(); e.stopImmediatePropagation(); };
+  if (qReview) { if (e.key === 'Enter') { stop(); submitQ(); } return; }
   if (e.key === 'ArrowDown') { stop(); qSel = Math.min(qData.options.length - 1, qSel + 1); paintQOptions(); return; }
   if (e.key === 'ArrowUp') { stop(); qSel = Math.max(0, qSel - 1); paintQOptions(); return; }
-  if (e.key === ' ') { stop(); if (qData.multiSelect) toggleQ(qSel); return; }
+  if (e.key === ' ') { stop(); activateQ(); return; }
   if (e.key === 'Enter') { stop(); submitQ(); return; }
   if (/^[1-9]$/.test(e.key)) {
     const n = Number(e.key);
@@ -1575,7 +1782,12 @@ function docSelectTab(tab) {
   docDiffLabelEl.textContent = diff ? docDiffLabelEl.dataset.label || '' : '';
 }
 
-async function openDocViewer(path, kind) {
+function openDocViewer(path, kind) {
+  const sessionId=chatSessionId;
+  window.JarvisArtifacts.open({sessionId,path,source:curSession()?.remote || 'Этот компьютер',
+    changes: !curSession()?.remote && kind === 'edited' ? async () => { await openChat(sessionId); openLegacyDocViewer(path,kind); } : null });
+}
+async function openLegacyDocViewer(path, kind) {
   const res = await window.jarvis.readFile(chatSessionId, path);
   if (!res || !res.ok) { showToast((res && res.error) || 'Не удалось открыть файл'); return; }
   docPath = path;
@@ -1646,6 +1858,7 @@ if (changesBtn) changesBtn.addEventListener('click', () => (chgOpen ? closeChang
 document.getElementById('chgClose')?.addEventListener('click', closeChanges);
 document.getElementById('chgScrim')?.addEventListener('click', closeChanges);
 window.addEventListener('keydown', (e) => {
+  if (window.jarvisShortcutRecording || !document.getElementById('commandDialog').hidden) return;
   if (e.key === 'Escape' && chgOpen) { e.preventDefault(); e.stopImmediatePropagation(); closeChanges(); }
 }, true);
 
@@ -1695,6 +1908,7 @@ if (searchBtn) searchBtn.addEventListener('click', () => (srchOpen ? closeSearch
 document.getElementById('srchClose')?.addEventListener('click', closeSearch);
 document.getElementById('srchScrim')?.addEventListener('click', closeSearch);
 window.addEventListener('keydown', (e) => {
+  if (window.jarvisShortcutRecording || !document.getElementById('commandDialog').hidden) return;
   if (e.key === 'Escape' && srchOpen) { e.preventDefault(); e.stopImmediatePropagation(); closeSearch(); }
 }, true);
 
@@ -1721,6 +1935,7 @@ document.getElementById('docFinder').addEventListener('click', async () => {
 });
 // Esc закрывает вьюер раньше «назад» чата (capture, как доска/варианты)
 window.addEventListener('keydown', (e) => {
+  if (window.jarvisShortcutRecording || !document.getElementById('commandDialog').hidden) return;
   if (e.key === 'Escape' && docOpen) { e.preventDefault(); e.stopImmediatePropagation(); closeDocViewer(); }
 }, true);
 // внешние http(s)-ссылки дока: настоящих href нет (навигация вебвью запрещена),
@@ -1754,7 +1969,7 @@ function tpStatusIcon(status) {
 // правый текст строки: модель · время / статус
 function tpRight(t, stopped) {
   const parts = [];
-  if (t.model) parts.push(t.model);
+  if (visibleModel(t.model)) parts.push(visibleModel(t.model));
   if (t.status === 'completed' && t.durMs != null) parts.push(fmtDur(t.durMs));
   else if (t.status === 'in_progress') parts.push(stopped ? 'прервано' : (t.startedAt ? fmtDur(Date.now() - t.startedAt) : 'идёт'));
   else if (t.status === 'interrupted') parts.push('прервано');
@@ -1847,7 +2062,7 @@ function renderBoardPanel(s, b) {
     tpStripEl.appendChild(lab);
     const parts = subs.slice(0, 5).map((sa) => {
       const seg = [sa.kind || sa.name];
-      if (sa.model) seg.push(sa.model);
+      if (visibleModel(sa.model)) seg.push(visibleModel(sa.model));
       const dur = sa.stoppedAt ? sa.stoppedAt - sa.startedAt : Date.now() - sa.startedAt;
       seg.push(fmtDur(dur) + (sa.stoppedAt ? '' : '…'));
       return seg.join(' · ');
@@ -1931,8 +2146,9 @@ function buildCmdItems(q) {
 // пикер значений модели/effort вместо интерактивного слайдера TUI
 function buildValuePicker(kind) {
   const s = curSession();
+  if (!window.jarvisSessionWorkspace?.capabilities(s).canConfigure) { hidePalette(); return; }
   if (kind === 'model') {
-    const cur = ((s && s.model) || '').toLowerCase();
+    const cur = visibleModel(s?.model).toLowerCase();
     paletteItems = modelsFor(s && s.agent).map(([val, label]) => ({
       name: label, desc: 'модель сессии', active: cur === label.toLowerCase(),
       apply: () => applyValue('setModel', val),
@@ -1951,7 +2167,7 @@ function buildValuePicker(kind) {
 }
 
 async function applyValue(method, val) {
-  if (!chatSessionId) return;
+  if (!chatSessionId || !window.jarvisSessionWorkspace?.capabilities(curSession()).canConfigure) return;
   const res = await window.jarvis[method](chatSessionId, val);
   replyEl.value = '';
   autoGrowReply();
@@ -2030,46 +2246,42 @@ function completeCommand(c) {
 
 /* ---------- отправка ответа: tmux-вставка или claude -p --resume ---------- */
 
-let sending = false;
+const sendingSessions = new Set();
 async function sendReplyNow() {
-  const text = replyEl.value.trim();
-  const imgs = pendingImages.slice();
-  if ((!text && !imgs.length) || sending || !chatSessionId) return;
-  sending = true;
-  replyEl.disabled = true;
+  const text = replyEl.value.trim(), imgs = pendingImages.slice();
+  const targetId = chatSessionId, target = curSession();
+  if (pendingImages.some(file => file.loading) || (!text && !imgs.length) || sendingSessions.has(targetId) || !targetId || !target?.tmuxPane || target.controlMode === 'external' || replyEl.disabled) return;
+  if (window.jarvisSessionWorkspace && !window.jarvisSessionWorkspace.connectionReady()) { showToast('Нет связи с машиной. Черновик сохранён; повтори отправку после подключения.'); return; }
+  sendingSessions.add(targetId);
+  const pending = appendPendingReply(text, false, targetId, text, imgs);
+  const status = pending.el.querySelector('.msg-status');
+  const showDelivery = (text, kind = 'loading') => { window.JarvisAsyncState.status(status, text, kind); deliveryStates.set(targetId, { text, kind }); window.jarvisSessionWorkspace?.composerChanged(); };
+  showDelivery(imgs.length ? 'Загружаем вложения…' : 'Отправляем…');
+  replyEl.value = ''; pendingImages = []; autoGrowReply(); renderAttachments();
+  window.jarvisSessionWorkspace?.saveDraft(targetId, '', []);
+  gateReply(target); window.jarvisSessionWorkspace?.composerChanged();
   try {
-    // Картинки → временные файлы (параллельно); их абсолютные пути уходят агенту
-    // в промпте (Claude/Codex читают путь и подгружают картинку), каждый с новой строки.
-    const results = await Promise.all(imgs.map((im) =>
-      window.jarvis.saveImage(im.dataUrl.slice(im.dataUrl.indexOf(',') + 1), im.ext).catch(() => null)
-    ));
-    const paths = [];
-    for (const r of results) {
-      if (r && r.ok && r.path) paths.push(r.path);
-      else showToast((r && r.error) || 'Не удалось сохранить картинку');
+    const paths = await window.JarvisAttachments.save(imgs, target.remote, (done, total) => showDelivery(`Загружено файлов: ${done} из ${total}`));
+    const finalText = window.JarvisAttachments.prompt(text, paths);
+    pending.text = finalText.trim();
+    showDelivery('Отправляем…');
+    const res = await window.jarvis.sendReply(targetId, finalText);
+    if (!res.ok) throw new Error(res.error || (res.needsTmux ? 'Сессия вне tmux' : 'Не удалось отправить'));
+    showDelivery(res.queued ? 'В очереди — агент прочитает после текущей задачи' : 'Отправлено', 'success');
+  } catch (error) {
+    removePending(pending);
+    const draft = window.jarvisSessionWorkspace?.draft(targetId);
+    window.jarvisSessionWorkspace?.saveDraft(targetId, [text, draft?.text].filter(Boolean).join('\n'), [...imgs, ...(draft?.images || [])]);
+    if (chatSessionId === targetId) {
+      replyEl.value = [text, replyEl.value].filter(Boolean).join('\n'); pendingImages = [...imgs, ...pendingImages];
+      autoGrowReply(); renderAttachments();
     }
-    // Любой сбой сохранения — не отправляем ничего: частичная отправка молча
-    // теряла бы упавшие картинки (их base64 живёт только в pendingImages).
-    // Текст и миниатюры остаются в поле — можно убрать битую картинку (×) и повторить.
-    if (paths.length < imgs.length) return;
-    const finalText = paths.length ? (text ? text + '\n' : '') + paths.join('\n') : text;
-
-    const res = await window.jarvis.sendReply(chatSessionId, finalText);
-    if (res.ok) {
-      replyEl.value = '';
-      autoGrowReply();
-      pendingImages = [];
-      renderAttachments();
-      appendPendingReply(finalText, !!res.queued); // сразу видно в ленте (снимется эхом из транскрипта)
-    } else if (res.needsTmux) {
-      showToast('Сессия вне tmux — запусти команду из подсказки ниже');
-    } else {
-      showToast(res.error || 'Не удалось отправить');
-    }
+    deliveryStates.set(targetId, { kind: 'error', text: String(error?.message || error) });
+    showToast('Не удалось отправить: ' + String(error?.message || error));
   } finally {
-    sending = false;
-    replyEl.disabled = false;
-    replyEl.focus();
+    sendingSessions.delete(targetId);
+    gateReply(curSession()); window.jarvisSessionWorkspace?.composerChanged();
+    if (chatSessionId === targetId) replyEl.focus();
   }
 }
 
@@ -2102,59 +2314,35 @@ function extFromType(type) {
 }
 
 function renderAttachments() {
-  chatAttachEl.textContent = '';
-  chatAttachEl.hidden = pendingImages.length === 0;
-  for (const im of pendingImages) {
-    const thumb = document.createElement('div');
-    thumb.className = 'thumb';
-    const img = document.createElement('img');
-    img.src = im.dataUrl;
-    img.alt = 'вставленная картинка';
-    thumb.appendChild(img);
-    const rm = document.createElement('button');
-    rm.className = 'rm';
-    rm.type = 'button';
-    rm.title = 'Убрать';
-    rm.textContent = '×';
-    rm.addEventListener('click', () => removePendingImage(im.id));
-    thumb.appendChild(rm);
-    chatAttachEl.appendChild(thumb);
+  window.JarvisAttachments.render(chatAttachEl, pendingImages, id => {
+    pendingImages = pendingImages.filter(im => im.id !== id); renderAttachments();
+  });
+  window.jarvisSessionWorkspace?.composerChanged();
+}
+async function addPendingImage(file) {
+  const targetId = chatSessionId;
+  if (replyEl.disabled || pendingImages.length >= MAX_IMAGES) { showToast(`Не больше ${MAX_IMAGES} файлов`); return; }
+  const placeholder = { id: 'reading-' + attachSeq++, name: file.name || 'Изображение', loading: true };
+  pendingImages.push(placeholder); renderAttachments();
+  function replaceFile(attachment) {
+    const draft = chatSessionId === targetId ? { text: replyEl.value, images: pendingImages } : window.jarvisSessionWorkspace?.draft(targetId);
+    if (!draft) return;
+    const images = draft.images.flatMap(image => image.id === placeholder.id ? (attachment ? [attachment] : []) : [image]);
+    if (chatSessionId === targetId) { pendingImages = images; renderAttachments(); }
+    window.jarvisSessionWorkspace?.saveDraft(targetId, draft.text, images);
   }
+  try {
+    const attachment = await window.JarvisAttachments.read(file);
+    replaceFile(attachment);
+  } catch (error) { replaceFile(null); deliveryStates.set(targetId, { kind: 'error', title: 'Не удалось прочитать файл', text: error.message + '. Прикрепи файл ещё раз' }); showToast(error.message); }
+  finally { window.jarvisSessionWorkspace?.composerChanged(); }
 }
+window.JarvisAttachments.bind(chatEl.querySelector('.chatinput'), addPendingImage);
 
-function removePendingImage(id) {
-  pendingImages = pendingImages.filter((im) => im.id !== id);
-  renderAttachments();
-}
-
-function addPendingImage(file) {
-  if (pendingImages.length >= MAX_IMAGES) { showToast(`Не больше ${MAX_IMAGES} картинок`); return; }
-  const reader = new FileReader();
-  reader.onload = () => {
-    // повторная проверка лимита: push асинхронный, и один paste с пачкой файлов
-    // проходил бы синхронную проверку выше весь целиком
-    if (pendingImages.length >= MAX_IMAGES) { showToast(`Не больше ${MAX_IMAGES} картинок`); return; }
-    const dataUrl = String(reader.result || '');
-    const comma = dataUrl.indexOf(',');
-    if (comma < 0) return;
-    pendingImages.push({ id: 'att' + (attachSeq++), ext: extFromType(file.type), dataUrl });
-    renderAttachments();
-  };
-  reader.readAsDataURL(file);
-}
-
-replyEl.addEventListener('paste', (e) => {
-  const items = e.clipboardData && e.clipboardData.items;
-  if (!items) return;
-  const files = [...items].filter((it) => it.kind === 'file' && it.type.startsWith('image/'));
-  if (!files.length) return; // обычный текстовый пейст — не вмешиваемся
-  e.preventDefault();
-  for (const it of files) { const f = it.getAsFile(); if (f) addPendingImage(f); }
-});
-
-replyEl.addEventListener('input', () => { autoGrowReply(); refreshPalette(); });
+replyEl.addEventListener('input', () => { if (deliveryStates.get(chatSessionId)?.kind !== 'loading') deliveryStates.delete(chatSessionId); autoGrowReply(); refreshPalette(); window.jarvisSessionWorkspace?.composerChanged(); });
 
 replyEl.addEventListener('keydown', (e) => {
+  if (e.isComposing || e.keyCode === 229) return;
   if (isMod(e)) return; // ⌘↵ — в терминал, обрабатывается глобально
   if (paletteOpen()) {
     if (e.key === 'ArrowDown') { e.preventDefault(); e.stopPropagation(); cmdSel = Math.min(paletteItems.length - 1, cmdSel + 1); paintPalette(); return; }
@@ -2194,15 +2382,30 @@ async function focusTerminal(sessionId, project) {
 /* ---------- состояние от демона ---------- */
 
 window.jarvis.onState((list) => {
+  stateReceived = true; sessionsLoadState = 'ready'; sessionsLoadError = '';
   state = list;
   render();
   if (view === 'chat') updateChatChannelMark();
   if (view === 'question') {
     const s = state.find((x) => x.id === qSessionId);
-    if (!s || !s.question) { setView('list'); render(); } // ответили в терминале — выходим
+    if (!s || !s.question) { saveQDraft(); setView('list'); render(); }
+    else if (!qPending && JarvisQuestionAnswer.draftKey(s.id, s.question) !== JarvisQuestionAnswer.draftKey(qSessionId, qRequest)) {
+      beginQ(s); qMessage = 'Агент задал новый вопрос. Предыдущий черновик сохранён.'; renderQuestion();
+    }
   }
 });
-window.jarvis.getState().then((list) => { state = list; rebuildOrder(); render(); });
+async function loadInitialSessions() {
+  sessionsLoadState = 'loading'; sessionsLoadError = ''; window.jarvisSessionWorkspace?.refresh(state);
+  try {
+    const list = await window.jarvis.getState();
+    if (!Array.isArray(list)) throw new Error('Не удалось прочитать список чатов');
+    if (!stateReceived) state = list;
+    sessionsLoadState = 'ready'; rebuildOrder(); render();
+  } catch (error) {
+    if (!stateReceived) { sessionsLoadState = 'error'; sessionsLoadError = String(error?.message || error); render(); }
+  }
+}
+const initialStateReady = loadInitialSessions();
 
 /* Свои агенты (qwen/opencode/внутренние CLI): нужны кнопкам «Нового проекта»
  * и командам возобновления. Старый бэкенд без реестра — просто пустой список. */
@@ -2230,8 +2433,9 @@ function paintLimitBanner() {
   if (!limitInfo || !limitInfo.active) { limitBannerEl.hidden = true; return; }
   const min = Math.max(0, Math.round((limitInfo.resetAt - Date.now()) / 60000));
   const t = min < 60 ? `${min}м` : `${Math.floor(min / 60)}ч ${min % 60}м`;
-  limitBannerEl.textContent =
-    `Claude${limitInfo.plan ? ` ${limitInfo.plan}` : ''} · лимит использования · сброс через ${t} — сессии продолжатся сами`;
+  const reset = limitInfo.resetAt > 0 ? `сброс через ${t}` : 'время сброса неизвестно';
+  const more = limitInfo.profileCount > 1 ? ` · ещё профилей: ${limitInfo.profileCount - 1}` : '';
+  limitBannerEl.textContent = `${limitInfo.sourceLabel || 'Агент'}${limitInfo.plan ? ` ${limitInfo.plan}` : ''} · лимит использования · ${reset}${more}${limitInfo.autoResume ? ' — автопродолжение включено' : ''}`;
   limitBannerEl.hidden = false;
 }
 
@@ -2378,7 +2582,7 @@ window.jarvis.onAudioState?.((s) => {
 refreshFooterUsage();
 setInterval(refreshFooterUsage, 60000);
 
-window.jarvis.getSettings().then((s) => {
+const initialSettingsReady = window.jarvis.getSettings().then((s) => {
   footerBottom = s?.footerBottom === 'spend' ? 'spend' : 'limit';
   paintFooterLimit();
 }).catch(() => {});
@@ -2399,7 +2603,7 @@ const tlLimitTextEl = document.getElementById('tlLimitText');
 // шестерёнка титульной полосы — тот же переход, что вкладка настроек
 const tlSettingsEl = document.getElementById('tlSettings');
 tlSettingsEl.addEventListener('click', () => {
-  if (view === 'settings') { setView('list'); render(); } else setView('settings');
+  if (view === 'settings') goBack(); else setView('settings');
 });
 
 document.getElementById('winClose').addEventListener('click', () => window.jarvis.winClose());
@@ -2463,7 +2667,9 @@ function paintTitlebarLimit() {
 // Режим переключили (здесь или в другом окне) — пересобрать раскладку под
 // новый data-mode: список из сайдбара в стопку видов и обратно.
 window.addEventListener('jarvis:appearance', () => {
-  setView(view);
+  // CSS updates the layout in place. Reinitializing a module here destroyed
+  // text fields and the live appearance slider on every input event.
+  footerEl.hidden = !windowMode() && (view === 'chat' || view === 'question');
   if (view === 'list') render();
 });
 
@@ -2771,17 +2977,18 @@ window.jarvis.onShown(() => {
     (view === 'chat' && !sess(chatSessionId)) ||
     (view === 'question' && !sess(qSessionId)?.question);
 
-  if (view === 'list' || stale) {
+  if (view === 'home' || view === 'list' || stale) {
     queryEl.value = ''; // список открывается свежим: чистый поиск + фокус
     sel = 0;
     rebuildOrder();
-    setView('list');
+    setView(stale ? 'home' : view);
     render();
   }
 });
 
 queryEl.addEventListener('input', () => {
-  if (view === 'history') { renderHistory(); return; }
+  if (view === 'home') { window.jarvisWorkspace.refresh(); return; }
+  if (view === 'history') { if (window.jarvisProjects) window.jarvisProjects.search(); else { histSel = 0; renderHistory(); } return; }
   sel = 0;
   cmdRootSel = 0;
   if (!queryEl.value.trim().startsWith('/')) argMode = null;
@@ -3197,7 +3404,8 @@ function actionItems() {
   }
   if (view !== 'chat') items.push({ label: 'Очистить завершённые', key: K(KN('del')), run: () => window.jarvis.clearFinished() });
   items.push({ label: 'Проекты и история', key: K('2'), run: () => setView('history') });
-  items.push({ label: 'Статистика usage', key: K('3'), run: () => setView('stats') });
+  items.push({ label: 'Машины', key: K('8'), run: () => setView('machines') });
+  items.push({ label: 'Аналитика ИИ и расход', key: K('3'), run: () => setView('stats') });
   items.push({ label: 'История голоса', key: K('4'), run: () => setView('voicehist') });
   items.push({ label: 'Настройки', key: K(','), run: () => setView('settings') });
   return items;
@@ -3238,8 +3446,10 @@ function toggleActions() {
 
 document.getElementById('actionsBtn').addEventListener('click', toggleActions);
 document.getElementById('primaryHint').addEventListener('click', () => {
-  if (view === 'list') { const s = filtered()[sel]; if (s) openSession(s); }
-  else if (view === 'settings') { setView('list'); render(); }
+  if (view === 'home') window.jarvisWorkspace.runSelected();
+  else if (view === 'list') { const s = filtered()[sel]; if (s) openSession(s); }
+  else if (view === 'history' && window.jarvisProjects) window.jarvisProjects.primary();
+  else goBack();
 });
 
 tabSessionsEl.addEventListener('click', () => { setView('list'); render(); });
@@ -3253,6 +3463,9 @@ tabHistoryEl.addEventListener('click', () => setView('history'));
 let historyData = [];
 let histRows = []; // плоский список выбираемых строк: машины, проекты или чаты (для ↑↓/Enter)
 let histSel = 0;
+let historyRenderSequence = 0;
+let histTrail = [];
+const histRoute = () => ({ machine: histMachine, project: histProject, selected: histSel, query: queryEl.value });
 let histProject = null; // ключ открытого проекта (cwd) — null = список проектов
 // Уровень 0: где работать. Проекты и чаты живут ВНУТРИ выбранной машины —
 // история локальной машины и история узла это разные списки.
@@ -3281,9 +3494,11 @@ function resumeCommand(s, cwd) {
   // Подсказка для tooltip. Реальная команда собирается на бэкенде из настроек
   // «Запуска» — честно предупреждаем, что она может отличаться (прокси, dangerous-флаги).
   // У сессии с узла id несёт префикс узла — resume ждёт «голый» agentId.
-  const id = s.agentId || s.id;
-  const base = resumeBase(s.agent, id);
-  return (cwd ? `cd "${cwd}" && ${base}` : base) + '\n(+ параметры из настроек «Запуск»)';
+  const id = s.providerSessionId || s.agentId || s.id;
+  const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
+  const env = s.providerHome ? `${s.agent === 'codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR'}=${quote(s.providerHome)} ` : '';
+  const base = env + resumeBase(s.agent, quote(id));
+  return (cwd ? `cd ${quote(cwd)} && ${base}` : base) + '\n(+ параметры из настроек «Запуск»)';
 }
 
 // Запуск сессии из настроек: agent='claude'|'codex'; sessionId=null — новая
@@ -3295,6 +3510,7 @@ function resumeCommand(s, cwd) {
  * пачкой однотипных задач. Продолжение сессии песочницу игнорирует: она живёт
  * там, где начиналась. */
 let taskOpts = { isolate: false, mode: 'ask', task: '', container: false };
+const pendingLaunches = new Set();
 const TASK_MODES = [
   ['ask', 'спросит', 'Агент спрашивает перед действиями'],
   ['plan', 'план', 'Только разведка и план — файлов не тронет'],
@@ -3342,22 +3558,28 @@ function renderTaskOpts(host) {
 }
 
 async function launchSession(agent, sessionId, cwd, machine) {
+  const key = JSON.stringify([machine || 'local', agent, sessionId, cwd]);
+  if (pendingLaunches.has(key)) return false;
+  pendingLaunches.add(key);
   try {
     const opts = sessionId ? null : { ...taskOpts };
     const r = await window.jarvis.launchSession(cwd, agent, sessionId, machine || 'local', opts);
-    if (!r || !r.ok) { showToast((r && r.error) || 'Не удалось запустить'); return; }
+    if (!r || !r.ok) { showToast((r && r.error) || 'Не удалось запустить'); return false; }
     // На узле терминала нет и быть не может: сессия поднимается отсоединённой в
     // tmux на той стороне и приезжает к нам в список сама — так и говорим.
     // Текст задачи одноразовый: он про эту работу, а не про следующую.
-    const hadTask = !sessionId && !!taskOpts.task.trim();
-    if (!sessionId) { taskOpts.task = ''; renderHistory(); }
+    const hadTask = !sessionId && !!opts.task.trim();
+    if (!sessionId && taskOpts.task === opts.task) taskOpts.task = '';
     const tail = hadTask ? ' · задача уедет, как только агент встанет' : '';
     if (r.channel === 'node') showToast(`Поднял на узле «${r.machine || machine}»${tail || ' — сессия появится в списке'}`);
     else showToast(`Запускаю в терминале…${tail}`);
-  } catch { showToast('Не удалось запустить'); }
+    return true;
+  } catch (error) { showToast('Не удалось запустить: ' + String(error)); return false; }
+  finally { pendingLaunches.delete(key); }
 }
 
 function openHistMachine(id) {
+  histTrail.push(histRoute()); histSel = 0;
   histMachine = id;
   histProject = null;
   histNewOpen = false;
@@ -3366,6 +3588,7 @@ function openHistMachine(id) {
 }
 
 function openHistProject(key) {
+  histTrail.push(histRoute()); histSel = 0;
   histProject = key;
   queryEl.value = ''; // фильтр списка проектов внутри проекта не нужен
   renderHistory();
@@ -3373,6 +3596,12 @@ function openHistProject(key) {
 
 // Шаг назад: чаты → проекты → машины. Ниже машин (или когда их нет) — вкладка «Чаты».
 function histBack() {
+  const previous = histTrail.pop();
+  if (previous) {
+    histMachine = previous.machine; histProject = previous.project;
+    histSel = previous.selected; queryEl.value = previous.query; histNewOpen = false;
+    renderHistory(); return true;
+  }
   if (histProject != null) { histProject = null; renderHistory(); return true; }
   if (histMachine != null && histMultiMachine()) { histMachine = null; histNewOpen = false; renderHistory(); return true; }
   return false;
@@ -3387,8 +3616,10 @@ async function loadHistMachines() {
 }
 
 async function renderHistory() {
+  if (window.jarvisProjects) return window.jarvisProjects.show();
+  const request = ++historyRenderSequence;
   await loadHistMachines();
-  if (view !== 'history') return;
+  if (view !== 'history' || request !== historyRenderSequence) return;
   if (!histMultiMachine()) histMachine = histMachines[0].id;
   // узел убрали из настроек, пока вкладка была открыта — возвращаемся к выбору
   if (histMachine != null && !histMachineOf(histMachine)) { histMachine = null; histProject = null; }
@@ -3397,7 +3628,7 @@ async function renderHistory() {
   if (histMachine != null) {
     let data;
     try { data = await window.jarvis.getHistory(histMachine); } catch { data = { error: 'Не удалось получить историю' }; }
-    if (view !== 'history') return;
+    if (view !== 'history' || request !== historyRenderSequence) return;
     // узел мог не ответить: бэкенд отдаёт {error} вместо массива
     if (Array.isArray(data)) historyData = data;
     else { historyData = []; histError = (data && data.error) ? String(data.error) : 'История недоступна'; }
@@ -3405,7 +3636,7 @@ async function renderHistory() {
 
   historyEl.textContent = '';
   histRows = [];
-  histSel = 0;
+  const selection = histSel;
 
   const q = queryEl.value.trim().toLowerCase();
 
@@ -3419,6 +3650,7 @@ async function renderHistory() {
 
   if (!g) renderHistProjects(q);
   else renderHistChats(g, q);
+  histSel = Math.max(0, Math.min(selection, histRows.length - 1));
   paintHistSel();
 }
 
@@ -3469,7 +3701,7 @@ function renderHistProjects(q) {
     const head = document.createElement('div');
     head.className = 'hgroup';
     const back = Object.assign(document.createElement('span'), { className: 'hback', textContent: '‹ Машины' });
-    back.addEventListener('click', () => { histMachine = null; histNewOpen = false; renderHistory(); });
+    back.addEventListener('click', histBack);
     head.appendChild(back);
     head.appendChild(Object.assign(document.createElement('span'), { textContent: histMachineName(histMachine) }));
     if (remote) head.appendChild(Object.assign(document.createElement('span'), { className: 'hcount', textContent: 'узел' }));
@@ -3554,13 +3786,16 @@ function renderHistNew(remote) {
     else if (e.key === 'Escape') { e.preventDefault(); histNewOpen = false; renderHistory(); }
   });
 
-  function start(agent) {
+  async function start(agent) {
     const path = input.value.trim();
     if (!path) { input.focus(); showToast('Укажи путь к проекту'); return; }
-    histNewOpen = false;
-    histNewPath = '';
-    launchSession(agent, null, path, histMachine);
-    renderHistory();
+    const buttons = [...form.querySelectorAll('button')];
+    for (const button of buttons) button.disabled = true;
+    if (await launchSession(agent, null, path, histMachine)) {
+      if (histNewPath.trim() === path) { histNewOpen = false; histNewPath = ''; }
+      renderHistory();
+    }
+    for (const button of buttons) button.disabled = false;
   }
 
   const btn = (agent, label) => {
@@ -3593,7 +3828,7 @@ function renderHistChats(g, q) {
   const head = document.createElement('div');
   head.className = 'hgroup';
   const back = Object.assign(document.createElement('span'), { className: 'hback', textContent: '‹ Проекты' });
-  back.addEventListener('click', () => { histProject = null; renderHistory(); });
+  back.addEventListener('click', histBack);
   head.appendChild(back);
   head.appendChild(Object.assign(document.createElement('span'), { textContent: g.project }));
   head.appendChild(Object.assign(document.createElement('span'), { className: 'hcount', textContent: `${g.count} ${plural(g.count, 'чат', 'чата', 'чатов')}` }));
@@ -3645,7 +3880,7 @@ function renderHistChats(g, q) {
     const meta = document.createElement('span');
     meta.className = 'hmeta';
     const parts = [];
-    if (s.model) parts.push(s.model);
+    if (visibleModel(s.model)) parts.push(visibleModel(s.model));
     if (s.tokens) parts.push(fmtTok(s.tokens));
     parts.push(histTime(s.lastAt));
     meta.textContent = parts.join(' · ');
@@ -3693,6 +3928,7 @@ function el(tag, cls, text) {
 }
 
 let statsPeriod = 'today'; // 'today' | 'week'
+let statsMode = 'analytics';
 let statsDim = 'projects'; // 'models' | 'projects' | 'sessions'
 
 const PERIODS = [['today', 'Сегодня'], ['week', '7 дней']];
@@ -3708,11 +3944,40 @@ function segRow(items, current, onPick) {
   return seg;
 }
 
+let statsRenderSequence = 0;
 async function renderStats() {
+  const request = ++statsRenderSequence;
+  if (statsMode === 'analytics' && window.jarvisAiAnalytics) {
+    return window.jarvisAiAnalytics.render(statsEl, {
+      onUsage: () => { statsMode = 'usage'; renderStats(); },
+    });
+  }
+  statsEl.classList.remove('ai-analytics-host');
   let u;
-  try { u = await window.jarvis.getUsage(statsPeriod); } catch { return; }
-  if (view !== 'stats') return;
+  try {
+    u = await window.jarvis.getUsage(statsPeriod);
+    if (!u?.total || !u.window || !Array.isArray(u.series)) throw new Error(u?.error || 'Данные использования недоступны.');
+  } catch (error) {
+    if (view !== 'stats' || request !== statsRenderSequence) return;
+    statsEl.replaceChildren();
+    const note = el('div', 'meeting-status error', 'Не удалось загрузить использование: ' + String(error)); note.setAttribute('role', 'alert');
+    const retry = el('button', 'j-btn', 'Повторить'); retry.addEventListener('click', renderStats);
+    statsEl.append(note, retry);
+    if (window.jarvisAiAnalytics) {
+      const analytics = el('button', 'j-btn ai-usage-back', 'Аналитика ИИ');
+      analytics.addEventListener('click', () => { statsMode = 'analytics'; renderStats(); });
+      statsEl.appendChild(analytics);
+    }
+    return;
+  }
+  if (view !== 'stats' || request !== statsRenderSequence) return;
   statsEl.textContent = '';
+
+  if (window.jarvisAiAnalytics) {
+    const analytics = el('button', 'j-btn ai-usage-back', 'Аналитика ИИ');
+    analytics.addEventListener('click', () => { statsMode = 'analytics'; renderStats(); });
+    statsEl.appendChild(analytics);
+  }
 
   // управление: период и разрез
   const controls = el('div', 'uctl');
@@ -3765,8 +4030,8 @@ async function renderStats() {
       statsEl.appendChild(row);
     };
 
-    if (o.source && o.source !== 'local') {
-      statsEl.appendChild(el('div', 'uhover', `лимиты с узла «${o.source}» — локальной авторизации нет`));
+    if (o.source) {
+      statsEl.appendChild(el('div', 'uhover', `Claude · ${o.source === 'local' ? 'этот компьютер' : `узел «${o.source}»`}${o.providerHome ? ` · ${o.providerHome}` : ''}`));
     }
     if (o.session) limitRow('Сессия', o.session.pct, `${resetText(o.session.resetAt)}${o.windowTokens ? ` · ${fmtTok(o.windowTokens)} ткн` : ''}`);
     if (o.week) limitRow('Неделя', o.week.pct, resetText(o.week.resetAt));
@@ -3842,8 +4107,10 @@ async function renderStats() {
     statsEl.appendChild(row);
   }
 }
+window.addEventListener('jarvis:open-machines', () => { setView('machines'); render(); });
+document.getElementById('tabMachines').addEventListener('click', () => { setView('machines'); render(); });
 tabSettingsEl.addEventListener('click', () => {
-  if (view === 'settings') { setView('list'); render(); } else setView('settings');
+  if (view === 'settings') goBack(); else setView('settings');
 });
 
 // кнопка «Открыть настройки» из окна онбординга
@@ -3856,6 +4123,8 @@ window.jarvis.onAudioState((p) => {
   if (!pill || !p) return;
   let txt = 'выключено', cls = '';
   if (p.muted || p.state === 'muted') txt = 'заглушено';
+  else if (p.state === 'permission-pending') txt = 'ожидаем разрешения';
+  else if (p.state === 'starting') txt = 'подключаем микрофон';
   else if (p.state === 'denied') txt = 'нет доступа к микрофону';
   else if (p.state === 'listening') { txt = 'слушаю'; cls = 'on'; }
   else if (p.state === 'no-device') txt = 'нет устройства';
@@ -3917,12 +4186,15 @@ const KN = (name) => window.jarvisKeys.NAMES[name] || name;
  *  переключает приложения дока, и панель бы с ним дралась). */
 const isMod = (e) => (window.jarvisKeys.isMac ? e.metaKey : e.ctrlKey);
 
+let settingsLoadSequence = 0;
 async function loadSettings() {
+  const sequence = ++settingsLoadSequence;
   // Новая страница настроек (settings2.js): сайдбар + детальные панели в дизайне
   // редизайна, проводка к тем же IPC. initSettings2 сам чистит и строит host.
   // Старая разметка #settings затирается; её top-level обработчики остаются
   // привязанными к detached-узлам (безопасно), карточки no-op (нет их DOM).
   try { plugins = await window.jarvis.getPlugins(); } catch {}
+  if (view !== 'settings' || sequence !== settingsLoadSequence) return;
   settingsEl.style.cssText = 'padding:0;height:100%;overflow:hidden';
   try {
     window.initSettings2(settingsEl);
@@ -4395,6 +4667,9 @@ async function renderVoiceCard() {
 function wakeStatusLabel(v) {
   if (!v) return ['нет данных', ''];
   if (v.muted) return ['заглушено', ''];
+  if (v.audio_state === 'permission-pending') return ['ожидаем разрешения', ''];
+  if (v.audio_state === 'starting') return ['подключаем микрофон', ''];
+  if (v.audio_state === 'no-device') return ['микрофон не найден', ''];
   if (v.audio_state === 'denied') return ['нет доступа к микрофону', ''];
   if (v.listening) return ['слушаю', 'on'];
   if (v.enabled) return ['включено', 'on'];
@@ -4711,7 +4986,6 @@ const CODE_KEYS = { Space: 'Space', Enter: 'Enter', Backspace: 'Backspace', Tab:
 function accelFromEvent(e) {
   const mods = [];
   if (e.metaKey) mods.push(window.jarvisKeys.isMac ? 'Command' : 'Super');
-  if (e.ctrlKey && !window.jarvisKeys.isMac) mods.push('Control');
   if (e.ctrlKey) mods.push('Control');
   if (e.altKey) mods.push('Option');
   if (e.shiftKey) mods.push('Shift');
@@ -4733,6 +5007,11 @@ for (const btn of document.querySelectorAll('.keycap[data-hk]')) {
 /* ---------- клавиатура ---------- */
 
 window.addEventListener('keydown', async (e) => {
+  if (window.jarvisShortcutRecording || !document.getElementById('commandDialog').hidden) return;
+  if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+  if (e.key === 'Escape' && window.jarvisSessionWorkspace?.dismissMenu()) {
+    e.preventDefault(); e.stopImmediatePropagation(); return;
+  }
   if (recording) {
     e.preventDefault();
     if (e.key === 'Escape') {
@@ -4766,7 +5045,7 @@ window.addEventListener('keydown', async (e) => {
     if (e.key === 'ArrowDown') { e.preventDefault(); apSel = Math.min(items.length - 1, apSel + 1); paintActions(items); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); apSel = Math.max(0, apSel - 1); paintActions(items); }
     else if (e.key === 'Enter') { e.preventDefault(); closeActions(); items[apSel] && items[apSel].run(); }
-    else if (e.key === 'Escape' || (isMod(e) && (e.key === 'k' || e.key === 'K'))) { e.preventDefault(); closeActions(); }
+    else if (e.key === 'Escape' || (isMod(e) && window.jarvisKeys.matches(e, 'k'))) { e.preventDefault(); closeActions(); }
     return;
   }
 
@@ -4774,28 +5053,32 @@ window.addEventListener('keydown', async (e) => {
   // «закрыть»/«свернуть»/«фуллскрин» не привязываются сами — вешаем руками,
   // чтобы окно вело себя как окно. Клавиши берём по факту нажатия (metaKey —
   // ⌘ на маке, Super на Linux), а не по зашитой раскладке.
-  if (windowMode() && isMod(e) && (e.key === 'w' || e.key === 'W')) { // закрыть (спрятать)
+  if (windowMode() && isMod(e) && window.jarvisKeys.matches(e, 'w')) { // закрыть (спрятать)
     e.preventDefault();
     window.jarvis.winClose();
     return;
   }
-  if (windowMode() && isMod(e) && !e.shiftKey && (e.key === 'm' || e.key === 'M')) { // свернуть
+  if (windowMode() && isMod(e) && !e.shiftKey && window.jarvisKeys.matches(e, 'm')) { // свернуть
     e.preventDefault();
     window.jarvis.winMinimize();
     return;
   }
-  if (windowMode() && isMod(e) && e.shiftKey && (e.key === 'f' || e.key === 'F')) { // фуллскрин
+  if (windowMode() && isMod(e) && e.shiftKey && window.jarvisKeys.matches(e, 'f')) { // фуллскрин
     e.preventDefault();
     window.jarvis.winToggleFullscreen().then(syncFullscreen).catch(() => {});
     return;
   }
 
-  if (isMod(e) && (e.key === 'k' || e.key === 'K')) { // ⌘K — меню действий
+  if (isMod(e) && e.shiftKey && window.jarvisKeys.matches(e, 'k')) { e.preventDefault(); toggleActions(); return; }
+  if (isMod(e) && window.jarvisKeys.matches(e, 'k')) { // Searchable workspace commands
     e.preventDefault();
-    toggleActions();
+    closeActions();
+    e.stopImmediatePropagation();
+    window.jarvisWorkspace?.toggleCommands();
     return;
   }
 
+  if (isMod(e) && e.key === '0') { e.preventDefault(); setView('home'); render(); return; }
   if (isMod(e) && e.key === '1') { // ⌘1 — Чаты
     e.preventDefault();
     setView('list');
@@ -4817,16 +5100,27 @@ window.addEventListener('keydown', async (e) => {
     setView('voicehist');
     return;
   }
-  if (e.metaKey && e.key === '5') { // ⌘5 — Циклы
+  if (isMod(e) && e.key === '5') { // ⌘5 — Циклы
     e.preventDefault();
     setView('loops');
     return;
   }
-  if (e.metaKey && e.key === '6') { // ⌘6 — Связка
+  if (isMod(e) && e.key === '6') { // ⌘6 — Связка
     e.preventDefault();
     setView('bundle');
     return;
   }
+
+  if (isMod(e) && e.key === '7') { e.preventDefault(); setView('meetings'); return; }
+  if (isMod(e) && e.key === '8') { e.preventDefault(); setView('machines'); return; }
+
+  // Focused editors own arrows, Enter and text editing, except the main search.
+  if (e.target !== queryEl && !isMod(e) && e.key !== 'Escape' &&
+      (editingText(e.target) || e.target?.closest?.('button, a, [role="button"]'))) return;
+  if (e.key === 'Escape' && e.target?.id === 'settingsSearch' && e.target.value) return;
+  // An open settings editor/menu dismisses before the surrounding page.
+  if (e.key === 'Escape' && e.target?.closest?.('[data-escape-owner], #settings2 .cselect.open')) return;
+  if (e.key === 'Escape' && e.target?.tagName === 'SELECT') { e.target.blur(); return; }
 
   // палитра быстрых команд: «/» в главном поиске (Часть 2). Раньше generic-Esc.
   if (view === 'list' && (argMode || queryEl.value.trim().startsWith('/'))) {
@@ -4847,6 +5141,7 @@ window.addEventListener('keydown', async (e) => {
   }
 
   if (view === 'history') { // ↑↓ выбор · ↵ выбрать машину / открыть проект / запустить · esc — на уровень вверх
+    if (window.jarvisProjects) { window.jarvisProjects.key(e); return; }
     if (e.key === 'ArrowDown') { e.preventDefault(); histSel = Math.min(histRows.length - 1, histSel + 1); paintHistSel(); return; }
     if (e.key === 'ArrowUp') { e.preventDefault(); histSel = Math.max(0, histSel - 1); paintHistSel(); return; }
     if (e.key === 'Enter' && histRows[histSel]) {
@@ -4860,26 +5155,27 @@ window.addEventListener('keydown', async (e) => {
     }
     if (e.key === 'Escape') {
       e.preventDefault();
-      if (histNewOpen) { histNewOpen = false; renderHistory(); }
-      else if (!histBack()) { setView('list'); render(); }
+      goBack();
       return;
     }
     return; // прочее (печать в поиск) — пусть идёт в инпут
   }
 
+  if (e.key === 'Escape' && view === 'question') { e.preventDefault(); backQ(); return; }
   if (e.key === 'Escape') { // raycast: Esc — назад / закрыть
     if (view === 'chat' && paletteOpen()) return; // палитру закроет обработчик поля
-    if (view !== 'list') { setView('list'); render(); }
-    // в накладке Esc из списка прячет её; окно так не закрывают — для этого ⌘W
-    else if (!windowMode()) window.jarvis.hidePanel();
+    e.preventDefault();
+    goBack();
     return;
   }
 
   // экран вопроса — только клавиатура
   if (view === 'question' && qData) {
+    if (qPending || qUnknown) return;
+    if (qReview) { if (e.key === 'Enter') { e.preventDefault(); submitQ(); } return; }
     if (e.key === 'ArrowDown') { e.preventDefault(); qSel = Math.min(qData.options.length - 1, qSel + 1); paintQOptions(); return; }
     if (e.key === 'ArrowUp') { e.preventDefault(); qSel = Math.max(0, qSel - 1); paintQOptions(); return; }
-    if (e.key === ' ') { e.preventDefault(); if (qData.multiSelect) toggleQ(qSel); return; }
+    if (e.key === ' ') { e.preventDefault(); activateQ(); return; }
     if (e.key === 'Enter') { e.preventDefault(); submitQ(); return; }
     if (/^[1-9]$/.test(e.key)) {
       const n = Number(e.key);
@@ -4891,7 +5187,7 @@ window.addEventListener('keydown', async (e) => {
 
   if (isMod(e) && e.key === ',') { // модификатор + «,» — настройки, как принято в системе
     e.preventDefault();
-    if (view === 'settings') { setView('list'); render(); } else setView('settings');
+    if (view === 'settings') goBack(); else setView('settings');
     return;
   }
 
@@ -4911,7 +5207,7 @@ window.addEventListener('keydown', async (e) => {
     return;
   }
 
-  if (isMod(e) && (e.key === 'p' || e.key === 'P')) { // ⌘P — закрепить/открепить
+  if (isMod(e) && window.jarvisKeys.matches(e, 'p')) { // ⌘P — закрепить/открепить
     e.preventDefault();
     const s = view === 'list' ? filtered()[sel]
       : view === 'chat' ? state.find((x) => x.id === chatSessionId)
@@ -4920,7 +5216,7 @@ window.addEventListener('keydown', async (e) => {
     return;
   }
 
-  if (isMod(e) && (e.key === 'g' || e.key === 'G')) { // ⌘G — «где это?»: оверлей в терминале
+  if (isMod(e) && window.jarvisKeys.matches(e, 'g')) { // ⌘G — «где это?»: оверлей в терминале
     e.preventDefault();
     const s = view === 'list' ? filtered()[sel] : state.find((x) => x.id === chatSessionId);
     if (s) window.jarvis.pingTerminal(s.id).then((res) => {
@@ -4930,6 +5226,7 @@ window.addEventListener('keydown', async (e) => {
   }
 
   if (view === 'stats') { // ←→ период · 1-3 разрез · ↑↓ скролл
+    if (statsMode === 'analytics' && window.jarvisAiAnalytics) return;
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
       e.preventDefault();
       statsPeriod = statsPeriod === 'today' ? 'week' : 'today';
@@ -4961,4 +5258,45 @@ window.addEventListener('keydown', async (e) => {
       else openChat(list[sel].id, list[sel].project); // ↵ — чат сессии
     }
   }
+  if (view === 'home' && window.jarvisWorkspace.rootKey(e)) e.preventDefault();
 }, true);
+
+window.JarvisArtifacts?.configure({ comment: async (sessionId, text) => { if (chatSessionId !== sessionId || view !== 'chat') await openChat(sessionId); replyEl.value = [replyEl.value,text].filter(Boolean).join('\n\n'); autoGrowReply(); window.jarvisSessionWorkspace?.saveDraft(sessionId,replyEl.value,pendingImages); replyEl.focus(); } });
+window.initWorkspace?.({ navigate: next => { setView(next); render(); }, back: goBack, sessions: () => state, openSession, toast: showToast });
+window.initSessionWorkspace?.({
+  navigate: next => { setView(next); render(); }, sessions: () => state,
+  currentId: () => chatSessionId, openSession, toast: showToast, trackLaunchMessage,
+  send: sendReplyNow, attach: addPendingImage, hasAttachments: () => pendingImages.some(file => !file.loading),
+  sessionLoadState: () => sessionsLoadState, sessionLoadError: () => sessionsLoadError, retrySessions: loadInitialSessions,
+  deliveryState: () => deliveryStates.get(chatSessionId), readingFiles: () => pendingImages.filter(file => file.loading).length,
+  models: modelsFor, efforts: effortsFor,
+  terminal: s => focusTerminal(s.id, s.project),
+  settingsPane: pane => window.jarvisOpenSettingsPane?.(pane),
+});
+window.initProjects?.({
+  visible: () => view === 'history', sessions: () => state,
+  query: () => queryEl.value, setQuery: text => { queryEl.value = text; },
+  back: goBack, openSession,
+  newChat: project => window.jarvisSessionWorkspace.newChat(project),
+  settings: () => { setView('machines'); },
+});
+
+setView(view);
+render();
+
+// Each native workspace has its own chat subscription and route. Wait for the
+// first snapshot so a newly opened window can resolve the requested session.
+let workspaceRouteSequence = 0;
+async function applyWorkspaceRoute(route = {}, initial = false) {
+  if (!initial && !route.sessionId && !route.project) return;
+  const request = ++workspaceRouteSequence;
+  await Promise.all([initialStateReady, initialSettingsReady]);
+  if (request !== workspaceRouteSequence) return;
+  if (route.sessionId) {
+    await openChat(route.sessionId, route.project);
+  } else if (route.project && window.jarvisSessionWorkspace) {
+    await window.jarvisSessionWorkspace.focusProject(route.project, route.remote);
+  } else { setView('list'); render(); }
+}
+window.jarvis.onWorkspaceRoute?.(route => applyWorkspaceRoute(route));
+if (window.__JARVIS_WORKSPACE__) applyWorkspaceRoute(window.__JARVIS_WORKSPACE__, true);

@@ -17,12 +17,17 @@
 //!   CODEX_HOME          корень транскриптов Codex (по умолчанию ~/.codex)
 
 mod node;
+#[path = "../../src/codex_hooks.rs"]
+mod codex_hooks;
+#[path = "../../shared/terminal_stream.rs"]
+mod terminal_stream;
 
 const USAGE: &str = "\
 jarvis-node — узел Jarvis для удалённых агентов.
 
   jarvis-node            слушать <JARVIS_DIR>/node.sock (0600)
   jarvis-node --version  версия
+  jarvis-node --repair-hooks  подтвердить только установленные хуки Jarvis
   jarvis-node --help     эта справка
 
 Наружу не слушает: ноут ходит через `ssh -L 127.0.0.1:PORT:<сокет>`.
@@ -33,6 +38,12 @@ async fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("--version" | "-V") => println!("jarvis-node {}", env!("CARGO_PKG_VERSION")),
         Some("--help" | "-h") => print!("{USAGE}"),
-        _ => node::run().await,
+        Some("--repair-hooks") => {
+            let result = node::hooks::repair_all().await;
+            println!("{result}");
+            if result["ok"] != true { std::process::exit(1); }
+        }
+        None => node::run().await,
+        Some(argument) => { eprintln!("Неизвестный аргумент: {argument}\n{USAGE}"); std::process::exit(2); }
     }
 }

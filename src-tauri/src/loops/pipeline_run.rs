@@ -14,6 +14,7 @@
 //! * вопрос человеку — обычный шаг, а не особый случай: прогон замирает, ответ
 //!   становится результатом шага и едет дальше по переходам.
 
+use super::engine::publish;
 use super::model::*;
 use super::pipeline::{self, Outcome, Pipeline, Step, StepKind};
 use super::runner;
@@ -172,16 +173,19 @@ pub async fn run_pipeline(
     dir: std::path::PathBuf,
     on_change: impl Fn(&Run),
 ) {
-    let mut vars: HashMap<String, Outcome> = HashMap::new();
+    let mut vars = run.pipeline_vars.clone();
     // Возобновление: продолжаем с того шага, на котором встали, а ответ
     // человека уже лежит в его результате.
     let mut current = match run.ask.as_ref().map(|a| a.step.clone()) {
         Some(step) if !step.is_empty() => Some(step),
-        _ => p.first().map(|s| s.id.clone()),
+        _ => run
+            .pipeline_next
+            .clone()
+            .or_else(|| p.first().map(|s| s.id.clone())),
     };
     if let Some(a) = run.ask.take() {
         if !a.step.is_empty() {
-            let answer = run.interventions.join("\n");
+            let answer = store.take_interventions(&item.id).join("\n");
             let out = Outcome {
                 ok: true,
                 output: answer,
@@ -195,6 +199,9 @@ pub async fn run_pipeline(
         }
     }
 
+    run.pipeline_vars = vars.clone();
+    run.pipeline_next = current.clone();
+    store.put_run(run.clone());
     while let Some(id) = current.clone() {
         if let Some(live) = store.run(&item.id) {
             if live.state == RunState::Stopped {
@@ -230,8 +237,7 @@ pub async fn run_pipeline(
                 iteration: run.iterations.len() as u32,
                 step: step.id.clone(),
             });
-            store.put_run(run.clone());
-            on_change(&run);
+            publish(&store, &mut run, &on_change);
             return;
         }
 
@@ -245,29 +251,27 @@ pub async fn run_pipeline(
             ..Default::default()
         };
         run.iterations.push(it.clone());
-        store.put_run(run.clone());
-        on_change(&run);
+        publish(&store, &mut run, &on_change);
 
         // Попытки: моргнувшая сеть — не повод будить человека.
         let mut out;
-        let mut tokens;
-        let mut cost;
+        let mut tokens = 0;
+        let mut cost = 0.0;
         let mut attempt = 0;
         loop {
             let (o, t, c) = run_step(&item, &dir, &step, &vars).await;
             out = o;
-            tokens = t;
-            cost = c;
-            run.tokens += tokens;
-            run.cost_usd += cost;
+            tokens += t;
+            cost += c;
+            run.tokens += t;
+            run.cost_usd += c;
             if out.ok || attempt >= step.retries {
                 break;
             }
             attempt += 1;
             it.summary = format!("{} — попытка {}", step.title(), attempt + 1);
             put_iteration(&mut run, it.clone());
-            store.put_run(run.clone());
-            on_change(&run);
+            publish(&store, &mut run, &on_change);
         }
 
         it.tokens = tokens;
@@ -278,10 +282,11 @@ pub async fn run_pipeline(
         it.files = runner::touched_files(&dir).await;
         put_iteration(&mut run, it);
         vars.insert(step.id.clone(), out.clone());
-        store.put_run(run.clone());
-        on_change(&run);
-
         let next = pipeline::next_step(&step, &out);
+        run.pipeline_vars = vars.clone();
+        run.pipeline_next = next.clone();
+        publish(&store, &mut run, &on_change);
+
         if next.is_none() && !out.ok {
             // Инцидент: шаг сорвался, а перехода на этот случай не задано.
             // Молча закончить «успешно» было бы худшим из возможных исходов.
@@ -289,7 +294,10 @@ pub async fn run_pipeline(
                 &store,
                 &mut run,
                 StopReason::Failed,
-                format!("шаг «{}» сорвался, а перехода на этот случай нет", step.title()),
+                format!(
+                    "шаг «{}» сорвался, а перехода на этот случай нет",
+                    step.title()
+                ),
                 &on_change,
             );
             return;
@@ -297,7 +305,13 @@ pub async fn run_pipeline(
         current = next;
     }
 
-    finish(&store, &mut run, StopReason::Exit, String::new(), &on_change);
+    finish(
+        &store,
+        &mut run,
+        StopReason::Exit,
+        String::new(),
+        &on_change,
+    );
 }
 
 fn put_iteration(run: &mut Run, it: Iteration) {
@@ -332,14 +346,13 @@ fn finish(
             _ => String::new(),
         };
     }
-    store.put_run(run.clone());
-    on_change(run);
+    publish(store, run, on_change);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::pipeline::Flow;
+    use super::*;
 
     fn step(id: &str, kind: StepKind, next: Vec<Flow>) -> Step {
         Step {
@@ -353,35 +366,119 @@ mod tests {
 
     #[test]
     fn a_step_summary_says_what_happened() {
-        let sh = step("тесты", StepKind::Shell { command: "cargo test".into() }, vec![]);
-        let ok = Outcome { ok: true, ..Default::default() };
+        let sh = step(
+            "тесты",
+            StepKind::Shell {
+                command: "cargo test".into(),
+            },
+            vec![],
+        );
+        let ok = Outcome {
+            ok: true,
+            ..Default::default()
+        };
         assert_eq!(summarize(&sh, &ok), "тесты: прошла");
-        let bad = Outcome { ok: false, code: 101, output: "3 failed".into(), ..Default::default() };
-        assert!(summarize(&sh, &bad).contains("код 101"), "{}", summarize(&sh, &bad));
+        let bad = Outcome {
+            ok: false,
+            code: 101,
+            output: "3 failed".into(),
+            ..Default::default()
+        };
+        assert!(
+            summarize(&sh, &bad).contains("код 101"),
+            "{}",
+            summarize(&sh, &bad)
+        );
 
-        let rev = step("ревью", StepKind::Review { prompt: String::new(), model: String::new() }, vec![]);
-        let returned = Outcome { ok: false, verdict: "return".into(), output: "тесты сняты".into(), ..Default::default() };
+        let rev = step(
+            "ревью",
+            StepKind::Review {
+                prompt: String::new(),
+                model: String::new(),
+            },
+            vec![],
+        );
+        let returned = Outcome {
+            ok: false,
+            verdict: "return".into(),
+            output: "тесты сняты".into(),
+            ..Default::default()
+        };
         let text = summarize(&rev, &returned);
-        assert!(text.contains("возврат") && text.contains("тесты сняты"), "{text}");
+        assert!(
+            text.contains("возврат") && text.contains("тесты сняты"),
+            "{text}"
+        );
     }
 
     /// Вердикт журнала должен читаться так же, как у обычного цикла: красная
     /// команда — «красный гейт», возврат ревьюера — «возврат».
     #[test]
     fn journal_verdicts_match_the_old_words() {
-        let sh = step("тесты", StepKind::Shell { command: "x".into() }, vec![]);
+        let sh = step(
+            "тесты",
+            StepKind::Shell {
+                command: "x".into(),
+            },
+            vec![],
+        );
         assert_eq!(
-            verdict_of(&sh, &Outcome { ok: false, ..Default::default() }),
+            verdict_of(
+                &sh,
+                &Outcome {
+                    ok: false,
+                    ..Default::default()
+                }
+            ),
             Verdict::GateFailed
         );
-        let rev = step("ревью", StepKind::Review { prompt: String::new(), model: String::new() }, vec![]);
+        let rev = step(
+            "ревью",
+            StepKind::Review {
+                prompt: String::new(),
+                model: String::new(),
+            },
+            vec![],
+        );
         assert_eq!(
-            verdict_of(&rev, &Outcome { ok: false, verdict: "return".into(), ..Default::default() }),
+            verdict_of(
+                &rev,
+                &Outcome {
+                    ok: false,
+                    verdict: "return".into(),
+                    ..Default::default()
+                }
+            ),
             Verdict::Returned
         );
-        let ag = step("правка", StepKind::Agent { prompt: "x".into(), model: String::new() }, vec![]);
-        assert_eq!(verdict_of(&ag, &Outcome { ok: true, ..Default::default() }), Verdict::Passed);
-        assert_eq!(verdict_of(&ag, &Outcome { ok: false, ..Default::default() }), Verdict::Failed);
+        let ag = step(
+            "правка",
+            StepKind::Agent {
+                prompt: "x".into(),
+                model: String::new(),
+            },
+            vec![],
+        );
+        assert_eq!(
+            verdict_of(
+                &ag,
+                &Outcome {
+                    ok: true,
+                    ..Default::default()
+                }
+            ),
+            Verdict::Passed
+        );
+        assert_eq!(
+            verdict_of(
+                &ag,
+                &Outcome {
+                    ok: false,
+                    ..Default::default()
+                }
+            ),
+            Verdict::Failed
+        );
     }
 
     /// Промт ревьюера обязан печатать договор о вердикте: без него первая

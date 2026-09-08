@@ -12,8 +12,8 @@ Code / Codex в свой unix-сокет, копит их в кольцевом 
 Cargo резолвит зависимости на **пакет**, а не на цель: будь узел ещё одним
 `[[bin]]` внутри `src-tauri`, он тянул бы за собой `tauri`, `objc2` и
 `core-graphics` — и не собрался бы на голой Linux-VPS, ради которой всё и
-затевалось. Поэтому у него свой `Cargo.toml` с тремя зависимостями (`axum`,
-`tokio`, `serde_json`); членом воркспейса он остаётся, чтобы проверяться вместе
+затевалось. Поэтому у него свой `Cargo.toml` с четырьмя зависимостями (`axum`,
+`tokio`, `serde_json`, `libc` для блокировки сокета); членом воркспейса он остаётся, чтобы проверяться вместе
 со всем остальным и складывать артефакты в общий `src-tauri/target`.
 
 Вторая причина та же по духу: узел — не второй Jarvis. Ему не нужны ни панель,
@@ -56,7 +56,19 @@ jarvis-node --help
 | `JARVIS_DIR` | `~/.jarvis` | каталог данных; в нём и живёт сокет |
 | `JARVIS_NODE_SOCK` | `<JARVIS_DIR>/node.sock` | путь сокета целиком (перекрывает `JARVIS_DIR`) |
 | `JARVIS_NODE_BUFFER` | `2000` | ёмкость кольца событий; мусор и ноль откатываются к дефолту |
-| `CODEX_HOME` | `~/.codex` | второй корень транскриптов (первый — `~/.claude`) |
+| `CODEX_HOME` | `~/.codex` | дополнительный профиль Codex |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | дополнительный профиль Claude |
+
+Несколько профилей сохраняются в приватном `<JARVIS_DIR>/provider-roots.json`
+как `{"version":1,"sources":[{"agent":"codex","providerHome":"/home/me/.codex-work"}]}`.
+Также обнаруживаются прямые каталоги `~/.codex-*` и `~/.claude-*`. Автопоиск
+пропускает отдельные компоненты `backup`, `backups`, `bak` в имени после префикса
+(разделители `-`, `_`, `.`, без учёта регистра). Например, `.claude-backups` —
+резервная папка; `.claude-work` и `.claude-old` остаются профилями. Явные пути
+из переменных окружения и манифеста имеют приоритет над этим правилом.
+Источники возвращают подписи `Claude`, `Codex` или, например, `Claude · work`;
+их ID по каноническому пути остаются прежними. Изменения источников видны без
+перезапуска. Учётные данные для discovery не читаются.
 
 Сокет называется `node.sock`, а не `run.sock`: на одной машине узел и демон
 Jarvis могут стоять рядом, и делить один путь им нельзя.
@@ -67,16 +79,19 @@ Jarvis могут стоять рядом, и делить один путь и�
 
 | метод | зачем |
 | --- | --- |
-| `GET /hello` | версия, хост, uptime, состояние буфера — проверка связи |
-| `GET /events?since=<курсор>` | события с курсора; long-poll до 25 с; при переполнении буфера — `{"gap": true}` |
-| `GET /file?path=<p>&from=<off>` | кусок файла: транскрипты (`~/.claude`, `$CODEX_HOME`) и артефакты из каталогов живых пан |
+| `GET /hello` | protocol 2, capabilities, process instance, версия, источники и состояние буфера |
+| `GET /events?since=<курсор>&instance=<epoch>` | события с временем источника; long-poll до 25 с; при переполнении или другом процессе — `{"gap": true}` |
+| `GET /file?path=<p>&from=<off>` | до 512 KiB: только transcript subdirectories настроенных источников и каталоги живых пан; `auth.json` не доступен через provider home |
+| `GET /sources` | источники: `id`, `instanceId`, `agent`, `providerHome`, `available` |
+| `GET /sessions` | ограниченный каталог raw SID + source/home/path/size/file identity; remote prefix добавляет ноут |
+| `POST /sources/repair` | `{sourceId}` → official Codex RPC доверия только точным установленным хукам Jarvis |
 | `POST /reply` | `{pane, text}` → вставка в `tmux -L jarvis` |
 | `POST /control` | `{pane, cmd}` → слэш-команда в пану (модель/effort) |
 | `POST /keys` | `{pane, keys}` → план клавиш в пикер вопроса (план считает ноут) |
 | `GET /projects` | оглавление проектов машины: каталоги, сессии, время |
-| `POST /launch` | `{cwd, cmd, name}` → создать каталог и поднять сессию в tmux; отдаёт пану |
+| `POST /launch` | `{cwd, cmd, name, sourceId?}` → запустить в выбранном provider home; неизвестный source не откатывается к default |
 | `GET /screen?pane=` | видимый экран паны — «что там на самом деле происходит» |
-| `GET /usage` | лимиты аккаунта: текст `claude /usage` как есть (кэш 5 мин) |
+| `GET /usage?sourceId=` | Claude quota выбранного источника (кэш 5 мин); Codex official quota явно unsupported, token/cost analytics читаются из его транскриптов |
 | `GET /panes` | живые паны `tmux -L jarvis` |
 | `POST <любой другой путь>` | конверт от `jarvis-hook` (он бьёт в `/event`) |
 

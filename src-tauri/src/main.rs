@@ -7,7 +7,17 @@
 
 #[allow(dead_code)] // UI-потребитель подключается в фазе 7 (chat UI)
 mod agent;
+mod attachments;
+mod artifacts;
 mod agents; // реестр внешних агентов: qwen/opencode/свои — шимы и жизненный цикл
+mod agent_instances;
+mod session_identity;
+mod instance_ipc;
+mod codex_live;
+mod codex_titles;
+mod rollout_scope;
+mod codex_hooks;
+mod analytics; // локальная аналитика качества процесса, Git и результатов задач
 #[allow(dead_code)] // Codex-методы наполняются по инкрементам (codex CLI support)
 mod backend;
 mod bundle; // режим «Связка»: несколько агентов в worktree над одним проектом + очередь слияний
@@ -30,15 +40,20 @@ mod limits;
 mod log;
 mod loops; // режим «Циклы»: рутина, которую агент крутит сам — с концом и стенами
 mod platform; // окна, медиа, звук: платформенное за общим API (macos.rs / linux.rs)
+mod meetings;
 mod metrics;
 mod model;
+mod native_smoke;
+mod native_smoke_checks;
 mod onboarding;
 mod power;
 #[allow(dead_code)] // потребитель — daemon (маршрутизация удалённых сессий), следующий шаг инкремента
 mod remote; // удалённые узлы: ssh-туннель, HTTP-клиент узла, поллер событий
+mod remote_observer;
 mod route; // голосовая маршрутизация: скоринг → tie-break → пикер → stage-then-send
 mod ru;
 mod screen_prompt;
+mod question_delivery;
 mod symbols; // что именно тронул агент: объявления под правкой
 mod search; // поиск по проекту задачи: git grep там, где живёт сессия
 mod server;
@@ -48,6 +63,14 @@ mod shutdown;
 mod stt;
 mod tail;
 mod terminal;
+mod session_terminal;
+#[path = "../shared/terminal_stream.rs"]
+mod terminal_stream;
+mod launch_task;
+mod projects;
+mod project_icons;
+mod vm;
+mod teleport;
 mod tmux;
 mod transcript;
 mod tray;
@@ -95,12 +118,16 @@ fn main() {
     // До всего остального: паника, случившаяся раньше установки крючка, уйдёт
     // только в stderr — то есть мимо лога, который и присылают при разборе.
     log::install_panic_hook();
+    if let Err(error) = native_smoke::initialize() {
+        eprintln!("[native-smoke] {error}");
+        std::process::exit(2);
+    }
 
     let mut builder = tauri::Builder::default();
 
     // single-instance — только в проде; в dev-сборке (JARVIS_DEV=1) НЕ ставим,
     // чтобы dev и установленный прод крутились рядом, не гася друг друга.
-    if std::env::var("JARVIS_DEV").is_err() {
+    if std::env::var("JARVIS_DEV").is_err() && !native_smoke::enabled() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Второй запуск — это не «подними ещё одно окно», а команда уже
             // работающему. На Wayland (Sway) без этого никак: глобальные
@@ -113,7 +140,8 @@ fn main() {
                 Some(Command::Toggle) => windows::toggle_panel(&d),
                 Some(Command::Hide) => windows::hide_panel(&d),
                 Some(Command::Quit) => d.app.exit(0),
-                Some(Command::Show) | None => windows::show_panel(&d),
+                Some(Command::Show) => windows::show_panel(&d),
+                None => windows::show_application(&d),
             }
         }));
     }
@@ -168,6 +196,17 @@ fn main() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
+            instance_ipc::agent_instances_list,
+            instance_ipc::agent_instances_save,
+            instance_ipc::agent_instances_repair,
+            instance_ipc::remote_source_repair,
+            meetings::meetings_sources,
+            meetings::meetings_list,
+            meetings::meetings_status,
+            meetings::meetings_start,
+            meetings::meetings_stop,
+            meetings::meetings_get,
+            meetings::meetings_retranscribe,
             loops::ipc::loops_get,
             loops::ipc::loops_draft,
             loops::ipc::loops_catalog,
@@ -192,8 +231,14 @@ fn main() {
             loops::ipc::loops_resume,
             loops::ipc::loops_diff,
             ipc::agents_list,
+            native_smoke::native_smoke_report,
+            native_smoke::native_smoke_screenshot,
+            native_smoke_checks::native_smoke_probe,
             ipc::agents_save,
             ipc::state_get,
+            ipc::workspace_open,
+            ipc::system_accessibility_settings,
+            ipc::dictation_cancel_insertion,
             ipc::state_clear,
             ipc::panel_hide,
             ipc::settings_get,
@@ -222,8 +267,22 @@ fn main() {
             ipc::plugins_status,
             ipc::plugins_cmd,
             ipc::usage_summary,
+            ipc::analytics_report,
+            ipc::analytics_save_outcome,
+            ipc::analytics_config_get,
+            ipc::analytics_config_save,
+            ipc::analytics_config_defaults,
             ipc::limit_get,
             ipc::history_get,
+            ipc::projects_list,
+            ipc::projects_save,
+            ipc::projects_remove,
+            ipc::projects_icon_candidates,
+            ipc::vm_status,
+            ipc::vm_action,
+            ipc::teleport_status,
+            ipc::teleport_nodes,
+            ipc::teleport_login,
             ipc::usage_session,
             ipc::session_set_pin,
             ipc::session_kill,
@@ -240,7 +299,14 @@ fn main() {
             ipc::voice_set_duck,
             ipc::voice_set_bluetooth_only,
             ipc::session_reply,
+            ipc::session_terminal_snapshot,
+            ipc::session_terminal_key,
+            ipc::session_terminal_action,
             ipc::session_save_image,
+            attachments::session_save_attachment,
+            windows::file_dialog_state,
+            artifacts::artifact_read,
+            artifacts::artifact_notes,
             ipc::session_continue,
             ipc::agent_confirm,
             ipc::voice_pick_resolve,
@@ -251,6 +317,7 @@ fn main() {
             ipc::agent_chat_open,
             ipc::terminal_focus,
             ipc::session_launch,
+            ipc::session_continue_managed,
             ipc::remotes_list,
             ipc::remotes_add,
             ipc::remotes_remove,
@@ -275,11 +342,13 @@ fn main() {
             onboarding::model_delete,
             onboarding::quiet_set,
             ipc::agent_send,
+            ipc::agent_hosts,
             ipc::stt_get,
             ipc::models_get,
             ipc::transcripts_get,
             ipc::transcripts_clear,
             ipc::transcript_delete,
+            ipc::transcript_update,
             ipc::transcript_retranscribe,
             ipc::transcript_enhance,
             ipc::prompts_get_settings,
@@ -315,6 +384,11 @@ fn main() {
             onboarding::wake_install_models,
             onboarding::voice_install_silero,
             onboarding::models_install,
+            stt::voice_data::dictionary_get,
+            stt::voice_data::dictionary_add,
+            stt::voice_data::dictionary_remove,
+            stt::voice_data::scratchpad_get,
+            stt::voice_data::scratchpad_set,
         ])
         .setup(|app| {
             // Профильный lock ДО Daemon::new: второй процесс того же JARVIS_DIR
@@ -329,6 +403,22 @@ fn main() {
 
             let d = Arc::new(Daemon::new(app.handle().clone()));
             app.manage(d.clone());
+            app.manage(meetings::Meetings::new());
+
+            // Real windows and commands, isolated from the user's integrations.
+            // Only an explicitly validated debug launch can enter this branch.
+            if native_smoke::enabled() {
+                #[cfg(target_os = "macos")]
+                app.set_activation_policy(tauri::ActivationPolicy::Regular);
+                let panel = windows::create_panel(app.handle())?;
+                windows::create_toast(app.handle())?;
+                windows::show_panel(&d);
+                panel.set_focus()?;
+                // The validated temporary socket also exercises real MCP and
+                // grants. It cannot receive the user's production hooks.
+                tauri::async_runtime::spawn(server::serve(d.clone()));
+                return Ok(());
+            }
 
             // Накладка ⌘J — чистое меню-бар приложение без иконки в доке.
             // Оконный режим (макет 14h) — обычное приложение: док, ⌘Tab, меню.
@@ -362,7 +452,7 @@ fn main() {
             if !install::integration_health().ok() {
                 let _ = windows::create_onboarding(app.handle());
             } else {
-                windows::show_panel(&d);
+                windows::show_application(&d);
             }
 
             // unix-сокет — канал событий от хуков
@@ -438,6 +528,18 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if windows::is_workspace(window.label()) {
+                if matches!(event, tauri::WindowEvent::Destroyed) {
+                    Daemon::get(window.app_handle()).tail.remove_window(window.label());
+                }
+                if let tauri::WindowEvent::CloseRequested { .. } = event {
+                    if let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) {
+                        let size = size.to_logical::<f64>(scale);
+                        windows::remember_window_size(&Daemon::get(window.app_handle()), size.width, size.height);
+                    }
+                }
+                return;
+            }
             if window.label() != "main" {
                 return;
             }
@@ -453,14 +555,10 @@ fn main() {
                 // один кадр. Гасим только если фокус реально ушёл из приложения и
                 // не вернулся за 120 мс — иначе панель моргала бы на каждой стрелке.
                 tauri::WindowEvent::Focused(false) => {
-                    // обычное окно не исчезает от клика мимо — это поведение накладки
-                    if windows::is_window_mode(window.app_handle()) {
-                        return;
-                    }
                     let w = window.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(120));
-                        if !w.is_focused().unwrap_or(false) && w.is_visible().unwrap_or(false) {
+                        if !windows::file_dialog_open(w.label()) && !w.is_focused().unwrap_or(false) && w.is_visible().unwrap_or(false) {
                             let _ = w.hide();
                         }
                     });
@@ -471,11 +569,16 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("jarvis: не удалось собрать приложение")
         .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if matches!(&event, tauri::RunEvent::Reopen { has_visible_windows: false, .. }) {
+                windows::show_application(&Daemon::get(app));
+            }
             if let tauri::RunEvent::Exit = event {
+                if native_smoke::enabled() { return; }
                 let d = Daemon::get(app);
                 d.write_state_now(); // реестр переживает перезапуск
                 // размер окна тоже: снимаем один раз здесь, а не на каждом кадре ресайза
-                if let Some(w) = app.get_webview_window("main") {
+                if let Some(w) = app.get_webview_window("workspace") {
                     if let (Ok(sz), Ok(sf)) = (w.inner_size(), w.scale_factor()) {
                         let l = sz.to_logical::<f64>(sf);
                         windows::remember_window_size(&d, l.width, l.height);
@@ -488,6 +591,7 @@ fn main() {
                 d.voice.dispose(); // погасить Silero-сайдкар, если был поднят
                 d.stt.dispose(); // погасить Qwen3-MLX-сайдкар, если был поднят
                 d.wake.dispose(); // остановить wake-word consumer-поток
+                app.state::<Arc<meetings::Meetings>>().dispose();
                 d.audio.dispose(); // остановить общий аудио-захват (drop cpal Stream)
                 let _ = std::fs::remove_file(util::sock_path());
             }
@@ -496,6 +600,8 @@ fn main() {
 
 /// Все периодические задачи демона — расписание из Electron-версии.
 fn spawn_timers(d: &Arc<Daemon>) {
+    codex_live::start(d.clone());
+    remote_observer::start(d.clone());
     // сверка живости сессий (мёртвый pid/пана → выселяем): сразу и раз в 30с
     let dd = d.clone();
     tauri::async_runtime::spawn(async move {

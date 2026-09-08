@@ -85,7 +85,7 @@ fn defaults() -> Value {
         // ставят. Выключается тумблером в «Запуске».
         "launchDangerous": true,
         // внешность (дизайн «Клевер», экран 14f «вид»)
-        "theme": "light",   // 'light' | 'dark' | 'auto' (системная)
+        "theme": "auto",   // 'light' | 'dark' | 'auto' (системная)
         "paint": "clover",  // 'clover' | 'coal' | 'raspberry' | 'custom'
         "accent": "#0B6B44", // тон своей краски: остальное выводится из него
         "density": "normal", // 'compact' | 'normal' | 'roomy' — высота строк
@@ -94,9 +94,9 @@ fn defaults() -> Value {
         "footerBottom": "limit", // что показывать внизу панели: 'limit' | 'spend'
         // раскладка: 'overlay' — накладка ⌘J поверх всего; 'window' — обычное
         // окно с иконкой в доке и списком слева (макет 14h)
-        "mode": "overlay",
+        "mode": "window",
         "windowW": 1120,
-        "windowH": 640,
+        "windowH": 780,
         // удалённые узлы (VPS/рабочая станция): [{name, sshHost, jarvisDir}].
         // Пусто — удалённый слой выключен целиком: ни ssh-туннелей, ни поллеров.
         "remotes": [],
@@ -124,6 +124,20 @@ fn read_merged(path: &Path) -> Value {
         }
     }
     merged
+}
+
+fn read_for_update(path: &Path) -> Result<Value, String> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(defaults()),
+        Err(error) => return Err(format!("Не удалось прочитать настройки: {error}")),
+    };
+    let disk: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("Файл настроек повреждён: {error}"))?;
+    let disk = disk.as_object().ok_or("Файл настроек должен содержать JSON-объект")?;
+    let mut merged = defaults();
+    merged.as_object_mut().unwrap().extend(disk.clone());
+    Ok(merged)
 }
 
 /// Persist a complete settings snapshot without ever exposing a partially
@@ -194,7 +208,7 @@ impl Store {
     }
 
     #[cfg(test)]
-    fn with_path(path: PathBuf) -> Self {
+    pub(crate) fn with_path(path: PathBuf) -> Self {
         Self {
             cache: Mutex::new(None),
             path,
@@ -218,24 +232,16 @@ impl Store {
 
     /// Execute one read-modify-write transaction while holding the cache
     /// mutex. Cache advances only after the atomic rename has succeeded.
-    fn update(&self, mutate: impl FnOnce(&mut Map<String, Value>)) -> Value {
-        let mut cache = self.cache.lock().unwrap();
-        let current = self.current_locked(&mut cache);
+    pub(crate) fn try_update(&self, mutate: impl FnOnce(&mut Map<String, Value>) -> Result<(), String>) -> Result<Value, String> {
+        let mut cache = self.cache.lock().map_err(|_| "Хранилище настроек временно недоступно")?;
+        // Writes are infrequent and already include fsync. Read strictly here:
+        // a fallback cached by load() must never overwrite malformed user data.
+        let current = read_for_update(&self.path)?;
         let mut next = current.clone();
-        mutate(next.as_object_mut().unwrap());
-
-        match atomic_write(&self.path, &next) {
-            Ok(()) => {
-                // Отпечаток снимаем ПОСЛЕ записи — с того файла, что теперь на
-                // диске, иначе следующее чтение сочло бы свою же запись чужой.
-                *cache = Some((next.clone(), stamp_of(&self.path)));
-                next
-            }
-            Err(err) => {
-                eprintln!("[jarvis] не смог записать настройки: {err}");
-                current
-            }
-        }
+        mutate(next.as_object_mut().unwrap())?;
+        atomic_write(&self.path, &next).map_err(|error| format!("Не удалось сохранить настройки: {error}"))?;
+        *cache = Some((next.clone(), stamp_of(&self.path)));
+        Ok(next)
     }
 
     /// Однократная миграция файла на старте: если версия на диске устарела —
@@ -268,12 +274,39 @@ impl Store {
         self.current_locked(&mut cache)
     }
 
-    pub fn save(&self, patch: Map<String, Value>) -> Value {
-        self.update(|m| {
+    pub fn try_save(&self, patch: Map<String, Value>) -> Result<Value, String> {
+        self.try_update(|m| {
             for (k, v) in patch {
                 m.insert(k, v);
             }
+            Ok(())
         })
+    }
+
+    /// Compensate a failed native operation without replacing unrelated fields
+    /// that another writer added meanwhile. Only already-authorized keys enter.
+    pub(crate) fn try_restore_fields(&self, fields: Vec<(String, Option<Value>)>) -> Result<Value, String> {
+        self.try_update(|root| {
+            for (key, value) in fields {
+                match value { Some(value) => { root.insert(key, value); }, None => { root.remove(&key); } }
+            }
+            Ok(())
+        })
+    }
+
+    /// Background callers may tolerate failed persistence, but must log it.
+    /// UI-facing mutations must use try_save/try_set_* and propagate the error.
+    pub fn save(&self, patch: Map<String, Value>) -> Value {
+        self.try_save(patch).unwrap_or_else(|error| {
+            crate::log::line(&format!("[settings] background save failed: {error}"));
+            self.load()
+        })
+    }
+
+    fn log_background(result: Result<Value, String>) {
+        if let Err(error) = result {
+            crate::log::line(&format!("[settings] background save failed: {error}"));
+        }
     }
 
     /* -------- типизированные шорткаты для частых полей -------- */
@@ -323,62 +356,75 @@ impl Store {
     /// убирает легаси `proxy`, иначе пустой `service.proxy` провалится в него
     /// и очищенный пользователем прокси «воскреснет».
     pub fn remove_top(&self, key: &str) {
-        self.update(|m| {
+        Self::log_background(self.try_remove_top(key));
+    }
+
+    pub fn try_remove_top(&self, key: &str) -> Result<Value, String> {
+        self.try_update(|m| {
             m.remove(key);
-        });
+            Ok(())
+        })
     }
 
     /// Установить верхнеуровневый ключ (merge поверх остального).
     pub fn set_top(&self, key: &str, value: Value) {
+        Self::log_background(self.try_set_top(key, value));
+    }
+
+    pub fn try_set_top(&self, key: &str, value: Value) -> Result<Value, String> {
         let mut root = Map::new();
         root.insert(key.to_string(), value);
-        self.save(root);
+        self.try_save(root)
     }
 
     /// Deep-set полей в объект "voice" (не затирая остальные voice-ключи).
     pub fn set_voice(&self, patch: Map<String, Value>) {
-        self.update(|root| {
-            let voice = root.entry("voice").or_insert_with(|| json!({}));
-            let Some(obj) = voice.as_object_mut() else { return };
-            for (k, v) in patch {
-                obj.insert(k, v);
-            }
-        });
+        Self::log_background(self.try_set_voice(patch));
+    }
+
+    pub fn try_set_voice(&self, patch: Map<String, Value>) -> Result<Value, String> {
+        self.try_set_block("voice", patch)
     }
 
     /// Deep-set полей в объект "stt" (не затирая остальные stt-ключи).
     pub fn set_stt(&self, patch: Map<String, Value>) {
-        self.update(|root| {
-            let stt = root.entry("stt").or_insert_with(|| json!({}));
-            let Some(obj) = stt.as_object_mut() else { return };
-            for (k, v) in patch {
-                obj.insert(k, v);
-            }
-        });
+        Self::log_background(self.try_set_stt(patch));
+    }
+
+    pub fn try_set_stt(&self, patch: Map<String, Value>) -> Result<Value, String> {
+        self.try_set_block("stt", patch)
     }
 
     /// Deep-set полей в произвольный объект-блок верхнего уровня (инкр. 10:
     /// "wake"/"verification"), не затирая остальные ключи блока.
     pub fn set_block(&self, block: &str, patch: Map<String, Value>) {
-        self.update(|root| {
-            let block = root.entry(block).or_insert_with(|| json!({}));
-            let Some(obj) = block.as_object_mut() else { return };
-            for (k, v) in patch {
-                obj.insert(k, v);
-            }
-        });
+        Self::log_background(self.try_set_block(block, patch));
+    }
+
+    pub fn try_set_block(&self, block: &str, patch: Map<String, Value>) -> Result<Value, String> {
+        self.try_update(|root| {
+            let replaces_proxy = block == "service" && patch.contains_key("proxy");
+            let value = root.entry(block).or_insert_with(|| json!({}));
+            let obj = value.as_object_mut().ok_or_else(|| format!("Раздел настроек «{block}» должен быть объектом"))?;
+            obj.extend(patch);
+            if replaces_proxy { root.remove("proxy"); }
+            Ok(())
+        })
     }
 
     pub fn set_plugin(&self, id: &str, patch: Map<String, Value>) {
-        self.update(|root| {
+        Self::log_background(self.try_set_plugin(id, patch));
+    }
+
+    pub fn try_set_plugin(&self, id: &str, patch: Map<String, Value>) -> Result<Value, String> {
+        self.try_update(|root| {
             let plugins = root.entry("plugins").or_insert_with(|| json!({}));
-            let Some(plugins) = plugins.as_object_mut() else { return };
+            let plugins = plugins.as_object_mut().ok_or("Раздел plugins должен быть объектом")?;
             let plugin = plugins.entry(id.to_string()).or_insert_with(|| json!({}));
-            let Some(obj) = plugin.as_object_mut() else { return };
-            for (k, v) in patch {
-                obj.insert(k, v);
-            }
-        });
+            let obj = plugin.as_object_mut().ok_or("Настройки плагина должны быть объектом")?;
+            obj.extend(patch);
+            Ok(())
+        })
     }
 }
 
@@ -520,8 +566,7 @@ mod persistence_tests {
         let mut service = Map::new();
         service.insert("proxy".into(), Value::from(""));
         store.set_block("service", service);
-        assert_eq!(store.proxy().as_deref(), Some("http://legacy:8080"));
-
+        assert_eq!(store.proxy(), None, "смена service.proxy атомарно убирает старый ключ");
         store.remove_top("proxy");
         assert_eq!(store.proxy(), None, "легаси-ключ удалён — прокси очищен");
         assert!(
@@ -614,5 +659,36 @@ mod persistence_tests {
             0
         );
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn strict_writes_report_failure_and_preserve_malformed_external_data() {
+        let dir = temp_dir("strict-failure");
+        let path = dir.join("settings.json");
+        let store = Store::with_path(path.clone());
+        store.try_set_top("theme", json!("dark")).unwrap();
+        fs::write(&path, b"{unfinished external edit").unwrap();
+        let failed = store.try_set_top("theme", json!("light"));
+        assert!(failed.is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{unfinished external edit");
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(store.try_set_stt(json!({"engine":"qwen3-0.6b"}).as_object().unwrap().clone()).is_err());
+        assert!(path.is_dir());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn proxy_replacement_and_compensation_preserve_unrelated_settings() {
+        let dir = temp_dir("compensate");
+        let store = store_at(&dir);
+        store.try_set_top("proxy", json!("http://old.invalid:8080")).unwrap();
+        store.try_set_block("service", json!({"proxy":""}).as_object().unwrap().clone()).unwrap();
+        assert!(store.load().get("proxy").is_none());
+        store.try_set_top("density", json!("compact")).unwrap();
+        store.try_restore_fields(vec![("theme".into(), Some(json!("dark")))]).unwrap();
+        assert_eq!(store.load()["density"], "compact");
+        assert_eq!(store.load()["theme"], "dark");
+        fs::remove_dir_all(dir).unwrap();
     }
 }

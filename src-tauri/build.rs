@@ -1,4 +1,8 @@
+mod build_node_bundle;
+
 fn main() {
+    build_node_bundle::embed();
+    build_meeting_system_audio();
     // Dev-only: встроить Info.plist (с NSMicrophoneUsageDescription) в RAW-бинарь
     // `jarvis`, чтобы macOS мог показать диалог разрешения микрофона при запуске
     // через `cargo run` (без .app-бандла). Гейтим переменной JARVIS_DEV_SIGN, чтобы
@@ -26,6 +30,55 @@ fn main() {
     tauri_build::build()
 }
 
+/// A small Objective-C bridge avoids requiring Swift or a separately installed
+/// helper at runtime. Weak linking keeps the microphone-only path usable on
+/// the application's older supported macOS versions.
+fn build_meeting_system_audio() {
+    println!("cargo:rerun-if-changed=src/meetings/system_audio.m");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let object = out.join("jarvis_meeting_audio.o");
+    let archive = out.join("libjarvis_meeting_audio.a");
+    let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("aarch64") => "arm64",
+        Ok("x86_64") => "x86_64",
+        _ => panic!("unsupported macOS architecture for meeting audio"),
+    };
+    let status = std::process::Command::new("xcrun")
+        .args([
+            "clang",
+            "-c",
+            "-fobjc-arc",
+            "-fblocks",
+            "-Wall",
+            "-Wextra",
+            "-Wno-unused-parameter",
+            "-mmacosx-version-min=11.0",
+            "-arch",
+            arch,
+        ])
+        .arg("src/meetings/system_audio.m")
+        .arg("-o")
+        .arg(&object)
+        .status()
+        .expect("Xcode Command Line Tools are required for macOS meeting audio");
+    assert!(status.success(), "compiling ScreenCaptureKit bridge failed");
+    let status = std::process::Command::new("xcrun")
+        .args(["ar", "crs"])
+        .arg(&archive)
+        .arg(&object)
+        .status()
+        .expect("xcrun ar");
+    assert!(status.success(), "archiving ScreenCaptureKit bridge failed");
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=jarvis_meeting_audio");
+    println!("cargo:rustc-link-lib=framework=Foundation");
+    println!("cargo:rustc-link-lib=framework=CoreMedia");
+    println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
+}
+
 /// Короткий отпечаток содержимого `ui/`: по нему видно, та ли панель внутри.
 fn ui_fingerprint() -> String {
     let dir = std::path::Path::new("../ui");
@@ -48,7 +101,9 @@ fn ui_fingerprint() -> String {
 }
 
 fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -72,5 +127,9 @@ fn build_ref() -> String {
     };
     let branch = run(&["rev-parse", "--abbrev-ref", "HEAD"]);
     let sha = run(&["rev-parse", "--short", "HEAD"]);
-    if branch.is_empty() && sha.is_empty() { "?".into() } else { format!("{branch}@{sha}") }
+    if branch.is_empty() && sha.is_empty() {
+        "?".into()
+    } else {
+        format!("{branch}@{sha}")
+    }
 }

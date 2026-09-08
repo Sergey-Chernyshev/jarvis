@@ -1,0 +1,39 @@
+Native smoke PID 32252; profile /var/folders/sz/1yzw2zzs64x5kcr0c9hqhnr40000gq/T/jarvis-native-smoke-nTaGiF
+{
+  "profile": "/var/folders/sz/1yzw2zzs64x5kcr0c9hqhnr40000gq/T/jarvis-native-smoke-nTaGiF",
+  "report": "/var/folders/sz/1yzw2zzs64x5kcr0c9hqhnr40000gq/T/jarvis-native-smoke-nTaGiF/report.json",
+  "ok": true,
+  "steps": [
+    {
+      "name": "Machine inventory renders real bridge data in the designed workspace",
+      "ok": true,
+      "elapsedMs": 1006.0000000000002
+    },
+    {
+      "name": "Cmd8 and navigation Back return to the standalone Machines module",
+      "ok": true,
+      "elapsedMs": 212.99999999999977
+    },
+    {
+      "name": "Machine search is editable and empty results preserve a working Add action",
+      "ok": true,
+      "elapsedMs": 1
+    },
+    {
+      "name": "SSH draft fields are comfortable and survive cancel without a connection request",
+      "ok": true,
+      "elapsedMs": 279
+    },
+    {
+      "name": "Native machine design fits its scroll area",
+      "ok": true,
+      "elapsedMs": 101
+    }
+  ],
+  "errors": [],
+  "failure": null,
+  "outcome": {
+    "code": 0,
+    "signal": null
+  }
+}

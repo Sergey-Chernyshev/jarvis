@@ -1,0 +1,26 @@
+.qview, #qPanel { --q-accent: var(--accent, #919cf6); }
+#qPanel { width: min(460px, 100%); max-width: 100%; }
+.qvopts { min-height: 0; overflow-y: auto; }
+button.qopt { width: 100%; text-align: left; color: inherit; font: inherit; border: 1px solid transparent; cursor: pointer; }
+.qopt:focus-visible { outline: 2px solid var(--q-accent); outline-offset: -2px; }
+.qopt.chosen { border-color: color-mix(in srgb, var(--q-accent) 40%, transparent); }
+.qopt[disabled] { opacity: .55; cursor: default; }
+.qcustomrow { display: flex; flex-direction: column; gap: 7px; padding-bottom: 14px; }
+.qcustomrow[hidden] { display: none; }
+textarea.qcustom { width: 100%; box-sizing: border-box; min-height: 90px; max-height: 220px; resize: vertical; line-height: 1.5; padding: 12px 14px; border-radius: 14px; font: inherit; }
+textarea.qcustom:focus { outline: 2px solid var(--q-accent); outline-offset: 2px; }
+.q-secret { -webkit-text-security: disc; }
+.q-custom-hint, .q-key-hint { color: var(--muted, #9b9ba7); font-size: 11px; }
+.qvfoot { display: flex; flex-direction: column; align-items: stretch; gap: 10px; }
+.q-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; width: 100%; }
+.q-key-hint { flex: 1; min-width: 100px; }
+.q-primary, .q-secondary, .q-edit { padding: 9px 13px; border-radius: 11px; font: inherit; cursor: pointer; border: 1px solid var(--line, #ffffff20); color: inherit; background: var(--paper-2, #ffffff0b); }
+.q-primary { background: var(--q-accent); color: #11121b; border-color: transparent; font-weight: 600; }
+.q-primary:disabled, .q-secondary:disabled { opacity: .45; cursor: default; }
+.q-status:empty { display: none; }
+.q-status { font-size: 12px; line-height: 1.5; white-space: normal; color: var(--muted, #a7a7b6); }
+.q-review-row { padding: 15px; margin-bottom: 10px; border: 1px solid var(--line, #ffffff15); border-radius: 15px; }
+.q-review-row strong { display: block; font-size: 13px; line-height: 1.5; }
+.q-review-answer { margin: 9px 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.55; }
+.q-edit { font-size: 11px; padding: 5px 9px; }
+@media (prefers-reduced-motion: no-preference) { button.qopt, .q-primary { transition: background 140ms, border-color 140ms, opacity 140ms; } }

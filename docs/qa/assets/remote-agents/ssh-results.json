@@ -1,0 +1,249 @@
+{
+  "date": "2026-09-05",
+  "transport": "real localhost OpenSSH, tmux, jarvis-node",
+  "content": "synthetic only",
+  "results": [
+    {
+      "scenario": "SSH TCP-to-Unix handshake",
+      "passed": true,
+      "evidence": {
+        "buffered": 0,
+        "capacity": 8,
+        "cursor": 0,
+        "host": "localhost",
+        "instance": "3804-1788563077890373000",
+        "node": "jarvis-node",
+        "oldest": null,
+        "uptime_ms": 270,
+        "version": "0.3.3"
+      }
+    },
+    {
+      "scenario": "long-poll wakes on exact hook payload",
+      "passed": true,
+      "evidence": {
+        "cursor": 1,
+        "events": [
+          {
+            "at": 1788563078372,
+            "cursor": 0,
+            "envelope": {
+              "agent": "claude",
+              "event": "prompt",
+              "payload": {
+                "prompt": "Привет 👋",
+                "session_id": "qa-synthetic",
+                "turn_id": "qa-turn"
+              }
+            }
+          }
+        ],
+        "instance": "3804-1788563077890373000"
+      }
+    },
+    {
+      "scenario": "launch actual process in isolated tmux",
+      "passed": true,
+      "evidence": {
+        "ok": true,
+        "pane": "%1",
+        "session": "qa-receiver-1788563078373-3804-0"
+      }
+    },
+    {
+      "scenario": "reply preserves Unicode and literal shell syntax",
+      "passed": true,
+      "evidence": {
+        "response": {
+          "ok": true
+        },
+        "received": [
+          "Привет 👋 literal $(touch SHOULD_NOT_EXIST) `whoami`"
+        ]
+      }
+    },
+    {
+      "scenario": "read fixture transcript under live pane cwd",
+      "passed": true,
+      "evidence": {
+        "data": "{\"type\":\"user\",\"message\":{\"content\":\"Привет 👋\"}}\n",
+        "eof": true,
+        "from": 0,
+        "next": 58,
+        "path": "<fixture>/repo/synthetic.jsonl",
+        "size": 58
+      }
+    },
+    {
+      "scenario": "tail waits for a split UTF-8 character",
+      "passed": true,
+      "evidence": {
+        "partial": {
+          "data": "",
+          "eof": false,
+          "from": 0,
+          "next": 0,
+          "path": "<fixture>/repo/synthetic.jsonl",
+          "size": 2
+        },
+        "completed": {
+          "data": "👋\n",
+          "eof": true,
+          "from": 0,
+          "next": 5,
+          "path": "<fixture>/repo/synthetic.jsonl",
+          "size": 5
+        }
+      }
+    },
+    {
+      "scenario": "truncated transcript reports rewind cursor",
+      "passed": true,
+      "evidence": {
+        "data": "",
+        "eof": true,
+        "from": 3,
+        "next": 3,
+        "path": "<fixture>/repo/synthetic.jsonl",
+        "size": 3
+      }
+    },
+    {
+      "scenario": "reject file outside allowed roots",
+      "passed": true,
+      "evidence": {
+        "http": 403,
+        "response": {
+          "error": "путь вне корней: узел отдаёт транскрипты и файлы из каталогов, где работает агент"
+        }
+      }
+    },
+    {
+      "scenario": "concurrent same-name launches are independent",
+      "passed": true,
+      "evidence": [
+        [
+          200,
+          {
+            "ok": true,
+            "pane": "%2",
+            "session": "qa-same-name-1788563080391-3804-2"
+          }
+        ],
+        [
+          200,
+          {
+            "ok": true,
+            "pane": "%3",
+            "session": "qa-same-name-1788563080391-3804-1"
+          }
+        ]
+      ]
+    },
+    {
+      "scenario": "protocol probe subprocess",
+      "passed": true,
+      "evidence": {
+        "exitCode": 0
+      }
+    },
+    {
+      "scenario": "duplicate node cannot replace live socket",
+      "passed": true,
+      "evidence": {
+        "duplicateExitCode": 1,
+        "socketInodeUnchanged": true
+      }
+    },
+    {
+      "scenario": "reconnect replays events in exact order",
+      "passed": true,
+      "evidence": {
+        "cursor": 4,
+        "events": [
+          {
+            "at": 1788563082102,
+            "cursor": 1,
+            "envelope": {
+              "agent": "codex",
+              "event": "post-tool",
+              "payload": {
+                "qa": 0
+              }
+            }
+          },
+          {
+            "at": 1788563082177,
+            "cursor": 2,
+            "envelope": {
+              "agent": "codex",
+              "event": "post-tool",
+              "payload": {
+                "qa": 1
+              }
+            }
+          },
+          {
+            "at": 1788563082252,
+            "cursor": 3,
+            "envelope": {
+              "agent": "codex",
+              "event": "post-tool",
+              "payload": {
+                "qa": 2
+              }
+            }
+          }
+        ],
+        "instance": "3804-1788563077890373000"
+      }
+    },
+    {
+      "scenario": "buffer overflow produces explicit gap",
+      "passed": true,
+      "evidence": {
+        "cursor": 14,
+        "gap": true,
+        "instance": "3804-1788563077890373000"
+      }
+    },
+    {
+      "scenario": "node restart invalidates previous cursor",
+      "passed": true,
+      "evidence": {
+        "cursor": 0,
+        "gap": true,
+        "instance": "4084-1788563082447003000"
+      }
+    },
+    {
+      "scenario": "stream resumes after node restart gap",
+      "passed": true,
+      "evidence": {
+        "cursor": 1,
+        "events": [
+          {
+            "at": 1788563082484,
+            "cursor": 0,
+            "envelope": {
+              "event": "prompt",
+              "payload": {
+                "qa": "after-restart"
+              }
+            }
+          }
+        ],
+        "instance": "4084-1788563082447003000"
+      }
+    },
+    {
+      "scenario": "restart detected even after numeric cursor catches up",
+      "passed": true,
+      "evidence": {
+        "cursor": 0,
+        "gap": true,
+        "instance": "4084-1788563082447003000"
+      }
+    }
+  ]
+}

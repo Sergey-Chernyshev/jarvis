@@ -145,7 +145,7 @@ pub struct Daemon {
     pub commands: crate::commands_catalog::Catalog,
     pub limits: crate::limits::Limits,
     pub power: crate::power::Power,
-    pub tail: tail::TailHandle,
+    pub tail: tail::TailManager,
     /// Тихий режим (разработчик): демон жив и копит статистику с хуков, но наружу
     /// ничего — ни тостов, ни голоса, ни авто-показа. Панель открываема вручную.
     pub quiet: AtomicBool,
@@ -253,6 +253,8 @@ enum Effect {
     DoneSummary {
         sid: String,
         hook_reply: Option<String>,
+        stop_at: i64,
+        revision: u64,
     },
     /// Сводка последнего хода для открытого чата (панель показывает карточку).
     TurnSummary {
@@ -279,7 +281,7 @@ impl Daemon {
         let vcfg = crate::voice::config::VoiceConfig::from_settings(&settings.load());
         let voice = crate::voice::Voice::new(&vcfg, jarvis_dir().join("silero"), app.clone());
         // прогрев движка на старте — первая реальная реплика не ловит холодный старт
-        {
+        if !crate::native_smoke::enabled() {
             let v = voice.clone();
             std::thread::spawn(move || v.warmup());
         }
@@ -330,7 +332,7 @@ impl Daemon {
             commands: crate::commands_catalog::Catalog::new(),
             limits: crate::limits::Limits::new(),
             power: crate::power::Power::new(),
-            tail: tail::TailHandle::new(),
+            tail: tail::TailManager::new(),
             quiet: AtomicBool::new(quiet0),
             hk_suspend_gen: AtomicU64::new(0),
             hk_select_was_on: AtomicBool::new(false),
@@ -378,7 +380,9 @@ impl Daemon {
     /* ================= снапшот и доставка состояния ================= */
 
     pub fn snapshot(&self) -> Vec<Session> {
-        let mut list: Vec<Session> = self.sessions.lock().unwrap().values().cloned().collect();
+        let mut list: Vec<Session> = self.sessions.lock().unwrap().values()
+            .filter(|s| !s.model.as_deref().is_some_and(crate::backend::codex_transcript::is_technical_model))
+            .cloned().collect();
         crate::model::sort_snapshot(&mut list);
         list
     }
@@ -531,7 +535,10 @@ impl Daemon {
     /// Переключить тихий режим (хоткей/меню): персист + обновление галки в трее.
     pub fn toggle_quiet(self: &std::sync::Arc<Self>) {
         let on = !self.is_quiet();
-        self.set_quiet(on);
+        if let Err(error) = self.set_quiet(on) {
+            self.mode_toast("!", &error);
+            return;
+        }
         if on {
             self.mode_toast("🌙", "Тихий режим");
         } else {
@@ -539,14 +546,15 @@ impl Daemon {
         }
     }
 
-    pub fn set_quiet(self: &std::sync::Arc<Self>, on: bool) {
+    pub fn set_quiet(self: &std::sync::Arc<Self>, on: bool) -> Result<(), String> {
+        self.settings.try_set_top("quietMode", Value::Bool(on))?;
         self.quiet.store(on, Ordering::SeqCst);
-        self.settings.set_top("quietMode", Value::Bool(on));
         crate::log::line(&format!(
             "[quiet] тихий режим: {}",
             if on { "ВКЛ" } else { "выкл" }
         ));
         crate::tray::update(self, &self.snapshot()); // перерисовать меню (галка)
+        Ok(())
     }
 
     /// Тост снизу экрана: приходит всегда (не зависит от разрешений macOS и
@@ -605,6 +613,9 @@ impl Daemon {
         // payload тоста — первый вопрос (+count); карточка покажет остальные подсказкой.
         let question = qitems.first().map(|qi| {
             serde_json::json!({
+                "requestId": qfull.as_ref().map(crate::question_delivery::request_id),
+                "revision": qfull.as_ref().map(|q| q.revision),
+                "transport": qfull.as_ref().map(|q| q.transport.as_str()),
                 "multiSelect": qi.multi_select,
                 "question": qi.question,
                 "count": qcount,
@@ -859,9 +870,22 @@ impl Daemon {
         };
         crate::log::line(&format!("[select] ⌘⌥{n} → sid={}", ellipsize(&sid, 8)));
         let h = self.app.clone();
+        let Some(q) = self.session(&sid).and_then(|s| s.question) else { return; };
+        // A global digit must never submit one part of a multi-answer request.
+        if q.questions.len() != 1 || q.questions[0].multi_select {
+            windows::show_panel(self);
+            windows::emit_to_panel(&h, "open-session", &sid);
+            return;
+        }
         tauri::async_runtime::spawn(async move {
-            let _ =
-                crate::ipc::question_answer(h, sid, serde_json::json!({ "answers": [[n]] })).await;
+            let result = crate::ipc::question_answer(h.clone(), sid, serde_json::json!({
+                "requestId": crate::question_delivery::request_id(&q), "revision": q.revision,
+                "submissionId": format!("hotkey-{}", now_ms()), "answers": [[n]],
+            })).await;
+            if result.get("ok").and_then(Value::as_bool) != Some(true) {
+                let d = Daemon::get(&h);
+                d.notify("Ответ не подтверждён", result.get("error").and_then(Value::as_str).unwrap_or("Проверь вопрос в приложении"), None, "waiting");
+            }
         });
     }
 
@@ -901,6 +925,15 @@ impl Daemon {
     /// Партия событий с узла. Конверты уже помечены (`stamp`) — редьюсер ест их
     /// как локальные, вся интерпретация общая.
     fn apply_remote_batch(self: &std::sync::Arc<Self>, batch: crate::remote::Batch) {
+        if batch.gap {
+            // После потери событий/рестарта нельзя сравнивать новый stop с
+            // turn_id, чей prompt мог исчезнуть из кольцевого буфера.
+            for session in self.sessions.lock().unwrap().values_mut() {
+                if session.remote.as_deref() == Some(batch.remote.as_str()) {
+                    session.provider_turn_id = None;
+                }
+            }
+        }
         for evt in &batch.events {
             self.reduce(evt);
         }
@@ -990,19 +1023,18 @@ impl Daemon {
     /* ================= редьюсер ================= */
 
     pub fn reduce(self: &std::sync::Arc<Self>, evt: &Value) {
+        let Some(normalized) = crate::session_identity::normalize(evt) else { return; };
+        let evt = &normalized;
+        let Some(hook) = crate::backend::events::HookEvent::parse(evt) else { return; };
         let Some(evt_obj) = evt.as_object() else {
             return;
         };
-        let payload = evt.get("payload").and_then(Value::as_object);
-        let empty = serde_json::Map::new();
-        let p = payload.unwrap_or(&empty);
-        let sid = p
-            .get("session_id")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-        let now = now_ms();
-        let event = evt_obj.get("event").and_then(Value::as_str).unwrap_or("");
+        let p = hook.payload;
+        let sid = hook.session_id.to_string();
+        let now = evt.get("providerAt").or_else(|| evt.get("remoteAt")).and_then(Value::as_i64).filter(|t| *t > 0).unwrap_or_else(now_ms);
+        let silent = evt.get("silent").and_then(Value::as_bool).unwrap_or(false)
+            || evt.get("remoteReplay").and_then(Value::as_bool).unwrap_or(false);
+        let event = hook.name;
         // SessionStart несёт source: startup|resume|clear|compact — нас интересует compact.
         let source = p.get("source").and_then(Value::as_str).unwrap_or("");
 
@@ -1023,6 +1055,10 @@ impl Daemon {
         let mut effects: Vec<Effect> = Vec::new();
         {
             let mut sessions = self.sessions.lock().unwrap();
+            if sessions.get(&sid).and_then(|s| s.provider_event_at).is_some_and(|at| now < at) { return; }
+            if sessions.get(&sid).is_some_and(|session| !hook.accepts(session, evt)) {
+                return;
+            }
 
             if event == "session-end" {
                 sessions.remove(&sid);
@@ -1055,6 +1091,27 @@ impl Daemon {
             let s = sessions
                 .entry(sid.clone())
                 .or_insert_with(|| Session::new(sid.clone(), now));
+            s.provider_event_at = Some(now);
+            for (field, slot) in [
+                ("instanceId", &mut s.instance_id), ("instanceLabel", &mut s.instance_label),
+                ("providerHome", &mut s.provider_home), ("providerSessionId", &mut s.provider_session_id),
+            ] {
+                if let Some(value) = evt.get(field).and_then(Value::as_str).filter(|v| !v.is_empty()) { *slot = Some(value.into()); }
+            }
+            s.monitor_source = Some(evt.get("monitorSource").and_then(Value::as_str).unwrap_or("hook").into());
+            if s.monitor_source.as_deref() == Some("hook") { s.hook_last_at = Some(now); }
+
+            if matches!(event, "session-start" | "prompt" | "stop") {
+                s.lifecycle_revision = s.lifecycle_revision.wrapping_add(1);
+            }
+            if matches!(event, "session-start" | "prompt") {
+                s.provider_turn_id = hook.turn_id().map(String::from);
+            } else if let Some(turn_id) = hook.turn_id() {
+                s.provider_turn_id = Some(turn_id.to_string());
+            }
+            if matches!(event, "session-start" | "prompt" | "stop") && s.question.take().is_some() {
+                effects.push(Effect::RemoveToast { id: format!("q-{sid}") });
+            }
 
             /* ---- общие поля события ---- */
             if let Some(cwd) = p.get("cwd").and_then(Value::as_str) {
@@ -1094,6 +1151,12 @@ impl Daemon {
                 }
             }
             if let Some(pane) = evt_obj.get("tmux_pane").and_then(Value::as_str) {
+                if !pane.is_empty() {
+                    s.control_mode = Some("tmux".into());
+                    if let Some(question) = &mut s.question {
+                        if question.transport == "external" { question.transport = "tmux".into(); }
+                    }
+                }
                 if !pane.is_empty() && s.tmux_pane.as_deref() != Some(pane) {
                     s.tmux_pane = Some(pane.to_string());
                     // Имя tmux-сессии спрашиваем у ЛОКАЛЬНОГО сервера — для паны
@@ -1160,6 +1223,7 @@ impl Daemon {
                     // подтверждение доставки: реальный хук UserPromptSubmit сработал
                     self.last_prompt_at.lock().unwrap().insert(sid.clone(), now);
                     s.status = Status::Working;
+                    s.done_at = None;
                     let txt = ellipsize(
                         &one_line(p.get("prompt").and_then(Value::as_str).unwrap_or("")),
                         140,
@@ -1181,7 +1245,9 @@ impl Daemon {
                     let tool = p.get("tool_name").and_then(Value::as_str).unwrap_or("");
                     if tool == "AskUserQuestion" {
                         // это опрос, не пермишен: показываем вопрос карточкой и ждём выбора
-                        if let Some(q) = build_question(p.get("tool_input"), now) {
+                        if let Some(mut q) = build_question(p.get("tool_input"), now) {
+                            crate::question_delivery::identify(&mut q, p.get("tool_use_id").and_then(Value::as_str));
+                            q.provider_item_id = p.get("tool_use_id").and_then(Value::as_str).map(str::to_string);
                             s.status = Status::Waiting;
                             s.detail = q
                                 .questions
@@ -1227,7 +1293,13 @@ impl Daemon {
 
                 "post-tool" => {
                     let tool = p.get("tool_name").and_then(Value::as_str).unwrap_or("");
-                    if tool == "AskUserQuestion" && s.question.is_some() {
+                    if tool == "AskUserQuestion" && s.question.as_ref().is_some_and(|q| {
+                        match (p.get("tool_use_id").and_then(Value::as_str), q.provider_item_id.as_deref()) {
+                            (Some(received), Some(expected)) => received == expected,
+                            _ => true,
+                        }
+                    }) {
+                        if let Some(q) = &s.question { crate::question_delivery::confirm(&sid, q); }
                         s.question = None; // ответили (в терминале или из панели)
                         s.detail = "ответ получен".into();
                         effects.push(Effect::RemoveToast {
@@ -1238,7 +1310,7 @@ impl Daemon {
                         // сабагент завершился — закрываем запись в реестре
                         subagent_stop(s, p.get("tool_input"), now);
                     }
-                    s.status = Status::Working; // сессия дышит
+                    s.status = crate::backend::events::after_tool(s.status);
                 }
 
                 "notification" => {
@@ -1288,6 +1360,8 @@ impl Daemon {
                     effects.push(Effect::DoneSummary {
                         sid: sid.clone(),
                         hook_reply: stop_hook_reply(agent, p),
+                        stop_at: now,
+                        revision: s.lifecycle_revision,
                     });
                     effects.push(Effect::TurnSummary { sid: sid.clone() });
                 }
@@ -1342,8 +1416,12 @@ impl Daemon {
 
                 _ => {}
             }
+            retain_pending_question_status(s);
         } // лок реестра отпущен
 
+        if silent {
+            effects.retain(|effect| matches!(effect, Effect::RemoveToast { .. }));
+        }
         self.run_effects(effects);
         self.push();
     }
@@ -1388,7 +1466,7 @@ impl Daemon {
                     }
                 }
                 Effect::RemoveToast { id } => windows::toast_remove(&d, &id),
-                Effect::DoneSummary { sid, hook_reply } => d.done_summary(sid, hook_reply),
+                Effect::DoneSummary { sid, hook_reply, stop_at, revision } => d.done_summary(sid, hook_reply, stop_at, revision),
                 Effect::TurnSummary { sid } => d.turn_stop_summary(sid),
                 Effect::NotifyCompact { title, sid } => {
                     d.notify_id(
@@ -1415,7 +1493,7 @@ impl Daemon {
     fn turn_stop_summary(self: &std::sync::Arc<Self>, sid: String) {
         let d = self.clone();
         tauri::async_runtime::spawn(async move {
-            if d.tail.active_session().as_deref() != Some(sid.as_str()) {
+            if !d.tail.is_watching(&sid) {
                 return;
             }
             let Some((be, entries)) = d.turn_entries(&sid).await else { return };
@@ -1529,7 +1607,7 @@ impl Daemon {
                 .take(max)
                 .collect();
             for t in todo {
-                if d.tail.active_session().as_deref() != Some(sid.as_str()) {
+                if !d.tail.is_watching(&sid) {
                     break; // чат закрыли — не тратим вызовы
                 }
                 d.turn_generate(&sid, &t).await;
@@ -1546,15 +1624,12 @@ impl Daemon {
     /// обновился мгновенно через push, а тост-карточку показываем один раз
     /// финальной — без плейсхолдера и подмен (любое изменение уже показанной
     /// карточки читалось как второе уведомление).
-    fn done_summary(self: &std::sync::Arc<Self>, sid: String, hook_reply: Option<String>) {
+    fn done_summary(self: &std::sync::Arc<Self>, sid: String, hook_reply: Option<String>, stop_at: i64, revision: u64) {
         let d = self.clone();
-        // Момент стопа — до всех ожиданий: по нему отличаем сводку, рождённую
-        // ЭТИМ завершением, от унаследованной с прошлого.
-        let stop_at = now_ms();
         tauri::async_runtime::spawn(async move {
             // тайминг «результат (Stop) → показано уведомление»
             let t_notify = crate::metrics::now();
-            if d.session(&sid).is_none() {
+            if !d.session(&sid).is_some_and(|s| crate::backend::events::completion_is_current(&s, stop_at, revision)) {
                 return;
             }
             // (display — для показа, speak — как читать вслух по-русски)
@@ -1562,21 +1637,24 @@ impl Daemon {
             let display = ai.as_ref().map(|(d, _)| d.clone());
             let speak = ai.as_ref().map(|(_, s)| s.clone());
 
-            // строка списка = display (если выжимка получилась)
-            if let Some(text) = display.as_deref().filter(|t| !t.is_empty()) {
-                let list = ellipsize(text, 140);
-                if d.with_session(&sid, |s| {
-                    s.summary = Some(list);
+            // Сводка могла ждать LLM/туннель, пока пользователь начал новый
+            // ход. Проверяем ревизию под тем же локом, что и публикацию.
+            let s = {
+                let mut sessions = d.sessions.lock().unwrap();
+                let Some(s) = sessions.get_mut(&sid) else { return; };
+                if !crate::backend::events::completion_is_current(s, stop_at, revision) { return; }
+                if let Some(text) = display.as_deref().filter(|t| !t.is_empty()) {
+                    s.summary = Some(ellipsize(text, 140));
                     s.summary_at = Some(now_ms());
-                }) {
-                    d.push();
                 }
-            }
+                s.clone()
+            };
+            if display.is_some() { d.push(); }
 
             if !d.settings.bool("notifyDone") {
                 return; // уведомления выключены — строку списка уже обновили
             }
-            let Some(s) = d.session(&sid) else { return };
+            if !d.session(&sid).is_some_and(|s| crate::backend::events::completion_is_current(&s, stop_at, revision)) { return; }
             let non_empty = |v: Option<String>| v.filter(|t| !t.is_empty());
             let body = non_empty(display)
                 // Старой сводке в свежем тосте не место — см. fresh_summary.
@@ -1787,15 +1865,7 @@ impl Daemon {
                     crate::backend::backend(crate::backend::Agent::Codex).friendly_model(&m)
                 })
             } else {
-                entries
-                    .iter()
-                    .rev()
-                    .find_map(|e| {
-                        (e.get("type").and_then(Value::as_str) == Some("assistant"))
-                            .then(|| e.pointer("/message/model").and_then(Value::as_str))
-                            .flatten()
-                            .map(friendly_model)
-                    })
+                transcript::extract_claude_model(&entries)
                     .or_else(|| {
                         // Фолбэк роется в ~/.claude/projects ЭТОЙ машины: для
                         // сессии с узла это в лучшем случае мимо, в худшем —
@@ -1945,11 +2015,13 @@ impl Daemon {
     /// списка. Пересчитывается после каждого промта юзера и каждого ответа.
     pub fn gen_summary(self: &std::sync::Arc<Self>, sid: String) {
         let d = self.clone();
+        let Some(revision) = self.session(&sid).map(|s| s.lifecycle_revision) else { return; };
         tauri::async_runtime::spawn(async move {
             // пересчёт после каждого промта и каждого ответа: кулдауна нет,
             // только пауза, чтобы транскрипт успел дописаться на диск
             tokio::time::sleep(Duration::from_millis(1200)).await;
-            let Some(s) = d.session(&sid).filter(|s| s.transcript.is_some()) else {
+            let Some(s) = d.session(&sid).filter(|s| s.transcript.is_some()
+                && s.lifecycle_revision == revision && s.status != Status::Done) else {
                 return;
             };
             if !claude_bin::any_service_bin() || !d.busy_take("summary", &sid) {
@@ -1960,6 +2032,7 @@ impl Daemon {
             let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
             let be = crate::backend::backend(agent);
             let Some(text) = d.transcript_text(&s, 512 * 1024).await else {
+                d.busy_release("summary", &sid);
                 return;
             };
             let turns: Vec<transcript::ChatItem> = be
@@ -2012,8 +2085,10 @@ impl Daemon {
                 return;
             }
             if d.with_session(&sid, |s| {
-                s.summary = Some(t);
-                s.summary_at = Some(now_ms());
+                if s.lifecycle_revision == revision && s.status != Status::Done {
+                    s.summary = Some(t);
+                    s.summary_at = Some(now_ms());
+                }
             }) {
                 d.push();
             }
@@ -2236,6 +2311,12 @@ impl Daemon {
 /* ================= чистые помощники редьюсера ================= */
 
 /// Карточка вопроса из tool_input AskUserQuestion (лимиты — как в панели).
+fn retain_pending_question_status(session: &mut Session) {
+    // Parallel tools can finish while the provider still awaits this answer.
+    // Only the matching result or a lifecycle boundary clears the question.
+    if session.question.is_some() { session.status = Status::Waiting; }
+}
+
 fn build_question(input: Option<&Value>, now: i64) -> Option<Question> {
     let qs = input?.get("questions")?.as_array()?;
     if qs.is_empty() {
@@ -2245,10 +2326,9 @@ fn build_question(input: Option<&Value>, now: i64) -> Option<Question> {
         .iter()
         .take(4)
         .map(|q| QuestionItem {
-            question: ellipsize(
-                &one_line(q.get("question").and_then(Value::as_str).unwrap_or("")),
-                300,
-            ),
+            custom_allowed: Some(true),
+            custom_mode: "alternative".into(),
+            question: q.get("question").and_then(Value::as_str).unwrap_or("").to_owned(),
             header: ellipsize(
                 &one_line(q.get("header").and_then(Value::as_str).unwrap_or("")),
                 40,
@@ -2264,26 +2344,21 @@ fn build_question(input: Option<&Value>, now: i64) -> Option<Question> {
                     opts.iter()
                         .take(9)
                         .map(|o| QuestionOption {
-                            label: ellipsize(
-                                &one_line(o.get("label").and_then(Value::as_str).unwrap_or("")),
-                                80,
-                            ),
-                            description: ellipsize(
-                                &one_line(
-                                    o.get("description").and_then(Value::as_str).unwrap_or(""),
-                                ),
-                                140,
-                            ),
+                            id: String::new(),
+                            label: o.get("label").and_then(Value::as_str).unwrap_or("").to_owned(),
+                            description: o.get("description").and_then(Value::as_str).unwrap_or("").to_owned(),
                         })
                         .collect()
                 })
                 .unwrap_or_default(),
+            ..QuestionItem::default()
         })
         .collect();
     Some(Question {
         at: now,
         from_screen: false,
         questions,
+        ..Question::default()
     })
 }
 
@@ -2667,6 +2742,20 @@ fn evict_pane(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unrelated_tool_activity_keeps_an_unanswered_question_waiting() {
+        let mut session = super::Session::new("question-and-parallel-tool".into(), 0);
+        session.question = Some(super::Question { request_id: "still-pending".into(), ..Default::default() });
+        for tool_status in [super::Status::Working, crate::backend::events::after_tool(super::Status::Waiting)] {
+            session.status = tool_status;
+            super::retain_pending_question_status(&mut session);
+            assert_eq!(session.status, super::Status::Waiting);
+            assert_eq!(session.question.as_ref().unwrap().request_id, "still-pending");
+        }
+        session.question = None; session.status = super::Status::Done;
+        super::retain_pending_question_status(&mut session);
+        assert_eq!(session.status, super::Status::Done);
+    }
     use super::fresh_summary;
 
     /// Ровно та жалоба из жизни: «в озвучке — про старые сделанные работы».

@@ -1,0 +1,21 @@
+{
+  "checks": [
+    "projects-dark-desktop",
+    "avatar-candidates-dark",
+    "avatar-uploaded-dark",
+    "avatars-auto-multiple-choice-upload-resize-save-failure-reset-sidebar",
+    "footer-action-matches-label",
+    "project-remote-dark",
+    "machine-and-path-new-chat-handoff-and-route-back",
+    "project-offline-dark",
+    "project-save-error-draft",
+    "remote-folder-browser-save-failure-retry-metadata-removal",
+    "resume-exact-launch-correlation-and-early-event",
+    "projects-light-compact",
+    "project-light-compact",
+    "project-form-light-compact",
+    "project-settings-opens-machines-pane",
+    "no-browser-errors-or-unexpected-native-calls"
+  ],
+  "errors": []
+}

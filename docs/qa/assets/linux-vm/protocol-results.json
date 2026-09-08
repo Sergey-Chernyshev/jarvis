@@ -1,0 +1,139 @@
+[
+  {
+    "scenario": "SSH TCP-to-Unix handshake",
+    "passed": true,
+    "evidence": {
+      "buffered": 0,
+      "capacity": 2000,
+      "cursor": 0,
+      "host": "lima-jarvis-227cb228cd9d",
+      "instance": "2844-1788565853430587981",
+      "node": "jarvis-node",
+      "oldest": null,
+      "uptime_ms": 39,
+      "version": "0.3.3"
+    }
+  },
+  {
+    "scenario": "long-poll wakes on exact hook payload",
+    "passed": true,
+    "evidence": {
+      "cursor": 1,
+      "events": [
+        {
+          "at": 1788565853676,
+          "cursor": 0,
+          "envelope": {
+            "agent": "claude",
+            "event": "prompt",
+            "payload": {
+              "prompt": "Привет 👋",
+              "session_id": "qa-synthetic",
+              "turn_id": "qa-turn"
+            }
+          }
+        }
+      ],
+      "instance": "2844-1788565853430587981"
+    }
+  },
+  {
+    "scenario": "launch actual process in isolated tmux",
+    "passed": true,
+    "evidence": {
+      "ok": true,
+      "pane": "%0",
+      "session": "qa-receiver-1788565853677-2844-0"
+    }
+  },
+  {
+    "scenario": "reply preserves Unicode and literal shell syntax",
+    "passed": true,
+    "evidence": {
+      "response": {
+        "ok": true
+      },
+      "received": [
+        "Привет 👋 literal $(touch SHOULD_NOT_EXIST) `whoami`"
+      ]
+    }
+  },
+  {
+    "scenario": "read fixture transcript under live pane cwd",
+    "passed": true,
+    "evidence": {
+      "data": "{\"type\":\"user\",\"message\":{\"content\":\"Привет 👋\"}}\n",
+      "eof": true,
+      "from": 0,
+      "next": 58,
+      "path": "/tmp/jarvis-remote-qa-Gty1cS2Z/repo/synthetic.jsonl",
+      "size": 58
+    }
+  },
+  {
+    "scenario": "tail waits for a split UTF-8 character",
+    "passed": true,
+    "evidence": {
+      "partial": {
+        "data": "",
+        "eof": false,
+        "from": 0,
+        "next": 0,
+        "path": "/tmp/jarvis-remote-qa-Gty1cS2Z/repo/synthetic.jsonl",
+        "size": 2
+      },
+      "completed": {
+        "data": "👋\n",
+        "eof": true,
+        "from": 0,
+        "next": 5,
+        "path": "/tmp/jarvis-remote-qa-Gty1cS2Z/repo/synthetic.jsonl",
+        "size": 5
+      }
+    }
+  },
+  {
+    "scenario": "truncated transcript reports rewind cursor",
+    "passed": true,
+    "evidence": {
+      "data": "",
+      "eof": true,
+      "from": 3,
+      "next": 3,
+      "path": "/tmp/jarvis-remote-qa-Gty1cS2Z/repo/synthetic.jsonl",
+      "size": 3
+    }
+  },
+  {
+    "scenario": "reject file outside allowed roots",
+    "passed": true,
+    "evidence": {
+      "http": 403,
+      "response": {
+        "error": "путь вне корней: узел отдаёт транскрипты и файлы из каталогов, где работает агент"
+      }
+    }
+  },
+  {
+    "scenario": "concurrent same-name launches are independent",
+    "passed": true,
+    "evidence": [
+      [
+        200,
+        {
+          "ok": true,
+          "pane": "%1",
+          "session": "qa-same-name-1788565855639-2844-1"
+        }
+      ],
+      [
+        200,
+        {
+          "ok": true,
+          "pane": "%2",
+          "session": "qa-same-name-1788565855639-2844-2"
+        }
+      ]
+    ]
+  }
+]

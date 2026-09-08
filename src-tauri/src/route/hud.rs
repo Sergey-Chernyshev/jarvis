@@ -18,17 +18,35 @@ pub enum Phase {
     /// Распознали реплику. `inserted` — вставка в сфокусированное поле
     /// подтверждена (тост исчезает быстрее: текст уже на месте).
     Heard { text: String, inserted: bool },
+    /// Dictation delivery distinguishes a posted shortcut, observed insertion,
+    /// a recoverable clipboard copy, and persisted history.
+    Dictated {
+        text: String,
+        inserted: bool,
+        copied: bool,
+        saved: bool,
+        paste_sent: bool,
+        insertion_error: Option<String>,
+    },
     /// Мозг думает (идёт вызов Haiku); показываем распознанную реплику как тело,
     /// чтобы пользователь видел, ЧТО услышали, пока идёт многосекундный вызов.
     Thinking { text: String },
     /// Голосовой ответ ассистента (п/п-2): показываем текст того, что озвучиваем.
     Reply { text: String },
     /// Стейдж: отправлю в `label` через `secs` с, текст — `text`, отмена по `nonce`.
-    Staged { nonce: String, label: String, text: String, secs: u32 },
+    Staged {
+        nonce: String,
+        label: String,
+        text: String,
+        secs: u32,
+    },
     /// Доставлено (или поставлено в очередь, если `queued`).
     Sent { label: String, queued: bool },
     /// Пикер: выбери сессию. `options` = (session_id, label).
-    Picker { nonce: String, options: Vec<(String, String)> },
+    Picker {
+        nonce: String,
+        options: Vec<(String, String)>,
+    },
     /// Подтверждение управляющего действия (п/п-2): Да/Отмена по `nonce`.
     Confirm { nonce: String, text: String },
     /// Отменено пользователем (× по активной фазе) — показываем «Отменено».
@@ -46,9 +64,7 @@ pub enum Phase {
 
 /// Собрать payload фазы (чистая функция). Поле `phase` — дискриминатор для UI.
 pub fn hud_payload(p: Phase) -> Value {
-    let base = |phase: &str, title: &str, body: &str| {
-        json!({ "id": HUD_ID, "kind": "voice", "phase": phase, "title": title, "body": body })
-    };
+    let base = |phase: &str, title: &str, body: &str| json!({ "id": HUD_ID, "kind": "voice", "phase": phase, "title": title, "body": body });
     match p {
         Phase::Listening { secs } => {
             let mut v = base("listening", "Слушаю…", "");
@@ -65,9 +81,29 @@ pub fn hud_payload(p: Phase) -> Value {
             v["inserted"] = json!(inserted);
             v
         }
+        Phase::Dictated {
+            text,
+            inserted,
+            copied,
+            saved,
+            paste_sent,
+            insertion_error,
+        } => {
+            let mut v = hud_payload(Phase::Heard { text, inserted });
+            v["copied"] = json!(copied);
+            v["saved"] = json!(saved);
+            v["pasteSent"] = json!(paste_sent);
+            v["insertionError"] = json!(insertion_error);
+            v
+        }
         Phase::Thinking { text } => base("thinking", "Думаю…", &text),
         Phase::Reply { text } => base("reply", "Jarvis", &text),
-        Phase::Staged { nonce, label, text, secs } => {
+        Phase::Staged {
+            nonce,
+            label,
+            text,
+            secs,
+        } => {
             let mut v = base("staged", "Отправлю", &text);
             v["nonce"] = json!(nonce);
             v["label"] = json!(label);
@@ -75,7 +111,11 @@ pub fn hud_payload(p: Phase) -> Value {
             v
         }
         Phase::Sent { label, queued } => {
-            let title = if queued { "В очередь" } else { "Отправлено" };
+            let title = if queued {
+                "В очередь"
+            } else {
+                "Отправлено"
+            };
             let mut v = base("sent", title, &label);
             v["queued"] = json!(queued);
             v
@@ -115,14 +155,54 @@ mod tests {
 
     #[test]
     fn phase_payload_shape() {
-        let v = hud_payload(Phase::Heard { text: "привет".into(), inserted: true });
+        let v = hud_payload(Phase::Heard {
+            text: "привет".into(),
+            inserted: true,
+        });
         assert_eq!(v["id"], HUD_ID);
         assert_eq!(v["kind"], "voice");
         assert_eq!(v["phase"], "heard");
         assert_eq!(v["body"], "привет");
         assert_eq!(v["inserted"], true);
-        let u = hud_payload(Phase::Heard { text: "п".into(), inserted: false });
+        let u = hud_payload(Phase::Heard {
+            text: "п".into(),
+            inserted: false,
+        });
         assert_eq!(u["inserted"], false);
+    }
+
+    #[test]
+    fn dictation_reports_recovery_without_claiming_delivery() {
+        let v = hud_payload(Phase::Dictated {
+            text: "сохранённый текст".into(),
+            inserted: false,
+            copied: true,
+            saved: true,
+            paste_sent: false,
+            insertion_error: Some("Фокус изменился".into()),
+        });
+        assert_eq!(v["phase"], "heard");
+        assert_eq!(v["inserted"], false);
+        assert_eq!(v["pasteSent"], false);
+        assert_eq!(v["copied"], true);
+        assert_eq!(v["saved"], true);
+        assert_eq!(v["insertionError"], "Фокус изменился");
+        assert_eq!(v["full"], "сохранённый текст");
+    }
+
+    #[test]
+    fn posted_shortcut_is_distinct_from_verified_insertion() {
+        let v = hud_payload(Phase::Dictated {
+            text: "текст".into(),
+            inserted: false,
+            copied: true,
+            saved: false,
+            paste_sent: true,
+            insertion_error: None,
+        });
+        assert_eq!(v["pasteSent"], true);
+        assert_eq!(v["inserted"], false);
+        assert_eq!(v["insertionError"], Value::Null);
     }
 
     #[test]
@@ -153,14 +233,21 @@ mod tests {
 
     #[test]
     fn confirm_thinking_reply_payloads() {
-        let c = hud_payload(Phase::Confirm { nonce: "n".into(), text: "переключить на opus?".into() });
+        let c = hud_payload(Phase::Confirm {
+            nonce: "n".into(),
+            text: "переключить на opus?".into(),
+        });
         assert_eq!(c["phase"], "confirm");
         assert_eq!(c["nonce"], "n");
         assert_eq!(c["body"], "переключить на opus?");
-        let th = hud_payload(Phase::Thinking { text: "почини билд".into() });
+        let th = hud_payload(Phase::Thinking {
+            text: "почини билд".into(),
+        });
         assert_eq!(th["phase"], "thinking");
         assert_eq!(th["body"], "почини билд");
-        let r = hud_payload(Phase::Reply { text: "сейчас 14:05".into() });
+        let r = hud_payload(Phase::Reply {
+            text: "сейчас 14:05".into(),
+        });
         assert_eq!(r["phase"], "reply");
         assert_eq!(r["body"], "сейчас 14:05");
     }
@@ -174,8 +261,14 @@ mod tests {
 
     #[test]
     fn sent_queued_changes_title() {
-        let a = hud_payload(Phase::Sent { label: "x".into(), queued: false });
-        let b = hud_payload(Phase::Sent { label: "x".into(), queued: true });
+        let a = hud_payload(Phase::Sent {
+            label: "x".into(),
+            queued: false,
+        });
+        let b = hud_payload(Phase::Sent {
+            label: "x".into(),
+            queued: true,
+        });
         assert_eq!(a["title"], "Отправлено");
         assert_eq!(b["title"], "В очередь");
         assert_eq!(b["queued"], true);

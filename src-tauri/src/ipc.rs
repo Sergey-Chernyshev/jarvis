@@ -16,6 +16,8 @@ use crate::daemon::Daemon;
 use crate::model::Status;
 use crate::util::*;
 use crate::{claude_bin, limits, tmux, windows};
+#[path = "model_picker.rs"]
+mod model_picker;
 
 fn ok() -> Value {
     json!({ "ok": true })
@@ -36,7 +38,11 @@ fn err(msg: impl Into<String>) -> Value {
 /// человек честно выполнит её у себя и не поймёт, почему не помогло.
 fn tmux_needed(s: &crate::model::Session) -> Value {
     let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
-    let cmd = crate::backend::backend(agent).resume_cmd(s.agent_id());
+    let mut cmd = crate::backend::backend(agent).resume_cmd(&shell_quote(s.agent_id()));
+    if let Some(home) = s.provider_home.as_deref() {
+        let variable = if s.agent.as_deref() == Some("codex") { "CODEX_HOME" } else { "CLAUDE_CONFIG_DIR" };
+        cmd = format!("{variable}={} {cmd}", shell_quote(home));
+    }
     match &s.remote {
         Some(node) => json!({
             "ok": false, "needsTmux": true, "resumeCmd": cmd, "onNode": node,
@@ -65,6 +71,37 @@ pub fn state_clear(app: AppHandle) {
 #[tauri::command]
 pub fn panel_hide(app: AppHandle) {
     windows::hide_panel(&Daemon::get(&app));
+}
+
+#[tauri::command]
+pub async fn workspace_open(app: AppHandle, options: Option<Value>) -> Result<Value, String> {
+    let route: windows::WorkspaceRoute = serde_json::from_value(options.unwrap_or_else(|| json!({})))
+        .map_err(|e| e.to_string())?;
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let handle = app.clone();
+    app.run_on_main_thread(move || { let _ = send.send(windows::open_workspace(&handle, route)); })
+        .map_err(|e| e.to_string())?;
+    receive.await.map_err(|e| e.to_string())?
+}
+
+/// Opens the OS pane; only the user can grant Accessibility permission there.
+#[tauri::command]
+pub async fn system_accessibility_settings() -> Result<Value, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = tokio::process::Command::new("/usr/bin/open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+            .status().await.map_err(|e| e.to_string())?;
+        if !status.success() { return Err("Не удалось открыть настройки Универсального доступа".into()); }
+        Ok(json!({"ok":true}))
+    }
+    #[cfg(not(target_os = "macos"))]
+    Err("Эта настройка доступна в macOS. На Linux проверь настройки ввода оконного менеджера.".into())
+}
+
+#[tauri::command]
+pub fn dictation_cancel_insertion(app: AppHandle, attempt_id: u64) -> Value {
+    json!({"ok":true,"cancelled":Daemon::get(&app).dictation.cancel_insertion(attempt_id)})
 }
 
 /* ================= настройки ================= */
@@ -285,47 +322,14 @@ fn unregister_action(d: &Arc<Daemon>, a: HkAction) {
     }
 }
 
-/// Зарегистрировать сочетание действия. select регистрируется ТОЛЬКО при
-/// активном вопросе (набор динамический — см. set_select_hotkeys), поэтому
-/// принимает флаг. Err = сочетание занято системой.
-fn register_action_accel(
-    d: &Arc<Daemon>,
-    a: HkAction,
-    accel: &str,
-    select_active: bool,
-) -> Result<(), ()> {
-    let gs = d.app.global_shortcut();
-    match a {
-        HkAction::Select => {
-            if !select_active {
-                return Ok(());
-            }
-            for n in 1..=9 {
-                if gs.register(select_accel(accel, n).as_str()).is_err() {
-                    for k in 1..n {
-                        let _ = gs.unregister(select_accel(accel, k).as_str());
-                    }
-                    return Err(());
-                }
-            }
-            Ok(())
-        }
-        _ => gs.register(accel).map_err(|_| ()),
-    }
-}
-
-/// Сохранить сырое значение акселератора действия (HK_NONE = «не назначен»).
-async fn persist_accel(d: &Arc<Daemon>, a: HkAction, raw: &str) {
-    match a.settings_key() {
-        Some(key) => {
-            let _ = via_gate_panel(d, "settings.set", json!({ "patch": { key: raw } })).await;
-        }
-        None => {
-            // диктовка: settings.stt.hotkey
-            let mut patch = serde_json::Map::new();
-            patch.insert("hotkey".into(), Value::String(raw.to_string()));
-            d.settings.set_stt(patch);
-        }
+/// Compose one atomic shortcut patch, preserving the other STT preferences.
+fn patch_accel(patch: &mut serde_json::Map<String, Value>, before: &Value, action: HkAction, raw: &str) {
+    if let Some(key) = action.settings_key() {
+        patch.insert(key.into(), json!(raw));
+    } else {
+        let stt = patch.entry("stt").or_insert_with(|| before.get("stt").cloned().unwrap_or_else(|| json!({})));
+        if !stt.is_object() { *stt = json!({}); }
+        stt["hotkey"] = json!(raw);
     }
 }
 
@@ -375,50 +379,26 @@ pub async fn hotkey_assign(
         return err(format!("Не разобрал сочетание: {accel}"));
     }
 
-    let old = action_accel(&d, a);
-    if old.as_deref() == Some(accel.as_str()) {
+    // Resolve every conflict in memory; persistence and native registration
+    // are one queued transaction, so a failed save never steals a shortcut.
+    let _turn = UI_SETTINGS_CHANGES.lock().await;
+    let before = d.settings.load();
+    if binding_from_settings(&before, a).as_deref() == Some(accel.as_str()) {
         return json!({ "ok": true, "accel": accel });
     }
-
-    // конфликты со своими хоткеями; перехват может каскадом задеть несколько
-    // действий (напр. новый шаблон {n} бьётся с двумя) — снимаем в цикле
-    let steal = steal.unwrap_or(false);
-    loop {
-        let bindings: Vec<(HkAction, String)> = HkAction::ALL
-            .iter()
-            .filter_map(|o| action_accel(&d, *o).map(|acc| (*o, acc)))
-            .collect();
-        let Some(other) = find_conflict(&bindings, a, &accel) else { break };
-        if !steal {
+    let mut patch = serde_json::Map::new();
+    let mut bindings: Vec<_> = HkAction::ALL.iter()
+        .filter_map(|other| binding_from_settings(&before, *other).map(|value| (*other, value))).collect();
+    while let Some(other) = find_conflict(&bindings, a, &accel) {
+        if !steal.unwrap_or(false) {
             return json!({ "ok": false, "conflict": { "action": other.id(), "label": other.label() } });
         }
-        unregister_action(&d, other);
-        persist_accel(&d, other, HK_NONE).await;
-        crate::log::line(&format!(
-            "[hotkeys] перехват: «{}» остался без сочетания",
-            other.label()
-        ));
+        patch_accel(&mut patch, &before, other, HK_NONE);
+        bindings.retain(|(action, _)| *action != other);
     }
-
-    // активность набора 1..9 фиксируем ДО снятия старого
-    let select_active = a == HkAction::Select
-        && old
-            .as_ref()
-            .map(|o| {
-                d.app
-                    .global_shortcut()
-                    .is_registered(select_accel(o, 1).as_str())
-            })
-            .unwrap_or(false);
-    unregister_action(&d, a);
-    if register_action_accel(&d, a, &accel, select_active).is_err() {
-        if let Some(oldacc) = &old {
-            let _ = register_action_accel(&d, a, oldacc, select_active);
-        }
-        return err(format!("Сочетание {accel} занято системой"));
-    }
-    persist_accel(&d, a, &accel).await;
-    json!({ "ok": true, "accel": accel })
+    patch_accel(&mut patch, &before, a, &accel);
+    let result = apply_settings_patch(&d, Value::Object(patch)).await;
+    if result.get("ok") == Some(&Value::Bool(true)) { json!({ "ok": true, "accel": accel }) } else { result }
 }
 
 /// Приостановить/вернуть ВСЕ глобальные хоткеи Jarvis — режим записи
@@ -653,6 +633,7 @@ pub fn match_select_template(template: &str, shortcut: &Shortcut) -> Option<u32>
 /// не перехватывать цифровые комбо глобально всё время. Идемпотентно: трогаем
 /// только при смене состояния.
 pub fn set_select_hotkeys(d: &Arc<Daemon>, on: bool) {
+    if crate::native_smoke::enabled() { return; }
     // «не назначен» → снимать нечего и ставить нечего
     let Some(tpl) = action_accel(d, HkAction::Select) else {
         return;
@@ -705,127 +686,139 @@ pub fn is_select_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> Option<u32> {
     match_select_template(&action_accel(d, HkAction::Select)?, shortcut)
 }
 
+// One queue covers settings plus their native/runtime effects, including audio.
+static UI_SETTINGS_CHANGES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn binding_from_settings(root: &Value, action: HkAction) -> Option<String> {
+    let raw = match action.settings_key() {
+        Some(key) => root.get(key).and_then(Value::as_str).unwrap_or("").to_string(),
+        None => crate::stt::config::SttConfig::from_settings(root).hotkey,
+    };
+    accel_from_raw(&raw, action)
+}
+
 #[tauri::command]
 pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
-    let d = Daemon::get(&app);
-    let Some(patch) = patch.as_object() else {
-        return err("bad patch");
-    };
+    let _turn = UI_SETTINGS_CHANGES.lock().await;
+    apply_settings_patch(&Daemon::get(&app), patch).await
+}
+
+/// Persist once before changing native state. Native registration/autostart
+/// errors restore both prior registrations and the affected settings fields.
+async fn apply_settings_patch(d: &Arc<Daemon>, patch: Value) -> Value {
+    let Some(patch) = patch.as_object() else { return err("Некорректные настройки") };
     let mut rest = patch.clone();
-
-    if let Some(Value::Bool(open)) = rest.remove("openAtLogin") {
-        let autolaunch = app.autolaunch();
-        let res = if open {
-            autolaunch.enable()
-        } else {
-            autolaunch.disable()
-        };
-        if let Err(e) = res {
-            // не глотаем: видно в консоли `npm run start`, а UI перечитает
-            // реальное is_enabled() и честно покажет, что не сработало
-            eprintln!(
-                "[jarvis:autostart] не смог {} автозапуск: {e}",
-                if open {
-                    "включить"
-                } else {
-                    "выключить"
-                }
-            );
-        }
+    let login = match rest.remove("openAtLogin") {
+        Some(Value::Bool(on)) => Some(on),
+        Some(_) => return err("openAtLogin должен быть true или false"),
+        None => None,
+    };
+    if crate::native_smoke::enabled() && login.is_some() {
+        return err("Автозапуск отключён в изолированной проверке");
     }
-
-    if let Some(hotkey) = rest.remove("hotkey") {
-        if let Some(hk) = hotkey.as_str().filter(|s| !s.is_empty()) {
-            if let Err(e) = register_hotkey(&d, hk) {
-                return err(e);
+    let before = d.settings.load();
+    let mut proposed = before.clone();
+    proposed.as_object_mut().unwrap().extend(rest.clone());
+    let bindings: Vec<_> = HkAction::ALL.iter().filter_map(|action|
+        binding_from_settings(&proposed, *action).map(|accel| (*action, accel))).collect();
+    let mut changed = Vec::new();
+    for action in HkAction::ALL {
+        let old = binding_from_settings(&before, action);
+        let new = binding_from_settings(&proposed, action);
+        if old == new { continue; }
+        if let Some(accel) = &new {
+            if (action == HkAction::Select && normalize_select_template(accel) != *accel)
+                || (action != HkAction::Select && accel.parse::<Shortcut>().is_err()) {
+                return err(format!("Не разобрал сочетание: {accel}"));
             }
-            let _ = via_gate_panel(&d, "settings.set", json!({ "patch": { "hotkey": hk } })).await;
-        }
-    }
-
-    // прочие глобальные хоткеи (тихий/продолжить/повтор/без звука): перепривязка
-    // с откатом на прежний при занятом сочетании — как у главного хоткея.
-    for (key, old) in [
-        ("quietHotkey", quiet_accelerator(&d)),
-        ("continueHotkey", continue_accelerator(&d)),
-        ("repeatHotkey", repeat_accelerator(&d)),
-        ("muteHotkey", mute_accelerator(&d)),
-    ] {
-        let removed = rest.remove(key);
-        let Some(hk) = removed
-            .as_ref()
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-        else {
-            continue;
-        };
-        if hk != old {
-            let gs = d.app.global_shortcut();
-            let _ = gs.unregister(old.as_str());
-            if gs.register(hk.as_str()).is_err() {
-                let _ = gs.register(old.as_str());
-                return err(format!("Сочетание {hk} занято системой"));
+            if let Some(other) = find_conflict(&bindings, action, accel) {
+                return err(format!("Сочетание {accel} уже назначено: {}", other.label()));
             }
         }
-        let _ = via_gate_panel(&d, "settings.set", json!({ "patch": { key: hk } })).await;
+        changed.push((action, old, new));
     }
-
-    // шаблон хоткеев выбора варианта (⌘⌥1-9 по умолчанию): валидация + если
-    // вопрос сейчас активен (набор зарегистрирован) — перерегистрация на лету.
-    if let Some(v) = rest.remove("selectHotkeyTemplate") {
-        if let Some(tpl) = v.as_str().filter(|s| !s.is_empty()).map(String::from) {
-            if normalize_select_template(&tpl) != tpl {
-                return err(format!(
-                    "Битый шаблон «{tpl}» — нужен вид Command+Alt+{{n}}"
-                ));
-            }
-            let old = action_accel(&d, HkAction::Select)
-                .unwrap_or_else(|| SELECT_TEMPLATE_DEFAULT.to_string());
-            let gs = d.app.global_shortcut();
-            let active = gs.is_registered(select_accel(&old, 1).as_str());
-            if active && tpl != old {
-                set_select_hotkeys_tpl(&d, false, &old);
-            }
-            let _ = via_gate_panel(
-                &d,
-                "settings.set",
-                json!({ "patch": { "selectHotkeyTemplate": tpl } }),
-            )
-            .await;
-            if active && tpl != old {
-                set_select_hotkeys_tpl(&d, true, &tpl);
-            }
-        }
+    if compositor_owns_keys() && !changed.is_empty() {
+        return err("На Wayland глобальные сочетания нужно назначать в настройках композитора");
     }
-
-    const APPEARANCE_KEYS: [&str; 7] =
-        ["theme", "paint", "mode", "accent", "density", "radius", "scale"];
-    let appearance_changed = APPEARANCE_KEYS.iter().any(|k| rest.contains_key(*k));
-    let mode_changed = rest.contains_key("mode");
-    let remotes_changed = rest.contains_key("remotes");
+    let old_login = match login {
+        Some(_) => match d.app.autolaunch().is_enabled() {
+            Ok(on) => Some(on), Err(error) => return err(format!("Не удалось прочитать автозапуск: {error}")),
+        },
+        None => None,
+    };
+    let restore: Vec<_> = rest.keys().map(|key| (key.clone(), before.get(key).cloned())).collect();
     if !rest.is_empty() {
-        let _ = via_gate_panel(&d, "settings.set", json!({ "patch": Value::Object(rest) })).await;
+        if let Err(error) = via_gate_panel_result(d, "settings.set", json!({"patch":rest})).await {
+            return err(error); // No native/runtime changes have happened.
+        }
     }
-    // внешность сменили в одном окне — перекрашиваем все сразу (дизайн 14f «вид»)
-    if appearance_changed {
-        windows::broadcast_appearance(&d);
+    let gs = d.app.global_shortcut();
+    let suspended = d.hk_suspend_gen.load(std::sync::atomic::Ordering::SeqCst) != 0
+        || crate::native_smoke::enabled();
+    let mut previous = Vec::new();
+    let mut installed = Vec::new();
+    let native_result = (|| -> Result<(), String> {
+        if !suspended {
+            for (action, old, _) in &changed {
+                if let Some(old) = old {
+                    for shortcut in action_shortcuts(*action, old) {
+                        if gs.is_registered(shortcut.clone()) {
+                            gs.unregister(shortcut.clone()).map_err(|error| format!("Не удалось освободить сочетание: {error}"))?;
+                            previous.push(shortcut);
+                        }
+                    }
+                }
+            }
+            for (action, old, new) in &changed {
+                // Select shortcuts exist only while a question is active.
+                let select_active = old.as_ref().is_some_and(|old|
+                    action_shortcuts(*action, old).iter().any(|shortcut| previous.contains(shortcut)));
+                if *action == HkAction::Select && !select_active { continue; }
+                if let Some(new) = new {
+                    for shortcut in action_shortcuts(*action, new) {
+                        gs.register(shortcut.clone()).map_err(|error| format!("Сочетание {new} недоступно: {error}"))?;
+                        installed.push(shortcut);
+                    }
+                }
+            }
+        }
+        if let Some(on) = login {
+            let result = if on { d.app.autolaunch().enable() } else { d.app.autolaunch().disable() };
+            result.map_err(|error| format!("Не удалось изменить автозапуск: {error}"))?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = native_result {
+        let mut failures = vec![error];
+        for shortcut in installed {
+            if let Err(error) = gs.unregister(shortcut) { failures.push(format!("Откат сочетания: {error}")); }
+        }
+        for shortcut in previous {
+            if !gs.is_registered(shortcut.clone()) {
+                if let Err(error) = gs.register(shortcut) { failures.push(format!("Возврат прежнего сочетания: {error}")); }
+            }
+        }
+        if let Some(on) = old_login {
+            let result = if on { d.app.autolaunch().enable() } else { d.app.autolaunch().disable() };
+            if let Err(error) = result { failures.push(format!("Откат автозапуска: {error}")); }
+        }
+        if !restore.is_empty() {
+            let owner = d.clone();
+            match tauri::async_runtime::spawn_blocking(move || owner.settings.try_restore_fields(restore)).await {
+                Ok(Ok(_)) => {},
+                Ok(Err(error)) => failures.push(format!("Не удалось восстановить прежние настройки: {error}")),
+                Err(error) => failures.push(format!("Откат настроек не завершён: {error}")),
+            }
+        }
+        return err(failures.join("\n"));
     }
-    // накладка ⇄ окно: свойства самого окна меняем здесь, раскладку — CSS по data-mode
-    if mode_changed {
-        windows::apply_mode(&d);
-    }
-    // список узлов правят не только вкладкой «Удалённые» (ещё settings.json и
-    // `jarvis-setup remote add`) — применяем сразу, как и всё в этом обработчике
-    if remotes_changed {
-        d.start_remotes();
-    }
-    // тумблер «Режим логов» применяем сразу (без перезапуска)
+    const APPEARANCE_KEYS: [&str; 7] = ["theme", "paint", "mode", "accent", "density", "radius", "scale"];
+    if APPEARANCE_KEYS.iter().any(|key| rest.contains_key(*key)) { windows::broadcast_appearance(d); }
+    if rest.contains_key("mode") { windows::apply_mode(d); }
+    if rest.contains_key("remotes") { d.start_remotes(); }
     crate::metrics::set_enabled(d.settings.bool("diagnostics"));
     crate::log::set_enabled(d.settings.bool("diagnostics"));
-    if windows::panel_visible(&d) {
-        windows::position_panel(&d); // позиция могла смениться
-    }
+    if windows::panel_visible(d) { windows::position_panel(d); }
     ok()
 }
 
@@ -847,7 +840,7 @@ async fn remote_transcript(
     let client = node.client().map_err(|e| format!("Узел «{name}»: {e}"))?;
     match client.tail_text(path, 512 * 1024).await {
         Ok(Some((text, next))) => Ok((node, text, next)),
-        Ok(None) => Err("Транскрипта ещё нет на узле — сессия не слала событий".into()),
+        Ok(None) => Ok((node, String::new(), 0)),
         Err(e) => Err(format!("Узел «{name}»: {e}")),
     }
 }
@@ -855,14 +848,16 @@ async fn remote_transcript(
 /// Асинхронна из-за удалённых сессий: их транскрипт приезжает по HTTP с узла.
 /// Локальная ветка осталась прежним синхронным чтением файла.
 #[tauri::command]
-pub async fn chat_open(app: AppHandle, session_id: String) -> Value {
+pub async fn chat_open(app: AppHandle, window: tauri::WebviewWindow, session_id: String) -> Value {
     let _t = crate::log::Step::new("chat_open");
     let d = Daemon::get(&app);
+    let tail = d.tail.for_window(window.label());
+    let request = tail.begin_open();
     let Some(s) = d.session(&session_id) else {
         return err("Сессия не найдена");
     };
     let Some(tr) = s.transcript else {
-        return err("Нет транскрипта — сессия ещё не слала событий (перезапусти claude)");
+        return json!({"ok":false,"retryable":true,"error":"Ждём историю новой сессии…"});
     };
     // Парсер транскрипта — по бэкенду сессии (Claude JSONL vs Codex rollout).
     let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
@@ -871,14 +866,17 @@ pub async fn chat_open(app: AppHandle, session_id: String) -> Value {
     // Ниже по коду уже всё равно, откуда они приехали.
     let entries = match &s.remote {
         None => {
-            let e = be.read_entries(std::path::Path::new(&tr), 512 * 1024);
-            d.tail.start(app.clone(), agent, session_id.clone(), tr.clone());
+            let (e, next) = crate::tail::read_snapshot(agent, std::path::Path::new(&tr), 512 * 1024);
+            if !tail.start(request, app.clone(), agent, session_id.clone(), tr.clone(), next) {
+                return json!({"ok": false, "stale": true, "sessionId": session_id});
+            }
             e
         }
         Some(name) => match remote_transcript(&d, name, &tr).await {
             Ok((node, text, next)) => {
-                d.tail
-                    .start_remote(app.clone(), agent, session_id.clone(), node, tr.clone(), next);
+                if !tail.start_remote(request, app.clone(), agent, session_id.clone(), node, tr.clone(), next) {
+                    return json!({"ok": false, "stale": true, "sessionId": session_id});
+                }
                 be.entries_from_text(&text)
             }
             Err(e) => return err(e),
@@ -920,8 +918,8 @@ pub async fn chat_open(app: AppHandle, session_id: String) -> Value {
 }
 
 #[tauri::command]
-pub fn chat_close(app: AppHandle) {
-    Daemon::get(&app).tail.stop();
+pub fn chat_close(app: AppHandle, window: tauri::WebviewWindow) {
+    Daemon::get(&app).tail.remove_window(window.label());
 }
 
 /// Сводка конкретного хода по кнопке. Fire-and-forget: карточку принесёт
@@ -1325,8 +1323,33 @@ pub fn usage_summary(app: AppHandle, period: Option<String>) -> Value {
 }
 
 #[tauri::command]
+pub async fn analytics_report(app: AppHandle, options: Option<Value>) -> Result<Value, String> {
+    crate::analytics::report(Daemon::get(&app), options.unwrap_or_else(|| json!({}))).await
+}
+
+#[tauri::command]
+pub async fn analytics_save_outcome(outcome: Value) -> Result<Value, String> {
+    crate::analytics::save_outcome(outcome).await
+}
+
+#[tauri::command]
+pub async fn analytics_config_get() -> Result<Value, String> {
+    crate::analytics::get_config().await
+}
+
+#[tauri::command]
+pub async fn analytics_config_save(config: Value) -> Result<Value, String> {
+    crate::analytics::save_config(config).await
+}
+
+#[tauri::command]
+pub fn analytics_config_defaults() -> Value {
+    crate::analytics::default_config()
+}
+
+#[tauri::command]
 pub fn limit_get(app: AppHandle) -> Value {
-    serde_json::to_value(Daemon::get(&app).limits.state()).unwrap_or(Value::Null)
+    limits::snapshot(&Daemon::get(&app))
 }
 
 /// Машины, на которых можно работать: эта плюс настроенные узлы.
@@ -1351,6 +1374,7 @@ pub async fn agents_list(app: AppHandle) -> Value {
 /// увидеть все дыры, а не по одной за подход.
 #[tauri::command]
 pub async fn agents_save(app: AppHandle, agents: Value) -> Value {
+    let _turn = UI_SETTINGS_CHANGES.lock().await;
     let d = Daemon::get(&app);
     let list: Vec<crate::agents::CustomAgent> = match serde_json::from_value(agents) {
         Ok(l) => l,
@@ -1369,7 +1393,7 @@ pub async fn agents_save(app: AppHandle, agents: Value) -> Value {
     if !bad.is_empty() {
         return json!({ "ok": false, "error": bad.join("\n") });
     }
-    d.settings.set_top("customAgents", serde_json::to_value(&list).unwrap_or(Value::Null));
+    if let Err(error) = d.settings.try_set_top("customAgents", serde_json::to_value(&list).unwrap_or(Value::Null)) { return err(error); }
     // Шимы приводим сразу: агент должен быть запускаем в ту же секунду, а не
     // после перезапуска приложения.
     crate::install::sync_custom_shims(&crate::agents::shim_specs(&list));
@@ -1414,6 +1438,69 @@ pub async fn machines_list(app: AppHandle) -> Value {
         Ok(v) => v,
         Err(_) => json!([{ "id": "local", "name": "Эта машина", "kind": "local", "online": true }]),
     }
+}
+
+#[tauri::command]
+pub async fn projects_list(app: AppHandle, machine: Option<String>) -> Value {
+    crate::projects::list(Daemon::get(&app), machine).await
+}
+
+#[tauri::command]
+pub async fn teleport_status(proxy: Option<String>) -> Value {
+    crate::teleport::status(proxy).await
+}
+
+#[tauri::command]
+pub async fn teleport_nodes(proxy: Option<String>, cluster: Option<String>) -> Value {
+    crate::teleport::nodes(proxy, cluster).await
+}
+
+#[tauri::command]
+pub async fn teleport_login(app: AppHandle, proxy: String, renew: Option<bool>) -> Value {
+    let d = Daemon::get(&app);
+    crate::teleport::login(proxy, d.settings.string("launchTerminal"), d.settings.string("launchCustomCmd"), renew.unwrap_or(false)).await
+}
+
+#[tauri::command]
+pub async fn projects_icon_candidates(app: AppHandle, machine: String, cwd: String) -> Value {
+    crate::project_icons::candidates(Daemon::get(&app), machine, cwd).await
+}
+
+#[tauri::command]
+pub async fn projects_save(app: AppHandle, project: Value) -> Value {
+    let d = Daemon::get(&app);
+    let owner = d.clone();
+    match tauri::async_runtime::spawn_blocking(move || crate::projects::save(&owner.settings, project)).await {
+        Ok(Ok(project)) => {
+            windows::emit_to_panel(&app, "projects_changed", &json!({"action":"saved","project":project}));
+            json!({"ok":true,"project":project})
+        }
+        Ok(Err(error)) => err(error),
+        Err(error) => err(error.to_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn projects_remove(app: AppHandle, machine: String, cwd: String) -> Value {
+    let d = Daemon::get(&app);
+    match tauri::async_runtime::spawn_blocking(move || crate::projects::remove(&d.settings, &machine, &cwd)).await {
+        Ok(Ok(project)) => {
+            windows::emit_to_panel(&app, "projects_changed", &json!({"action":"removed","project":project}));
+            json!({"ok":true})
+        }
+        Ok(Err(error)) => err(error),
+        Err(error) => err(error.to_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn vm_status() -> Value {
+    crate::vm::status().await
+}
+
+#[tauri::command]
+pub async fn vm_action(name: String, action: String) -> Value {
+    crate::vm::action(&name, &action).await
 }
 
 fn machines(app: &AppHandle) -> Value {
@@ -1470,13 +1557,14 @@ pub async fn history_get(app: AppHandle, machine: Option<String>) -> Value {
 /// Оглавление узла → та же форма, что отдаёт локальная история, чтобы панель
 /// рисовала оба списка одним кодом. Чего нет — того нет: заголовок сессии
 /// заменяем её временем, а не выдумываем.
-fn remote_projects_to_history(machine: &str, list: Value) -> Value {
+pub(crate) fn remote_projects_to_history(machine: &str, list: Value) -> Value {
     let Some(arr) = list.as_array() else { return json!([]) };
     let out: Vec<Value> = arr
         .iter()
         .map(|p| {
             let cwd = p.get("cwd").and_then(Value::as_str).unwrap_or_default();
             let project = cwd.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("другое");
+            let agent = p.get("agent").and_then(Value::as_str).unwrap_or("claude");
             let sessions: Vec<Value> = p
                 .get("sessions")
                 .and_then(Value::as_array)
@@ -1484,12 +1572,25 @@ fn remote_projects_to_history(machine: &str, list: Value) -> Value {
                     s.iter()
                         .map(|x| {
                             let id = x.get("id").and_then(Value::as_str).unwrap_or_default();
+                            let instance = x.get("instanceId").or_else(|| p.get("instanceId")).and_then(Value::as_str).unwrap_or_default();
+                            let home = x.get("providerHome").or_else(|| p.get("providerHome")).and_then(Value::as_str).unwrap_or_default();
+                            let provider = x.get("agent").and_then(Value::as_str).unwrap_or(agent);
+                            let key = if provider == "codex" && !instance.is_empty() {
+                                crate::session_identity::key(instance, home, id, Some(machine))
+                            } else { format!("{machine}:{id}") };
                             json!({
                                 // ключ реестра — с префиксом узла, как у событий:
                                 // по нему панель узнает уже известную ей сессию
-                                "id": format!("{machine}:{id}"),
+                                "id": key,
                                 "agentId": id,
+                                "providerSessionId": id,
+                                "instanceId": instance,
+                                "sourceId": instance,
+                                "providerHome": home,
+                                "transcript": x.get("path"),
+                                "agent": x.get("agent").and_then(Value::as_str).unwrap_or(agent),
                                 "at": x.get("at").cloned().unwrap_or(Value::Null),
+                                "lastAt": x.get("at").cloned().unwrap_or(Value::Null),
                                 "title": "",
                                 "remote": machine,
                             })
@@ -1503,6 +1604,7 @@ fn remote_projects_to_history(machine: &str, list: Value) -> Value {
                 "count": p.get("count").cloned().unwrap_or(json!(sessions.len())),
                 "lastAt": p.get("lastAt").cloned().unwrap_or(Value::Null),
                 "remote": machine,
+                "agent": agent,
                 "sessions": sessions,
             })
         })
@@ -1511,11 +1613,12 @@ fn remote_projects_to_history(machine: &str, list: Value) -> Value {
 }
 
 #[tauri::command]
-pub fn usage_session(app: AppHandle, id: String) -> Value {
-    Daemon::get(&app)
-        .usage
-        .for_session(&id)
-        .unwrap_or(Value::Null)
+pub async fn usage_session(app: AppHandle, id: String) -> Value {
+    let d=Daemon::get(&app);
+    if let Some(session)=d.session(&id).filter(|s|s.remote.is_some()) {
+        return crate::usage::Usage::for_remote_session(&d,&session).await;
+    }
+    d.usage.for_session(&id).unwrap_or(Value::Null)
 }
 
 /* ================= управление сессией ================= */
@@ -1609,6 +1712,7 @@ pub(crate) async fn set_via_slash(
     let Some(s) = d.session(session_id) else {
         return err("Сессия не найдена");
     };
+    if let Some(error) = model_picker::control_error(&s, true) { return err(error); }
     let target = match d.pane_target(&s) {
         Ok(t) => t,
         Err(e) => return err(e),
@@ -1618,6 +1722,10 @@ pub(crate) async fn set_via_slash(
     };
     if !target.pane_alive(&pane).await {
         return tmux_needed(&s);
+    }
+    let screen = match target.screen(&pane).await { Ok(screen) => screen, Err(error) => return err(error) };
+    if !model_picker::empty_claude_composer(&screen) {
+        return err("В терминале есть черновик или открыт другой экран. Сохрани ввод и повтори настройку.");
     }
     match target.paste_slash(&pane, &slash).await {
         Ok(()) => {
@@ -1641,27 +1749,29 @@ pub async fn session_set_model(app: AppHandle, session_id: String, model: String
 }
 
 /// Ядро смены модели — общее для IPC и капабилити `sessions.control` (инкр. 8).
-/// Claude: слэш `/model <id>` (+ confirm). Codex: `/model` открывает объединённый
-/// пикер модель+reasoning (отдельного `/effort` нет) — слэш с аргументом best-effort.
+/// Claude uses its inline command; Codex selects an exact captured picker row
+/// and verifies the native model-change confirmation before updating state.
 pub(crate) async fn set_model_core(d: &Arc<Daemon>, session_id: &str, model: &str) -> Value {
-    let agent = d
-        .session(session_id)
-        .map(|s| crate::backend::Agent::from_opt(s.agent.as_deref()))
-        .unwrap_or_default();
-    // Аллоулист модели для Claude-сессий (SEC-3: недоверенный голос не должен
-    // пастить свободный текст в `/model …`). У Codex набор моделей иной — там не
-    // ограничиваем (валидация — Claude-специфична).
-    if agent != crate::backend::Agent::Codex {
-        if let Err(e) = crate::convo::skills::validate_model(model) {
-            return err(e);
-        }
+    let Some(session) = d.session(session_id) else { return err("Сессия не найдена"); };
+    if let Some(error) = model_picker::control_error(&session, true) { return err(error); }
+    if session.agent.as_deref().is_some_and(|agent| !matches!(agent, "claude" | "codex")) { return err("Этот агент не поддерживает смену модели из Jarvis"); }
+    let _guard = match model_picker::ChangeGuard::claim(session_id) { Ok(guard) => guard, Err(error) => return err(error) };
+    if session.agent.as_deref() == Some("codex") {
+        let Some(pane) = session.tmux_pane.as_deref() else { return tmux_needed(&session); };
+        let target = match d.pane_target(&session) { Ok(target) => target, Err(error) => return err(error) };
+        return match model_picker::select_codex(&target, pane, model, session.effort.as_deref()).await {
+            Ok(effort) => {
+                d.with_session(session_id, |s| { s.model = Some(model.into()); s.model_at = Some(now_ms()); s.effort = Some(effort.clone()); });
+                d.push(); json!({"ok":true,"model":model,"effort":effort})
+            }
+            Err(error) => json!({"ok":false,"error":error,"showTerminal":true}),
+        };
     }
-    let friendly = crate::backend::backend(agent).friendly_model(model);
+    if let Err(error) = crate::convo::skills::validate_model(model) { return err(error); }
+    let friendly = crate::backend::backend(crate::backend::Agent::Claude).friendly_model(model);
     set_via_slash(d, session_id, format!("/model {model}"), move |s| {
-        s.model = Some(friendly); // оптимистично; транскрипт подтвердит
-        s.model_at = Some(now_ms());
-    })
-    .await
+        s.model = Some(friendly); s.model_at = Some(now_ms());
+    }).await
 }
 
 #[tauri::command]
@@ -1680,6 +1790,9 @@ pub async fn session_set_effort(app: AppHandle, session_id: String, level: Strin
 /// поэтому для codex-сессии это не-операция с понятным сообщением; UI и так
 /// прячет effort-пикер (has_separate_effort=false).
 pub(crate) async fn set_effort_core(d: &Arc<Daemon>, session_id: &str, level: &str) -> Value {
+    if d.session(session_id).and_then(|session| session.agent).as_deref().is_some_and(|agent| !matches!(agent, "claude" | "codex")) {
+        return err("Этот агент не поддерживает настройку рассуждения из Jarvis");
+    }
     let agent = d
         .session(session_id)
         .map(|s| crate::backend::Agent::from_opt(s.agent.as_deref()))
@@ -1718,115 +1831,11 @@ pub async fn terminal_ping(app: AppHandle, session_id: String) -> Value {
     }
 }
 
-/// Разбор payload'а ответа на вопрос(ы): выборы по вопросам + свои тексты.
-/// Новый контракт `{ answers: number[][], texts?: (string|null)[] }`; обратная
-/// совместимость: `{ indices }` → `answers = [indices]`, без texts. Пустые и
-/// пробельные тексты приводятся к None — «нет кастома».
-fn parse_question_choice(choice: &Value) -> (Vec<Vec<u32>>, Vec<Option<String>>) {
-    // парсинг массива выборов вопроса в Vec<u32> (1-based, >0)
-    let parse_row = |v: &Value| -> Vec<u32> {
-        v.as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(Value::as_u64)
-                    .filter(|&n| n >= 1)
-                    .map(|n| n as u32)
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-
-    // новый контракт answers[][] либо старый indices[] → [indices]
-    let answers: Vec<Vec<u32>> = if let Some(rows) = choice.get("answers").and_then(Value::as_array)
-    {
-        rows.iter().map(parse_row).collect()
-    } else if let Some(idx) = choice.get("indices") {
-        vec![parse_row(idx)]
-    } else {
-        Vec::new()
-    };
-
-    let texts: Vec<Option<String>> = choice
-        .get("texts")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .map(|v| {
-                    v.as_str()
-                        .map(str::trim)
-                        .filter(|t| !t.is_empty())
-                        .map(str::to_string)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    (answers, texts)
-}
-
-/// Ответ на AskUserQuestion/пикер клавишами в пану.
-/// `choice` = `{ answers: number[][], texts?: (string|null)[] }` (answers[i] —
-/// опции 1-based вопроса i, texts[i] — свой ответ строкой «Other», только Claude).
-/// Обратная совместимость: `{ indices, multiSelect }` → `answers = [indices]`.
+/// Identity-bound answers; delivery and duplicate/stale handling are shared by
+/// panel, notification buttons and global shortcuts.
 #[tauri::command]
 pub async fn question_answer(app: AppHandle, session_id: String, choice: Value) -> Value {
-    let d = Daemon::get(&app);
-    let Some(s) = d.session(&session_id) else {
-        return err("Вопрос уже неактуален");
-    };
-    let Some(q) = s.question.clone() else {
-        return err("Вопрос уже неактуален");
-    };
-    let Some(pane) = s.tmux_pane.clone() else {
-        return err("Сессия вне tmux — ответь в терминале");
-    };
-    let target = match d.pane_target(&s) {
-        Ok(t) => t,
-        Err(e) => return err(e),
-    };
-    if !target.pane_alive(&pane).await {
-        return err("Пана сессии не отвечает");
-    }
-
-    let (answers, texts) = parse_question_choice(&choice);
-
-    if answers.iter().all(Vec::is_empty) && texts.iter().all(Option::is_none) {
-        return err("Пустой выбор");
-    }
-    // валидация: на каждый вопрос — выбор в пределах его опций либо свой текст
-    for (i, item) in q.questions.iter().enumerate() {
-        let row = answers.get(i).map(Vec::as_slice).unwrap_or(&[]);
-        if row.is_empty() && texts.get(i).map_or(true, Option::is_none) {
-            return err("Не на все вопросы выбран ответ");
-        }
-        let max = item.options.len() as u32;
-        if row.iter().any(|&n| n > max) {
-            return err("Выбран несуществующий вариант");
-        }
-    }
-
-    let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
-    // в codex-пикере строки «Other» нет — свой текст доставить некуда
-    if agent == crate::backend::Agent::Codex && texts.iter().any(Option::is_some) {
-        return err("Свой ответ недоступен в codex-сессии — выбери вариант");
-    }
-    match target.answer_question(&pane, agent, &q, &answers, &texts).await {
-        Ok(()) => {
-            // у хук-вопроса карточку закроет post-tool; у экранного — событий
-            // нет, снимаем сами (детектор подтвердит по idle-экрану)
-            if q.from_screen {
-                d.with_session(&session_id, |s| {
-                    s.question = None;
-                    s.status = Status::Working;
-                    s.updated_at = now_ms();
-                });
-                d.push();
-            }
-            windows::toast_remove(&d, &format!("q-{session_id}")); // снять «липкую» карточку
-            ok()
-        }
-        Err(e) => err(ellipsize(&one_line(&e), 100)),
-    }
+    crate::question_delivery::answer(&Daemon::get(&app), &session_id, &choice).await
 }
 
 /// Действие с доски задач. ГРАНИЦА: ничего не отправляет и не мутирует доску —
@@ -1871,27 +1880,34 @@ pub fn voice_get(app: AppHandle) -> Value {
 
 /// Сменить темп речи на лету + сохранить + дать послушать.
 #[tauri::command]
-pub fn voice_set_rate(app: AppHandle, rate: String) {
-    let d = Daemon::get(&app);
-    d.voice.set_rate(&rate);
-    let mut patch = serde_json::Map::new();
-    patch.insert("rate".into(), Value::String(rate));
-    d.settings.set_voice(patch);
-    d.voice
-        .test_phrase("Так звучит выбранная скорость. Пиксела закончила, изменён один файл.");
+pub async fn voice_set_rate(app: AppHandle, rate: String) -> Value {
+    if !matches!(rate.as_str(), "x-slow" | "slow" | "medium" | "fast" | "x-fast") {
+        return err("Неизвестный темп речи");
+    }
+    change_audio_settings(move || {
+        let d = Daemon::get(&app);
+        persist_runtime_setting(&d.settings, "voice", json!({"rate":rate}), |_| {
+            d.voice.set_rate(&rate);
+            d.voice.test_phrase("Так звучит выбранная скорость. Пиксела закончила, изменён один файл.");
+            ok()
+        })
+    }).await
 }
 
 /// Сменить спикера на лету (без перезапуска) + сохранить + дать послушать.
 #[tauri::command]
-pub fn voice_set_speaker(app: AppHandle, speaker: String) {
-    let d = Daemon::get(&app);
-    d.voice.set_speaker(&speaker);
-    let mut patch = serde_json::Map::new();
-    patch.insert("speaker".into(), Value::String(speaker.clone()));
-    d.settings.set_voice(patch);
-    d.voice.test_phrase(&format!(
-        "Привет, это голос {speaker}. Пиксела закончила, изменён один файл."
-    ));
+pub async fn voice_set_speaker(app: AppHandle, speaker: String) -> Value {
+    if !matches!(speaker.as_str(), "aidar" | "baya" | "kseniya" | "xenia" | "eugene") {
+        return err("Неизвестный голос");
+    }
+    change_audio_settings(move || {
+        let d = Daemon::get(&app);
+        persist_runtime_setting(&d.settings, "voice", json!({"speaker":speaker}), |_| {
+            d.voice.set_speaker(&speaker);
+            d.voice.test_phrase(&format!("Привет, это голос {speaker}. Пиксела закончила, изменён один файл."));
+            ok()
+        })
+    }).await
 }
 
 /// Проиграть образец текущим голосом (кнопка «Тест» в настройках).
@@ -1904,26 +1920,29 @@ pub fn voice_test(app: AppHandle) {
 
 /// Тумблер «без звука» из настроек (мгновенно глушит очередь речи).
 #[tauri::command]
-pub fn voice_set_mute(app: AppHandle, on: bool) {
-    Daemon::get(&app).voice.set_mute(on);
+pub async fn voice_set_mute(app: AppHandle, on: bool) -> Value {
+    change_audio_settings(move || {
+        let d = Daemon::get(&app);
+        persist_runtime_setting(&d.settings, "voice", json!({"mute":on}), |_| { d.voice.set_mute(on); ok() })
+    }).await
 }
 
 /// Пауза чужого медиа на время озвучки — тумблер + сохранить.
 #[tauri::command]
-pub fn voice_set_duck(app: AppHandle, on: bool) {
-    let d = Daemon::get(&app);
-    d.voice.set_duck(on);
-    let mut patch = serde_json::Map::new();
-    patch.insert("duckOthers".into(), Value::Bool(on));
-    d.settings.set_voice(patch);
+pub async fn voice_set_duck(app: AppHandle, on: bool) -> Value {
+    change_audio_settings(move || {
+        let d = Daemon::get(&app);
+        persist_runtime_setting(&d.settings, "voice", json!({"duckOthers":on}), |_| { d.voice.set_duck(on); ok() })
+    }).await
 }
 
 /// Тумблер «озвучивать только при Bluetooth-гарнитуре» — сохранить в voice.
 #[tauri::command]
-pub fn voice_set_bluetooth_only(app: AppHandle, on: bool) {
-    let mut patch = serde_json::Map::new();
-    patch.insert("bluetoothOnly".into(), Value::Bool(on));
-    Daemon::get(&app).settings.set_voice(patch);
+pub async fn voice_set_bluetooth_only(app: AppHandle, on: bool) -> Value {
+    change_audio_settings(move || {
+        let d = Daemon::get(&app);
+        persist_runtime_setting(&d.settings, "voice", json!({"bluetoothOnly":on}), |_| { d.voice.set_bluetooth_only(on); ok() })
+    }).await
 }
 
 /// Прогнать действие панели через гейт (Consumer::panel) и вернуть структурный
@@ -1931,6 +1950,10 @@ pub fn voice_set_bluetooth_only(app: AppHandle, on: bool) {
 /// вызывается. На Ok — отдаём value капабилити как есть (сохраняя needsTmux/channel);
 /// на Denied/Rejected/Failed/NotFound — панельная ошибка.
 pub(crate) async fn via_gate_panel(d: &Arc<Daemon>, id: &str, args: Value) -> Value {
+    match via_gate_panel_result(d, id, args).await { Ok(value) => value, Err(error) => err(error) }
+}
+
+async fn via_gate_panel_result(d: &Arc<Daemon>, id: &str, args: Value) -> Result<Value, String> {
     use crate::capability::{self, confirm::AutoApprove, grant::Consumer, GateError};
     match capability::invoke(
         &d.caps,
@@ -1944,9 +1967,9 @@ pub(crate) async fn via_gate_panel(d: &Arc<Daemon>, id: &str, args: Value) -> Va
     )
     .await
     {
-        Ok(o) => o.value,
-        Err(GateError::Failed(m)) => err(&m),
-        Err(e) => err(e.to_string()),
+        Ok(o) => Ok(o.value),
+        Err(GateError::Failed(m)) => Err(m),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -1960,6 +1983,27 @@ pub async fn session_reply(app: AppHandle, session_id: String, text: String) -> 
         json!({ "session_id": session_id, "text": text }),
     )
     .await
+}
+
+/// Read-only view of the terminal owned by this local or remote session.
+#[tauri::command]
+pub async fn session_terminal_snapshot(app: AppHandle, session_id: String) -> Value {
+    crate::session_terminal::snapshot(&Daemon::get(&app), &session_id).await
+}
+
+/// Separate, explicit panel action. Never inferred from opening the terminal.
+#[tauri::command]
+pub async fn session_terminal_key(app: AppHandle, session_id: String, key: String) -> Value {
+    crate::session_terminal::send_key(&Daemon::get(&app), &session_id, &key).await
+}
+
+/// A stream belongs to the selected session; renderer input cannot choose a
+/// pane, remote endpoint, or export destination.
+#[tauri::command]
+pub async fn session_terminal_action(app: AppHandle, session_id: String, action: String, payload: Value) -> Value {
+    use tauri::Manager;
+    let downloads = if action == "export" { app.path().download_dir().ok() } else { None };
+    crate::session_terminal::action(&Daemon::get(&app), &session_id, &action, &payload, downloads).await
 }
 
 /// Сохранить вставленную в поле ответа картинку во временный файл и вернуть
@@ -2036,6 +2080,7 @@ pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String
     let Some(s) = d.session(&session_id) else {
         return err("Сессия не найдена");
     };
+    if let Some(error) = model_picker::control_error(&s, false) { return err(error); }
     let prompt = text.trim().to_string();
     if prompt.is_empty() {
         return err("Пустой текст");
@@ -2109,24 +2154,9 @@ pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String
                 return json!({ "ok": true, "channel": "tmux", "queued": true });
             }
 
-            // Свободная сессия, но ack не пришёл — вставка могла не успеть
-            // зарегистрироваться. Один ретрай (C-u в reply() чистит строку,
-            // повтор не задваивает текст).
-            let t1 = now_ms();
-            if let Err(e) = target.reply(&pane, &prompt).await {
-                return err(format!("tmux: {}", ellipsize(&one_line(&e), 120)));
-            }
-            if d.await_prompt_ack(&session_id, t1, std::time::Duration::from_millis(2500))
-                .await
-            {
-                d.mark_prompt_sent(&session_id, &prompt);
-                crate::log::line(&format!(
-                    "[reply] доставлено sid={} pane={pane} (2-я попытка)",
-                    ellipsize(&session_id, 8)
-                ));
-                return json!({ "ok": true, "channel": "tmux", "attempts": 2 });
-            }
-            return err("Агент не подтвердил получение — проверь терминал");
+            // A lost/delayed hook does not mean paste+Enter failed. Retrying
+            // here can duplicate an already accepted user message.
+            return json!({ "ok": false, "delivery": "unknown", "error": "Текст отправлен в терминал, но агент не подтвердил получение. Проверь терминал перед повтором; черновик сохранён." });
         }
         d.with_session(&session_id, |s| s.tmux_pane = None); // пана умерла
         d.push();
@@ -2151,6 +2181,20 @@ pub async fn terminal_focus(app: AppHandle, session_id: String) -> Value {
     // ничего, а в худшем подняла бы чужое окно с совпавшим id паны.
     if let Some(name) = &s.remote {
         return err(format!("Сессия идёт на узле «{name}» — её терминал не на этой машине"));
+    }
+    if s.control_mode.as_deref() == Some("external") && s.agent.as_deref() == Some("codex") {
+        if let Some(id) = s.instance_id.as_deref() {
+            let program = match crate::session_identity::registry().and_then(|registry| registry.desktop_program(id)) {
+                Ok(program) => program, Err(error) => return err(error),
+            };
+            let mut command = if program.extension().is_some_and(|e| e == "app") {
+                let mut command = tokio::process::Command::new("/usr/bin/open"); command.arg("-a").arg(&program); command
+            } else { tokio::process::Command::new(&program) };
+            return match command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+                Ok(mut child) => { tauri::async_runtime::spawn(async move { let _ = child.wait().await; }); json!({"ok":true,"app":s.instance_label}) },
+                Err(error) => err(format!("Не удалось открыть профиль Codex: {error}")),
+            };
+        }
     }
 
     // 1) tmux — точнее некуда
@@ -2196,19 +2240,65 @@ pub async fn terminal_focus(app: AppHandle, session_id: String) -> Value {
 /// `task` — текст, который уедет агенту, как только он встанет. Без него
 /// «поставить задачу» — это два шага (подними, потом найди чат и напиши), и
 /// именно на втором работа откладывается «на потом».
+/// An imported chat can still be active in another app. A provider-native
+/// fork keeps its history/profile without creating a second writer to its SID.
+#[tauri::command]
+pub async fn session_continue_managed(app: AppHandle, session_id: String) -> Value {
+    let d = Daemon::get(&app);
+    let Some(source) = d.session(&session_id) else { return err("Чат больше не найден"); };
+    if source.control_mode.as_deref() != Some("external") && source.tmux_pane.is_some() {
+        return json!({"ok":true,"sessionId":source.id,"continuedFrom":source.id});
+    }
+    let agent = source.agent.as_deref().unwrap_or("claude");
+    if !matches!(agent, "claude" | "codex") { return err("Продолжение этого агента пока недоступно"); }
+    if source.cwd.as_deref().is_none_or(|cwd| !cwd.starts_with('/')) {
+        return err("В истории чата не указан каталог проекта");
+    }
+    if (source.remote.is_some() || agent == "codex") && source.instance_id.is_none() {
+        return err("Профиль исходного чата ещё не определён. Обнови список агентов");
+    }
+    session_launch(app, source.cwd, agent.to_string(), Some(session_id), source.instance_id,
+        source.remote, Some(false), Some("ask".into()), None, Some(false), None, Some(true)).await
+}
+
 #[tauri::command]
 pub async fn session_launch(
     app: AppHandle,
     cwd: Option<String>,
     agent: String,
     session_id: Option<String>,
+    instance_id: Option<String>,
     machine: Option<String>,
     isolate: Option<bool>,
     mode: Option<String>,
     task: Option<String>,
     container: Option<bool>,
+    model: Option<String>,
+    fork_session: Option<bool>,
 ) -> Value {
     let d = Daemon::get(&app);
+    if let Err(error) = crate::launch::with_model(String::new(), &agent, model.as_deref()) { return err(error); }
+    let existing = session_id.as_deref().and_then(|sid| d.session(sid));
+    let fork = fork_session.unwrap_or(false);
+    if fork && existing.is_none() { return err("Исходный чат больше не найден"); }
+    if fork && (container.unwrap_or(false) || isolate.unwrap_or(false)) {
+        return err("Продолжение использует каталог и окружение исходного чата");
+    }
+    if fork && existing.as_ref().is_some_and(|s| s.agent.as_deref().unwrap_or("claude") != agent
+        || machine.as_deref().is_some_and(|host| host != s.remote.as_deref().unwrap_or("local"))) {
+        return err("Продолжение должно использовать исходного агента и машину");
+    }
+    if existing.as_ref().and_then(|s| s.instance_id.as_ref()).zip(instance_id.as_ref()).is_some_and(|(a,b)| a != b) {
+        return err("Продолжение должно использовать исходный профиль чата");
+    }
+    let cwd = if fork { existing.as_ref().and_then(|s| s.cwd.clone()) } else { cwd };
+    let machine = machine.or_else(|| existing.as_ref().and_then(|s| s.remote.clone()));
+    let decoded = session_id.as_deref().and_then(|id| crate::session_identity::split_codex_key(id, machine.as_deref()));
+    let instance_id = instance_id.or_else(|| existing.as_ref().and_then(|s| s.instance_id.clone())).or_else(|| decoded.as_ref().map(|p| p.0.clone()));
+    let session_id = existing.as_ref().map(|s| s.agent_id().to_owned()).or_else(|| decoded.map(|p| p.1)).or(session_id);
+    if matches!(agent.as_str(), "codex" | "claude") && session_id.as_deref().is_some_and(|id| id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')) {
+        return err("Некорректный идентификатор чата агента");
+    }
     // cwd бывает null: история группирует сессии без директории в «другое».
     // Resume без cwd допустим (как прежнее «скопировать команду» без cd),
     // а вот новая сессия без директории бессмысленна.
@@ -2217,7 +2307,7 @@ pub async fn session_launch(
         return err("Не указана директория проекта");
     }
     let machine = machine.unwrap_or_default();
-    let mode = crate::launch::Mode::parse(mode.as_deref().unwrap_or(""));
+    let mode = crate::launch::Mode::resolve(mode.as_deref(), d.settings.bool("launchDangerous"));
     // Песочница — только для НОВОЙ задачи: продолжение живёт там, где начиналось,
     // и переносить его в свежий worktree значило бы оторвать от своей работы.
     let cwd = if isolate.unwrap_or(false) && session_id.is_none() {
@@ -2225,9 +2315,9 @@ pub async fn session_launch(
             Host::Local
         } else {
             match d.remotes.node(&machine) {
-                Some(node) => Host::Ssh {
+                Some(node) => Host::ConfiguredSsh {
                     machine: machine.clone(),
-                    host: node.cfg.ssh_host.clone(),
+                    connection: node.cfg.connection(),
                 },
                 None => return err(format!("Узел «{machine}» не подключён")),
             }
@@ -2240,26 +2330,45 @@ pub async fn session_launch(
         cwd
     };
     if !machine.is_empty() && machine != "local" {
-        let res = launch_on_node(&d, &machine, &cwd, &agent, session_id.as_deref(), mode).await;
+        let delivery = match crate::launch_task::LaunchTask::prepare(&machine, &cwd, &agent, if fork { None } else { session_id.as_deref() }, task) {
+            Ok(delivery) => delivery,
+            Err(error) => return err(error),
+        };
+        let delivery = delivery.for_instance(instance_id.clone()).with_model(model.clone());
+        let delivery = if fork { match delivery.continuing(&existing.as_ref().unwrap().id) { Ok(d) => d, Err(e) => return err(e) } } else { delivery };
+        let mut res = launch_on_node(&d, &machine, &cwd, &agent, session_id.as_deref(), instance_id.as_deref(), mode, model.as_deref(), fork).await;
         if res.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-            deliver_task(&d, &machine, &cwd, task);
+            res["launchId"] = json!(delivery.id);
+            if fork { res["continuedFrom"] = json!(existing.as_ref().unwrap().id); }
+            let pane = res.get("pane").and_then(Value::as_str).filter(|pane| !pane.is_empty()).map(str::to_string);
+            if fork {
+                if let Some(pane) = pane.as_deref() {
+                    match delivery.register_terminal(pane, existing.as_ref().and_then(|s| s.provider_home.clone())) {
+                        Ok(id) => res["terminalId"] = json!(id),
+                        Err(error) => return err(error),
+                    }
+                }
+            }
+            delivery.deliver(&d, pane);
         }
         return res;
     }
     // Новый проект на этой машине: каталога может ещё не быть, и требовать
     // сходить создать его руками — значит не сделать работу.
     if !cwd.trim().is_empty() {
+        if fork && !std::path::Path::new(cwd.trim()).is_dir() { return err("Каталог исходного проекта больше недоступен"); }
         if let Err(e) = std::fs::create_dir_all(cwd.trim()) {
             return err(format!("не создал {}: {e}", cwd.trim()));
         }
     }
+    let cwd = std::fs::canonicalize(cwd.trim()).map(|path| path.to_string_lossy().into_owned()).unwrap_or(cwd);
     // Контейнер — вторая изоляция из Air: worktree разводит файлы, docker —
     // инструменты. Образ задаётся в настройках: своего мы не собираем, а
     // угадывать чужой нельзя.
     let in_docker = container.unwrap_or(false);
     let image = d.settings.string("launchDockerImage");
     if in_docker && image.trim().is_empty() {
-        return err("для запуска в контейнере укажи образ в настройках («Запуск» → образ контейнера)");
+        return err("Для запуска в контейнере укажи образ в настройках: «Машины и VM» → Docker");
     }
     if in_docker && !crate::launch::has_docker().await {
         return err("docker не найден на этой машине");
@@ -2268,12 +2377,14 @@ pub async fn session_launch(
     let custom = d.settings.string("launchCustomCmd");
     let proxy = d.settings.string("launchProxyCmd");
     // Режим задачи сильнее общей настройки: человек выбрал его для ЭТОЙ работы.
-    let dangerous = mode == crate::launch::Mode::Yolo || d.settings.bool("launchDangerous");
+    let dangerous = mode == crate::launch::Mode::Yolo;
 
     // Свой агент из реестра — раньше зашитой пары: команду для него собирает
     // реестр (шим + шаблон возобновления человека), а не наши догадки.
     let customs = crate::agents::parse(&d.settings.load());
-    let agent_cmd = match crate::agents::find(&customs, &agent) {
+    let agent_cmd = if fork {
+        match crate::launch::fork_command(&agent, session_id.as_deref().unwrap(), mode) { Ok(cmd) => cmd, Err(e) => return err(e) }
+    } else { match crate::agents::find(&customs, &agent) {
         Some(a) => crate::agents::command(a, session_id.as_deref(), dangerous),
         None => crate::launch::agent_command_mode(
             &agent,
@@ -2284,7 +2395,26 @@ pub async fn session_launch(
                 mode
             },
         ),
-    };
+    }};
+    let agent_cmd = match crate::launch::with_model(agent_cmd, &agent, model.as_deref()) { Ok(command) => command, Err(error) => return err(error) };
+    let mut resolved_instance_id = instance_id.clone();
+    let agent_cmd = if agent == "codex" {
+        let registry = match crate::session_identity::registry() { Ok(r) => r, Err(e) => return err(e) };
+        let selected = match registry.launch_spec(instance_id.as_deref()) { Ok(s) => s, Err(e) => return err(e) };
+        resolved_instance_id = Some(selected.instance_id.clone());
+        if in_docker && instance_id.is_some() {
+            return err("Профиль Codex находится на этой машине. Для контейнера настрой отдельный профиль внутри него.");
+        }
+        format!("export CODEX_HOME={}; export JARVIS_PROVIDER_INSTANCE_ID={}; export JARVIS_REAL_CODEX={}; {}",
+            shell_quote(&selected.codex_home.to_string_lossy()), shell_quote(&selected.instance_id),
+            shell_quote(&selected.program.to_string_lossy()), agent_cmd)
+    } else if fork && agent == "claude" {
+        let Some(home) = existing.as_ref().and_then(|s| s.provider_home.as_deref()).filter(|home| std::path::Path::new(home).is_dir()) else {
+            return err("Каталог профиля исходного Claude больше недоступен");
+        };
+        format!("export CLAUDE_CONFIG_DIR={}; export JARVIS_PROVIDER_INSTANCE_ID={}; {}", shell_quote(home),
+            shell_quote(instance_id.as_deref().unwrap_or("")), agent_cmd)
+    } else { agent_cmd };
     // PATH запускаемой команды достраиваем сами: терминал выполняет её в
     // неинтерактивном шелле, где PATH-блока Jarvis (и шима) ещё нет.
     let path_dirs = crate::launch::launch_path_dirs();
@@ -2299,70 +2429,42 @@ pub async fn session_launch(
         agent_cmd
     };
     let inner = crate::launch::inner_command(&cwd, &proxy, &agent_cmd, &path_dirs);
+    let delivery = match crate::launch_task::LaunchTask::prepare("local", &cwd, &agent, if fork { None } else { session_id.as_deref() }, task) {
+        Ok(delivery) => delivery.for_instance(resolved_instance_id).with_model(model.clone()),
+        Err(error) => return err(error),
+    };
+    if fork {
+        let delivery = match delivery.continuing(&existing.as_ref().unwrap().id) { Ok(d) => d, Err(e) => return err(e) };
+        let config = crate::util::jarvis_dir().join("tmux.conf");
+        let config = config.to_string_lossy().to_string();
+        let name = delivery.id.clone();
+        let runtime_dir = format!("JARVIS_DIR={}", crate::util::jarvis_dir().display());
+        let runtime_sock = format!("JARVIS_SOCK={}", crate::util::sock_path().display());
+        let mut args = vec![];
+        if std::path::Path::new(&config).is_file() { args.extend(["-f", config.as_str()]); }
+        let inner = format!("unset JARVIS_IGNORE; {inner}");
+        args.extend(["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name.as_str(), "-c", cwd.as_str(), "-e", runtime_dir.as_str(), "-e", runtime_sock.as_str(), "bash", "-lc", inner.as_str()]);
+        return match crate::tmux::tmux_j(&args).await {
+            Ok(pane) if pane.trim().starts_with('%') => {
+                let terminal_id = match delivery.register_terminal(pane.trim(), existing.as_ref().and_then(|s| s.provider_home.clone())) {
+                    Ok(id) => id, Err(error) => return err(error),
+                };
+                let result = json!({"ok":true,"launchId":delivery.id,"terminalId":terminal_id,"cwd":cwd,"machine":"local","pane":pane.trim(),"continuedFrom":existing.as_ref().unwrap().id});
+                delivery.deliver(&d, Some(pane.trim().to_string()));
+                result
+            }
+            Ok(_) => err("Терминал не вернул идентификатор новой сессии"),
+            Err(error) => err(error),
+        };
+    }
     match crate::launch::spawn(&terminal, &custom, &inner).await {
         Ok(()) => {
-            deliver_task(&d, "", &cwd, task);
-            ok()
+            let result = json!({ "ok": true, "launchId": delivery.id, "cwd": cwd, "machine": "local" });
+            delivery.deliver(&d, None);
+            result
         }
         Err(e) => err(e),
     }
-}
-
-/// Отдать задачу агенту, как только он встанет.
-///
-/// Сессия появляется не в момент запуска, а когда агент дошлёт первый хук:
-/// терминал открывается, TUI поднимается, и всё это занимает секунды. Поэтому
-/// ждём её в фоне, а не заставляем человека сторожить список.
-///
-/// Ждём ограниченно и молча сдаёмся: не встал за полторы минуты — значит
-/// что-то не так, и текст, вылетевший в неизвестно чей чат через пять минут,
-/// был бы хуже ненаписанного.
-fn deliver_task(d: &Arc<Daemon>, machine: &str, cwd: &str, task: Option<String>) {
-    let Some(text) = task.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) else {
-        return;
-    };
-    let (d, machine, cwd) = (d.clone(), machine.to_string(), cwd.trim_end_matches('/').to_string());
-    let since = crate::util::now_ms();
-    tauri::async_runtime::spawn(async move {
-        for _ in 0..90 {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let found = {
-                let sessions = d.sessions.lock().unwrap_or_else(|e| e.into_inner());
-                sessions
-                    .values()
-                    .filter(|s| {
-                        let same_host = if machine.is_empty() || machine == "local" {
-                            s.remote.is_none()
-                        } else {
-                            s.remote.as_deref() == Some(machine.as_str())
-                        };
-                        // Сессия ИМЕННО этого запуска: тот же каталог и
-                        // появилась после него. Иначе задача уехала бы в чужой
-                        // давно открытый чат того же проекта.
-                        same_host
-                            && s.cwd.as_deref().map(|c| c.trim_end_matches('/')) == Some(cwd.as_str())
-                            && s.created_at >= since
-                    })
-                    .max_by_key(|s| s.created_at)
-                    .and_then(|s| s.tmux_pane.clone().map(|p| (s.id.clone(), p)))
-            };
-            let Some((id, pane)) = found else { continue };
-            let sent = if machine.is_empty() || machine == "local" {
-                crate::tmux::reply(&pane, &text).await
-            } else {
-                match d.remotes.node(&machine).and_then(|n| n.client().ok()) {
-                    Some(c) => c.reply(&pane, &text).await,
-                    None => Err("узел пропал из настроек".into()),
-                }
-            };
-            match sent {
-                Ok(()) => crate::log::line(&format!("launch: задача уехала в {id}")),
-                Err(e) => crate::log::line(&format!("launch: задача не доехала: {e}")),
-            }
-            return;
-        }
-        crate::log::line("launch: агент не встал за 90 с — задачу не отдал");
-    });
 }
 
 /// Запуск на удалённой машине. Терминала там нет и открывать нечего: сессия
@@ -2377,7 +2479,10 @@ async fn launch_on_node(
     cwd: &str,
     agent: &str,
     session_id: Option<&str>,
+    instance_id: Option<&str>,
     mode: crate::launch::Mode,
+    model: Option<&str>,
+    fork: bool,
 ) -> Value {
     let Some(node) = d.remotes.node(machine) else {
         return err(format!("Узел «{machine}» не подключён"));
@@ -2386,25 +2491,45 @@ async fn launch_on_node(
         Ok(c) => c,
         Err(e) => return err(format!("{e}: {}", node.why())),
     };
-    let bare = session_id.map(|s| s.strip_prefix(&format!("{machine}:")).unwrap_or(s));
-    let dangerous = d.settings.bool("launchDangerous");
+    let instance_id = instance_id.filter(|id| !id.is_empty());
+    let bare = session_id.map(|sid| {
+        let stripped = sid.strip_prefix(&format!("{machine}:")).unwrap_or(sid);
+        instance_id.and_then(|id| stripped.strip_prefix(&format!("codex:{id}:"))).unwrap_or(stripped)
+    });
+    if bare.is_some_and(|id| id.is_empty() || id.chars().any(|c| !(c.is_ascii_alphanumeric() || "-_.".contains(c)))) {
+        return err("Некорректный идентификатор удалённой сессии");
+    }
     // На узле шима своего агента нет — без него не будет ни tmux, ни хуков
     // жизненного цикла, и сессия молча не появилась бы. Честный отказ лучше.
     if crate::agents::find(&crate::agents::parse(&d.settings.load()), agent).is_some() {
         return err("свои агенты пока запускаются только на этой машине — на узле нет их шима");
     }
-    let cmd = crate::launch::agent_command_mode(
+    let cmd = if fork { match crate::launch::fork_command(agent, bare.unwrap_or(""), mode) { Ok(cmd) => cmd, Err(e) => return err(e) } } else { crate::launch::agent_command_mode(
         agent,
         bare,
-        if dangerous {
-            crate::launch::Mode::Yolo
-        } else {
-            mode
-        },
-    );
+        mode,
+    ) };
+    let cmd = match crate::launch::with_model(cmd, agent, model) { Ok(command) => command, Err(error) => return err(error) };
     let name = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or("project");
-    match client.launch(cwd, &cmd, name).await {
-        Ok(()) => json!({ "ok": true, "channel": "node", "machine": machine }),
+    // A selected source is authoritative; never resume another account because
+    // the requested profile is absent or this node is an older version.
+    if let Some(id) = instance_id {
+        let sources = match client.sources().await { Ok(sources) => sources, Err(error) => return err(error) };
+        let found = sources.as_array().is_some_and(|sources| sources.iter().any(|source|
+            source["id"] == id && source["agent"] == agent && source["available"] == true));
+        if !found { return err("Выбранный аккаунт агента недоступен на этой машине"); }
+    }
+    match client.launch_pane_source(cwd, &cmd, name, instance_id).await {
+        Ok((tmux_session, pane)) => {
+            if pane.is_empty() {
+                return err("Агент запущен, но узел не вернул его пану. Сообщение не отправлено — обнови jarvis-node");
+            }
+            let resolved_cwd = client.panes().await.ok().and_then(|reply|
+                reply.panes.into_iter().find(|candidate| candidate.pane == pane)
+                    .map(|candidate| candidate.cwd).filter(|cwd| !cwd.is_empty()))
+                .unwrap_or_else(|| cwd.to_string());
+            json!({ "ok": true, "channel": "node", "machine": machine, "pane": pane, "tmuxSession": tmux_session, "cwd": resolved_cwd })
+        }
         Err(e) => err(format!(
             "{}\nЕсли не хватает tmux или агента — поставь их на той машине.",
             ellipsize(&one_line(&e), 200)
@@ -2415,8 +2540,8 @@ async fn launch_on_node(
 /* ================= тосты ================= */
 
 #[tauri::command]
-pub fn toast_resize(app: AppHandle, h: f64) {
-    windows::toast_resize(&Daemon::get(&app), h);
+pub async fn toast_resize(app: AppHandle, h: f64) -> Result<(), String> {
+    windows::toast_resize(&Daemon::get(&app), h).await
 }
 
 /// Мост окна тостов загрузился — можно доливать буфер ранних уведомлений.
@@ -2512,7 +2637,23 @@ pub fn reconcile_limit(d: &Arc<Daemon>) {
 /// Потоковые события поступают через канал `agent:event` (тип `AgentEvent`).
 /// `session_id` — необязателен; при наличии используется для возобновления (--resume).
 #[tauri::command]
-pub async fn agent_send(app: AppHandle, message: String, session_id: Option<String>) -> Value {
+pub async fn agent_hosts(app: AppHandle) -> Value {
+    let selected = Daemon::get(&app).settings.load().get("agentProvider")
+        .and_then(Value::as_str).unwrap_or("auto").to_string();
+    let availability = tauri::async_runtime::spawn_blocking(|| (
+        crate::claude_bin::resolve_claude_bin().is_some(),
+        crate::backend::codex::resolve_codex_bin().is_some(),
+    )).await;
+    let Ok((claude, codex)) = availability else { return err("Не удалось проверить CLI"); };
+    json!({"ok":true,"selected":selected,"providers":[
+        {"id":"auto","label":"Авто","available":claude || codex},
+        {"id":"claude","label":"Claude","available":claude},
+        {"id":"codex","label":"Codex","available":codex}
+    ]})
+}
+
+#[tauri::command]
+pub async fn agent_send(app: AppHandle, message: String, session_id: Option<String>, provider: Option<String>) -> Value {
     use crate::agent::ClaudeCliHost;
     use crate::capability::{build_registry, grant::Consumer};
     use crate::util::jarvis_dir;
@@ -2535,10 +2676,18 @@ pub async fn agent_send(app: AppHandle, message: String, session_id: Option<Stri
         .collect();
 
     let resume = session_id.clone();
+    let selected = provider.unwrap_or_else(|| Daemon::get(&app).settings.load()
+        .get("agentProvider").and_then(Value::as_str).unwrap_or("auto").to_string());
+    let selected = match crate::agent::select_provider(&selected,
+        crate::claude_bin::resolve_claude_bin().is_some(),
+        crate::backend::codex::resolve_codex_bin().is_some()) {
+        Ok(selected) => selected,
+        Err(message) => return err(&message),
+    };
 
     // Выбор хоста по доступности («auto»): Claude (жёсткий INV-TOOLS на init) если
     // есть, иначе Codex (чистый CODEX_HOME + обязательный per-item kill).
-    if crate::claude_bin::resolve_claude_bin().is_some() {
+    if selected == "claude" {
         let host = ClaudeCliHost {
             app: app.clone(),
             mcp_config,
@@ -2546,7 +2695,7 @@ pub async fn agent_send(app: AppHandle, message: String, session_id: Option<Stri
         tauri::async_runtime::spawn(async move {
             host.run(&message, &tools, resume.as_deref()).await;
         });
-    } else if crate::backend::codex::resolve_codex_bin().is_some() {
+    } else {
         let Some((mcp_bin, token)) = read_mcp_bin_token(&mcp_config) else {
             return err("jarvis-mcp.json не прочитан — Codex-агент недоступен");
         };
@@ -2558,11 +2707,9 @@ pub async fn agent_send(app: AppHandle, message: String, session_id: Option<Stri
         tauri::async_runtime::spawn(async move {
             host.run(&message, &tools, resume.as_deref()).await;
         });
-    } else {
-        return err("Нет ни claude, ни codex — агент недоступен");
     }
 
-    json!({ "ok": true })
+    json!({ "ok": true, "provider": selected })
 }
 
 /// Достать (путь к jarvis-mcp, токен агента) из jarvis-mcp.json — для Codex-хоста,
@@ -2620,30 +2767,74 @@ pub fn stt_get(app: AppHandle) -> Value {
 }
 
 /// Единый инвентарь всех моделей (STT/голос/wake/runtime) для раздела «Модели».
-/// Только filesystem-срез — без health/HTTP-проверок (мгновенно, без блокировок).
+/// Filesystem-срез: обход окружений модели может быть долгим, поэтому вне UI.
 #[tauri::command]
-pub fn models_get() -> Value {
-    json!({ "models": crate::install::model_inventory() })
+pub async fn models_get() -> Value {
+    match tauri::async_runtime::spawn_blocking(crate::install::model_inventory).await {
+        Ok(models) => {
+            let models: Vec<Value> = models.into_iter().map(|model| {
+                let support = crate::install::model_install_support(&model.id);
+                let mut value = json!(model);
+                value["available"] = json!(support.is_ok());
+                value["unavailableReason"] = json!(support.err());
+                value
+            }).collect();
+            json!({ "models": models })
+        }
+        Err(e) => json!({ "ok": false, "models": [], "error": format!("Не удалось загрузить модели: {e}") }),
+    }
 }
 
 /// История диктовки/реплик («что я говорил») — новые первыми. Для UI + копирования.
 #[tauri::command]
-pub fn transcripts_get(app: AppHandle) -> Value {
-    json!({ "items": Daemon::get(&app).transcripts.list() })
+pub async fn transcripts_get(app: AppHandle) -> Value {
+    let daemon = Daemon::get(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut items = daemon.transcripts.list();
+        // Retention and failed audio writes can invalidate the historical flag.
+        // The UI offers retranscription only when its source still exists.
+        for item in &mut items {
+            item.has_audio = item.has_audio && crate::stt::audio_store::exists(item.id);
+        }
+        json!({ "items": items })
+    }).await.unwrap_or_else(|error| err(format!("Не удалось загрузить историю: {error}")))
 }
 
 /// Очистить историю реплик.
 #[tauri::command]
-pub fn transcripts_clear(app: AppHandle) -> Value {
-    Daemon::get(&app).transcripts.clear();
-    json!({ "ok": true })
+pub async fn transcripts_clear(app: AppHandle) -> Value {
+    let daemon = Daemon::get(&app);
+    change_voice_history(move || match daemon.transcripts.clear() {
+        Ok(()) => json!({ "ok": true }),
+        Err(error) => err(error),
+    }).await
 }
 
 /// Удалить одну реплику по id (для страницы истории).
 #[tauri::command]
-pub fn transcript_delete(app: AppHandle, id: u64) -> Value {
-    let ok = Daemon::get(&app).transcripts.remove(id);
-    json!({ "ok": ok })
+pub async fn transcript_delete(app: AppHandle, id: u64) -> Value {
+    let daemon = Daemon::get(&app);
+    change_voice_history(move || match daemon.transcripts.remove(id) {
+        Ok(true) => json!({ "ok": true }),
+        Ok(false) => err("Запись больше не существует"),
+        Err(error) => err(error),
+    }).await
+}
+
+/// Manual edits publish only after the complete history is durably replaced.
+#[tauri::command]
+pub async fn transcript_update(app: AppHandle, id: u64, text: String) -> Value {
+    let daemon = Daemon::get(&app);
+    change_voice_history(move || match daemon.transcripts.update_text(id, &text) {
+        Ok(text) => json!({ "ok": true, "text": text }),
+        Err(error) => err(error),
+    }).await
+}
+
+/// Atomic persistence includes fsync. Keep it away from the WebView/UI thread.
+async fn change_voice_history(work: impl FnOnce() -> Value + Send + 'static) -> Value {
+    tauri::async_runtime::spawn_blocking(work).await
+        .unwrap_or_else(|error| err(format!("Не удалось изменить историю: {error}")))
 }
 
 /// ПЕРЕГЕНЕРИРОВАТЬ распознавание реплики из сохранённого аудио (если анализ дал
@@ -2655,19 +2846,20 @@ pub async fn transcript_retranscribe(app: AppHandle, id: u64) -> Value {
     let stt = d.stt.clone();
     let opts = stt.options();
     let res = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let original = d.transcripts.list().into_iter().find(|item| item.id == id)
+            .ok_or("Запись больше не существует")?;
+        if !original.has_audio { return Err("У этой записи нет сохранённого аудио".into()); }
         let pcm = crate::stt::audio_store::load(id)?;
         let r = stt
             .transcribe(&pcm, &opts)
             .map_err(|e| format!("распознавание: {e}"))?;
-        Ok(r.text.trim().to_string())
+        let text = r.text.trim();
+        if text.is_empty() { return Err("распознавание дало пустой результат".into()); }
+        d.transcripts.update_text_if_original(id, text, Some(&original.text))
     })
     .await;
     match res {
-        Ok(Ok(text)) if !text.is_empty() => {
-            d.transcripts.update_text(id, &text);
-            json!({ "ok": true, "text": text })
-        }
-        Ok(Ok(_)) => err("распознавание дало пустой результат"),
+        Ok(Ok(text)) => json!({ "ok": true, "text": text }),
         Ok(Err(e)) => err(e),
         Err(e) => err(format!("задача упала: {e}")),
     }
@@ -2681,9 +2873,12 @@ pub fn prompts_get_settings(app: AppHandle) -> Value {
 
 /// Включить/выключить умный режим (авто-преобразование надиктовки).
 #[tauri::command]
-pub fn prompts_set_smart(app: AppHandle, on: bool) -> Value {
-    Daemon::get(&app).prompts.set_smart(on);
-    json!({ "ok": true })
+pub async fn prompts_set_smart(app: AppHandle, on: bool) -> Value {
+    let daemon = Daemon::get(&app);
+    change_voice_history(move || match daemon.prompts.set_smart(on) {
+        Ok(()) => json!({ "ok": true, "smart": on }),
+        Err(error) => err(format!("Не удалось сохранить умный режим: {error}")),
+    }).await
 }
 
 /// Библиотека преобразований (встроенные) для UI.
@@ -2692,7 +2887,7 @@ pub fn prompts_get() -> Value {
     crate::stt::prompts::builtin_prompts_json()
 }
 
-/// Преобразовать надиктованный текст через LLM (Haiku). `style`: "prompt" | "clean".
+/// Преобразовать диктовку через выбранную служебную LLM с сохранением языков.
 /// Возвращает { ok, result } или { ok:false, error }. Блокирующее — async-команда.
 #[tauri::command]
 pub async fn transcript_enhance(text: String, style: String) -> Value {
@@ -2701,88 +2896,100 @@ pub async fn transcript_enhance(text: String, style: String) -> Value {
         return err("пустой текст");
     }
     let prompt = crate::stt::enhance::enhance_prompt(&style, t);
-    match crate::claude_bin::run_haiku(&prompt, std::time::Duration::from_secs(45)).await {
+    match crate::claude_bin::run_service_text_transform(&prompt, std::time::Duration::from_secs(45)).await {
+        Some(s) if s.trim().is_empty() => err("Форматирование вернуло пустой текст. Исходная диктовка сохранена."),
+        Some(s) if style == "clean" && !crate::stt::prompts::preserves_formatting_anchors(t, s.trim()) =>
+            err("Форматирование изменило важные части текста. Исходная диктовка сохранена; попробуй ещё раз."),
         Some(s) => json!({ "ok": true, "result": s.trim() }),
-        None => err("ишка не ответила (таймаут или claude недоступен)"),
+        None => err("Модель форматирования недоступна или не ответила вовремя. Исходный текст сохранён."),
     }
 }
 
-/// Сменить движок STT + сохранить в settings.json. Требует перезапуска демона.
+/// Serialize settings plus runtime changes in request order. Waiting for a
+/// Python process, ONNX initialization or audio teardown never owns the UI
+/// thread. Return only when the mutation completes; no misleading timeout.
+async fn change_audio_settings(work: impl FnOnce() -> Value + Send + 'static) -> Value {
+    let turn = UI_SETTINGS_CHANGES.lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        // Keep the queue reservation with the mutation even if its IPC future
+        // is cancelled while a native join is still finishing.
+        let _turn = turn;
+        work()
+    })
+    .await
+    .unwrap_or_else(|error| err(format!("Не удалось применить настройки аудио: {error}")))
+}
+
+/// The same persistence-before-publication boundary is used by every audio
+/// setting. Tests inject only the runtime application, never the disk write.
+fn persist_runtime_setting(
+    store: &crate::settings::Store,
+    block: &str,
+    patch: Value,
+    apply: impl FnOnce(&Value) -> Value,
+) -> Value {
+    let Some(patch) = patch.as_object() else { return err("Некорректные настройки") };
+    match store.try_set_block(block, patch.clone()) {
+        Ok(saved) => apply(&saved),
+        Err(error) => err(error),
+    }
+}
+
+/// Сменить движок STT + сохранить в settings.json без блокировки UI.
 #[tauri::command]
-pub fn stt_set_engine(app: AppHandle, engine: String) -> Value {
-    let allowed = ["whisper-turbo", "qwen3-0.6b", "qwen3-1.7b"];
-    if !allowed.contains(&engine.as_str()) {
-        return err(format!("Неизвестный STT-движок: {engine}"));
-    }
-    // Гейт: не переключаемся на движок без локальных весов/окружения — иначе
-    // qwen-сайдкар уйдёт в бесконечную загрузку с HF (:8732 висит), а whisper
-    // вернёт «модель не установлена». Сначала пользователь скачивает модель.
-    let st = crate::install::status();
-    let ready = crate::install::stt_engine_ready(
-        &engine,
-        st.whisper_model,
-        st.whisper_native_built,
-        crate::install::qwen_weights_present(&engine),
-        st.qwen3_sidecar,
-    );
-    if !ready {
-        // Честная, конкретная ошибка под каждый режим отказа (правда по модели).
-        let msg = if engine == "whisper-turbo" && st.whisper_model && !st.whisper_native_built {
-            "whisper-turbo: модель скачана, но нужна нативная сборка \
-             (--features whisper-native) — пересоберите приложение"
-                .to_string()
-        } else {
-            format!("{engine}: модель не скачана — сначала скачайте её в разделе «Модели»")
-        };
-        return err(msg);
-    }
-    let d = Daemon::get(&app);
-    let mut patch = serde_json::Map::new();
-    patch.insert("engine".into(), Value::String(engine));
-    d.settings.set_stt(patch);
-    // Горячая смена без перезапуска демона: пересобрать движок/сайдкар на месте.
-    // Диктовка и wake-action держат тот же Arc<SttService> — мутация им видна.
-    let cfg = crate::stt::config::SttConfig::from_settings(&d.settings.load());
-    d.stt.set_engine(cfg);
-    json!({ "ok": true, "restart": false })
+pub async fn stt_set_engine(app: AppHandle, engine: String) -> Value {
+    change_audio_settings(move || {
+        let allowed = ["whisper-turbo", "qwen3-0.6b", "qwen3-1.7b"];
+        if !allowed.contains(&engine.as_str()) {
+            return err(format!("Неизвестный STT-движок: {engine}"));
+        }
+        // Гейт: не переключаемся на движок без локальных весов/окружения — иначе
+        // qwen-сайдкар уйдёт в бесконечную загрузку с HF (:8732 висит), а whisper
+        // вернёт «модель не установлена». Сначала пользователь скачивает модель.
+        let st = crate::install::status();
+        let ready = crate::install::stt_engine_ready(
+            &engine,
+            st.whisper_model,
+            st.whisper_native_built,
+            crate::install::qwen_weights_present(&engine),
+            st.qwen3_sidecar,
+        );
+        if !ready {
+            // Честная, конкретная ошибка под каждый режим отказа (правда по модели).
+            let msg = if engine == "whisper-turbo" && st.whisper_model && !st.whisper_native_built {
+                "whisper-turbo: модель скачана, но нужна нативная сборка \
+                 (--features whisper-native) — пересоберите приложение"
+                    .to_string()
+            } else {
+                format!("{engine}: модель не скачана — сначала скачайте её в разделе «Модели»")
+            };
+            return err(msg);
+        }
+        let d = Daemon::get(&app);
+        persist_runtime_setting(&d.settings, "stt", json!({"engine":engine}), |saved| {
+            let cfg = crate::stt::config::SttConfig::from_settings(saved);
+            d.stt.set_engine(cfg);
+            json!({ "ok": true, "restart": false })
+        })
+    })
+    .await
 }
 
 /// Переназначить хоткей диктовки (push-to-talk). Валидирует аксельератор,
 /// снимает старый глобальный шорткат, пишет в `settings.stt.hotkey` и регистрирует
 /// новый. При провале регистрации (сочетание занято) — откат на прежний.
 #[tauri::command]
-pub fn stt_set_hotkey(app: AppHandle, hotkey: String) -> Value {
-    let hotkey = hotkey.trim().to_string();
-    if hotkey.is_empty() {
-        return err("Пустое сочетание");
-    }
-    // Должно парситься как глобальный шорткат tauri (например "F8" или "Command+Shift+D").
-    if hotkey.parse::<Shortcut>().is_err() {
-        return err(format!("Не разобрал сочетание: {hotkey}"));
-    }
-    let d = Daemon::get(&app);
-    let old = dictation_accelerator(&d);
-    if hotkey == old {
-        return json!({ "ok": true, "hotkey": hotkey });
-    }
-    let gs = d.app.global_shortcut();
-    let _ = gs.unregister(old.as_str());
-    if gs.register(hotkey.as_str()).is_err() {
-        let _ = gs.register(old.as_str()); // откат на прежний
-        return err(format!("Сочетание {hotkey} занято системой"));
-    }
-    let mut patch = serde_json::Map::new();
-    patch.insert("hotkey".into(), Value::String(hotkey.clone()));
-    d.settings.set_stt(patch);
-    json!({ "ok": true, "hotkey": hotkey })
+pub async fn stt_set_hotkey(app: AppHandle, hotkey: String) -> Value {
+    let result = hotkey_assign(app, "dictation".into(), hotkey.clone(), Some(false)).await;
+    if result.get("ok") == Some(&Value::Bool(true)) { json!({ "ok": true, "hotkey": hotkey.trim() }) } else { result }
 }
 
 /// Тумблер шумодава (VAD-гейт диктовки): on=true — пропускать не-речь.
 #[tauri::command]
-pub fn stt_set_noise_gate(app: AppHandle, on: bool) {
-    let mut patch = serde_json::Map::new();
-    patch.insert("noiseGate".into(), Value::Bool(on));
-    Daemon::get(&app).settings.set_stt(patch);
+pub async fn stt_set_noise_gate(app: AppHandle, on: bool) -> Value {
+    change_audio_settings(move || {
+        persist_runtime_setting(&Daemon::get(&app).settings, "stt", json!({"noiseGate":on}), |_| ok())
+    }).await
 }
 
 /// Открыть панель и переключить на вкладку «История голоса» (клик по карточке
@@ -2797,13 +3004,28 @@ pub fn voice_history_open(app: AppHandle) {
 /// Список устройств ввода (микрофоны) + текущее выбранное — для селектора в
 /// настройках. `current` = null → системное устройство по умолчанию.
 #[tauri::command]
-pub fn stt_input_devices(app: AppHandle) -> Value {
+pub async fn stt_input_devices(app: AppHandle) -> Value {
     let d = Daemon::get(&app);
     let cfg = crate::stt::config::SttConfig::from_settings(&d.settings.load());
-    json!({
-        "devices": crate::stt::hub::input_device_names(),
-        "current": cfg.audio_device,
-    })
+    // CoreAudio can wait on a driver or TCC even during device discovery. Never
+    // run it on AppKit's event loop, and don't accumulate workers if it stalls.
+    static PROBE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let Ok(permit) = PROBE.try_acquire() else {
+        return json!({ "devices": [], "current": cfg.audio_device,
+            "error": "Список микрофонов ещё загружается. Можно использовать выбранное устройство." });
+    };
+    let worker = tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        crate::stt::hub::input_device_names()
+    });
+    match tokio::time::timeout(std::time::Duration::from_secs(4), worker).await {
+        Ok(Ok(devices)) => json!({ "devices": devices, "current": cfg.audio_device }),
+        result => {
+            crate::log::line(&format!("[audio] device discovery did not complete: {result:?}"));
+            json!({ "devices": [], "current": cfg.audio_device,
+                "error": "Не удалось получить список микрофонов. Выбранное устройство сохранено; попробуйте открыть раздел ещё раз." })
+        }
+    }
 }
 
 /// Выбрать устройство ввода. `name` пустой/null → системное по умолчанию.
@@ -2811,21 +3033,12 @@ pub fn stt_input_devices(app: AppHandle) -> Value {
 /// в блокирующем потоке: рестарт cpal-захвата (join старого потока + открытие нового
 /// устройства CoreAudio) занимает сотни мс, и синхронно он морозил UI при выборе.
 #[tauri::command]
-pub fn stt_set_input_device(app: AppHandle, name: Option<String>) -> Value {
-    let d = Daemon::get(&app);
-    let name = name.filter(|s| !s.trim().is_empty());
-    let mut patch = serde_json::Map::new();
-    patch.insert(
-        "audioDevice".into(),
-        name.clone().map(Value::String).unwrap_or(Value::Null),
-    );
-    d.settings.set_stt(patch);
-    // Команда возвращается МГНОВЕННО: тяжёлый рестарт захвата (cpal teardown + open
-    // нового CoreAudio-устройства, сотни мс) уходит в blocking-пул fire-and-forget.
-    // Раньше синхронный вызов морозил UI на время переключения.
-    let audio = d.audio.clone();
-    tauri::async_runtime::spawn_blocking(move || audio.set_device(name));
-    json!({ "ok": true })
+pub async fn stt_set_input_device(app: AppHandle, name: Option<String>) -> Value {
+    change_audio_settings(move || {
+        let d = Daemon::get(&app);
+        let name = name.map(|name| name.trim().to_owned()).filter(|name| !name.is_empty());
+        persist_runtime_setting(&d.settings, "stt", json!({"audioDevice":name}), |_| { d.audio.set_device(name); ok() })
+    }).await
 }
 
 /* ============== Раздел «Под капотом»: служебный LLM (Claude/Codex) ============== */
@@ -2863,7 +3076,8 @@ pub fn service_get(app: AppHandle) -> Value {
 /// Ошибка/нет файла → только «По умолчанию» + пара известных slug'ов как фолбэк.
 fn codex_models_list() -> Vec<Value> {
     let mut out = vec![json!({ "value": "", "label": "По умолчанию" })];
-    let path = crate::util::home_dir().join(".codex/models_cache.json");
+    let Ok(home) = crate::util::selected_codex_dir() else { return out };
+    let path = home.join("models_cache.json");
     if let Ok(txt) = std::fs::read_to_string(&path) {
         if let Ok(v) = serde_json::from_str::<Value>(&txt) {
             if let Some(arr) = v.get("models").and_then(Value::as_array) {
@@ -2898,47 +3112,49 @@ fn apply_service_config(d: &std::sync::Arc<Daemon>) {
     ));
 }
 
+async fn change_service_setting(d: Arc<Daemon>, patch: serde_json::Map<String, Value>) -> Value {
+    change_audio_settings(move || {
+        if let Err(error) = d.settings.try_set_block("service", patch) { return err(error); }
+        apply_service_config(&d);
+        ok()
+    }).await
+}
+
 #[tauri::command]
-pub fn service_set_backend(app: AppHandle, backend: String) -> Value {
+pub async fn service_set_backend(app: AppHandle, backend: String) -> Value {
     if !["auto", "claude", "codex"].contains(&backend.as_str()) {
         return err(format!("неизвестный бэкенд: {backend}"));
     }
     let d = Daemon::get(&app);
     let mut p = serde_json::Map::new();
     p.insert("backend".into(), Value::String(backend));
-    d.settings.set_block("service", p);
-    apply_service_config(&d);
-    ok()
+    change_service_setting(d, p).await
 }
 
 #[tauri::command]
-pub fn service_set_model(app: AppHandle, model: String) -> Value {
+pub async fn service_set_model(app: AppHandle, model: String) -> Value {
     let d = Daemon::get(&app);
     let mut p = serde_json::Map::new();
     p.insert("codexModel".into(), Value::String(model));
-    d.settings.set_block("service", p);
-    apply_service_config(&d);
-    ok()
+    change_service_setting(d, p).await
 }
 
 #[tauri::command]
-pub fn service_set_effort(app: AppHandle, effort: String) -> Value {
+pub async fn service_set_effort(app: AppHandle, effort: String) -> Value {
     if !["minimal", "low", "medium", "high", "xhigh"].contains(&effort.as_str()) {
         return err(format!("неизвестный effort: {effort}"));
     }
     let d = Daemon::get(&app);
     let mut p = serde_json::Map::new();
     p.insert("codexEffort".into(), Value::String(effort));
-    d.settings.set_block("service", p);
-    apply_service_config(&d);
-    ok()
+    change_service_setting(d, p).await
 }
 
 /// Задать egress-прокси служебных вызовов (Codex по HTTPS требует HTTPS_PROXY —
 /// без него на прокси-сети запрос висит в таймаут). Пустая строка → стереть
 /// настройку, прокси снова наследуется из env. Тримминг + лёгкая валидация схемы.
 #[tauri::command]
-pub fn service_set_proxy(app: AppHandle, proxy: String) -> Value {
+pub async fn service_set_proxy(app: AppHandle, proxy: String) -> Value {
     let proxy = proxy.trim().to_string();
     if !proxy.is_empty()
         && !proxy.starts_with("http://")
@@ -2950,9 +3166,7 @@ pub fn service_set_proxy(app: AppHandle, proxy: String) -> Value {
     let d = Daemon::get(&app);
     let mut p = serde_json::Map::new();
     p.insert("proxy".into(), Value::String(proxy));
-    d.settings.set_block("service", p);
-    apply_service_config(&d);
-    ok()
+    change_service_setting(d, p).await
 }
 
 /// Проверка служебного LLM: короткий запрос через ВЫБРАННЫЙ бэкенд (run_service_llm),
@@ -3022,21 +3236,17 @@ pub async fn claude_auth_connect(app: AppHandle, mode: String, value: String) ->
     let mut p = serde_json::Map::new();
     p.insert("claudeAuthMode".into(), Value::String(mode));
     p.insert("claudeSecret".into(), Value::String(value));
-    d.settings.set_block("service", p);
-    apply_service_config(&d);
-    ok()
+    change_service_setting(d, p).await
 }
 
 /// Отключить аккаунт Claude — снова используется собственный логин `claude` CLI.
 #[tauri::command]
-pub fn claude_auth_disconnect(app: AppHandle) -> Value {
+pub async fn claude_auth_disconnect(app: AppHandle) -> Value {
     let d = Daemon::get(&app);
     let mut p = serde_json::Map::new();
     p.insert("claudeAuthMode".into(), Value::String(String::new()));
     p.insert("claudeSecret".into(), Value::String(String::new()));
-    d.settings.set_block("service", p);
-    apply_service_config(&d);
-    ok()
+    change_service_setting(d, p).await
 }
 
 /// Тест диктовки: ~4 с захвата с микрофона → транскрипция активным движком.
@@ -3078,48 +3288,115 @@ pub fn wake_get(app: AppHandle) -> Value {
 
 /// Вкл/выкл always-on детектор. Поднимает/гасит consumer-поток и аудио-захват.
 #[tauri::command]
-pub fn wake_set_enabled(app: AppHandle, on: bool) -> Value {
-    let d = Daemon::get(&app);
-    // Гейт: без скачанных моделей openWakeWord детектор молча инертен (стаб) —
-    // не даём включить, пока модель не установлена в разделе «Модели».
-    if on && !crate::install::status().wakeword_models {
-        return err("Сначала скачайте модели wake-word в разделе «Модели»");
-    }
-    let mut patch = serde_json::Map::new();
-    patch.insert("enabled".into(), json!(on));
-    d.settings.set_block("wake", patch);
-    d.wake.set_enabled(on);
-    json!({ "ok": true, "status": d.wake.status() })
+pub async fn wake_set_enabled(app: AppHandle, on: bool) -> Value {
+    change_audio_settings(move || {
+        let d = Daemon::get(&app);
+        // Гейт: без скачанных моделей openWakeWord детектор молча инертен (стаб) —
+        // не даём включить, пока модель не установлена в разделе «Модели».
+        if on && !crate::install::status().wakeword_models {
+            return err("Сначала скачайте модели wake-word в разделе «Модели»");
+        }
+        let mut patch = serde_json::Map::new();
+        patch.insert("enabled".into(), json!(on));
+        if let Err(error) = d.settings.try_set_block("wake", patch) { return err(error); }
+        d.wake.set_enabled(on);
+        json!({ "ok": true, "status": d.wake.status() })
+    })
+    .await
 }
 
 /// Установить порог срабатывания (0..1). Переконфигурирует детектор вживую.
 #[tauri::command]
-pub fn wake_set_threshold(app: AppHandle, threshold: f64) -> Value {
-    let d = Daemon::get(&app);
-    let mut patch = serde_json::Map::new();
-    patch.insert("threshold".into(), json!(threshold.clamp(0.0, 1.0)));
-    d.settings.set_block("wake", patch);
-    let root = d.settings.load();
-    let wcfg = crate::wakeword::config::WakeConfig::from_settings(&root);
-    let vcfg = crate::wakeword::config::VerifyConfig::from_settings(&root);
-    d.wake.reconfigure(wcfg, vcfg);
-    json!({ "ok": true, "status": d.wake.status() })
+pub async fn wake_set_threshold(app: AppHandle, threshold: f64) -> Value {
+    change_audio_settings(move || {
+        let d = Daemon::get(&app);
+        let mut patch = serde_json::Map::new();
+        patch.insert("threshold".into(), json!(threshold.clamp(0.0, 1.0)));
+        if let Err(error) = d.settings.try_set_block("wake", patch) { return err(error); }
+        let root = d.settings.load();
+        let wcfg = crate::wakeword::config::WakeConfig::from_settings(&root);
+        let vcfg = crate::wakeword::config::VerifyConfig::from_settings(&root);
+        d.wake.reconfigure(wcfg, vcfg);
+        json!({ "ok": true, "status": d.wake.status() })
+    })
+    .await
 }
 
 /// Жёсткий mute общего аудио-входа (мгновенно глушит захват у источника).
 #[tauri::command]
-pub fn audio_set_mute(app: AppHandle, on: bool) -> Value {
-    let d = Daemon::get(&app);
-    d.audio.set_muted(on);
-    let mut patch = serde_json::Map::new();
-    patch.insert("mute".into(), json!(on));
-    d.settings.set_stt(patch);
-    json!({ "ok": true, "muted": on, "state": d.audio.state().as_str() })
+pub async fn audio_set_mute(app: AppHandle, on: bool) -> Value {
+    change_audio_settings(move || {
+        let d = Daemon::get(&app);
+        persist_runtime_setting(&d.settings, "stt", json!({"mute":on}), |_| {
+            d.audio.set_muted(on);
+            json!({ "ok": true, "muted": on, "state": d.audio.state().as_str() })
+        })
+    }).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_settings_write_never_applies_the_runtime_engine() {
+        let dir = tmp_dir("runtime-persistence");
+        let path = dir.join("settings.json");
+        std::fs::create_dir(&path).unwrap();
+        let store = crate::settings::Store::with_path(path.clone());
+        let applied = std::cell::Cell::new(false);
+        let result = persist_runtime_setting(&store, "stt", json!({"engine":"qwen3-0.6b"}), |_| {
+            applied.set(true); ok()
+        });
+        assert_eq!(result["ok"], false);
+        assert!(result["error"].is_string());
+        assert!(!applied.get());
+        std::fs::remove_dir(&path).unwrap();
+        let result = persist_runtime_setting(&store, "stt", json!({"engine":"whisper-turbo"}), |saved| {
+            assert_eq!(saved["stt"]["engine"], "whisper-turbo");
+            let disk: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(disk["stt"]["engine"], "whisper-turbo");
+            applied.set(true); ok()
+        });
+        assert_eq!(result["ok"], true);
+        assert!(applied.get());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stealing_shortcuts_composes_one_patch_without_losing_stt_preferences() {
+        let before = json!({"stt":{"engine":"whisper-turbo","audioDevice":"USB","hotkey":"F8"}});
+        let mut patch = serde_json::Map::new();
+        patch_accel(&mut patch, &before, HkAction::Dictation, HK_NONE);
+        patch_accel(&mut patch, &before, HkAction::Panel, "F8");
+        assert_eq!(patch["stt"]["engine"], "whisper-turbo");
+        assert_eq!(patch["stt"]["audioDevice"], "USB");
+        assert_eq!(patch["stt"]["hotkey"], HK_NONE);
+        assert_eq!(patch["hotkey"], "F8");
+        assert_eq!(before["stt"]["hotkey"], "F8");
+    }
+
+    #[tokio::test]
+    async fn audio_changes_do_not_block_runtime_or_overlap_after_cancellation() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first = tokio::spawn(change_audio_settings(move || {
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+            json!({"ok": true, "change": 1})
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(2), started_rx).await.unwrap().unwrap();
+        first.abort(); // the worker must retain ownership until it finishes
+        let (second_tx, mut second_rx) = tokio::sync::oneshot::channel();
+        let second = tokio::spawn(change_audio_settings(move || {
+            let _ = second_tx.send(());
+            json!({"ok": true, "change": 2})
+        }));
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut second_rx).await.is_err());
+        release_tx.send(()).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), second).await.unwrap().unwrap();
+        assert_eq!(result, json!({"ok": true, "change": 2}));
+    }
 
     // --- file_read: путь только из фактов сессии (спека 2026-07-18 §3.1/§4) ---
 
@@ -3388,49 +3665,7 @@ mod tests {
         assert_eq!(find_conflict(&bindings, HkAction::Quiet, "Command+Alt+M"), None);
     }
 
-    // --- контракт question_answer (parse_question_choice) ---
 
-    #[test]
-    fn choice_new_contract_answers_and_texts() {
-        let (answers, texts) = parse_question_choice(&json!({
-            "answers": [[2], [], [1, 3]],
-            "texts": [null, "свой ответ", null],
-        }));
-        assert_eq!(answers, vec![vec![2], vec![], vec![1, 3]]);
-        assert_eq!(texts, vec![None, Some("свой ответ".to_string()), None]);
-    }
-
-    #[test]
-    fn choice_back_compat_answers_without_texts() {
-        let (answers, texts) = parse_question_choice(&json!({ "answers": [[1], [2]] }));
-        assert_eq!(answers, vec![vec![1], vec![2]]);
-        assert!(texts.is_empty());
-    }
-
-    #[test]
-    fn choice_back_compat_legacy_indices() {
-        // старый тост-контракт `{ indices }` — один вопрос, без кастома
-        let (answers, texts) = parse_question_choice(&json!({ "indices": [1, 3] }));
-        assert_eq!(answers, vec![vec![1, 3]]);
-        assert!(texts.is_empty());
-    }
-
-    #[test]
-    fn choice_texts_normalize_blank_to_none() {
-        // пустые/пробельные строки — не кастом; края текста подрезаются
-        let (_, texts) = parse_question_choice(&json!({
-            "answers": [[1], [1], [1]],
-            "texts": ["", "   ", "  да  "],
-        }));
-        assert_eq!(texts, vec![None, None, Some("да".to_string())]);
-    }
-
-    #[test]
-    fn choice_garbage_is_empty() {
-        let (answers, texts) = parse_question_choice(&json!({ "bogus": true }));
-        assert!(answers.is_empty());
-        assert!(texts.is_empty());
-    }
 }
 
 /* ================= удалённые узлы ================= */
@@ -3447,6 +3682,7 @@ pub async fn remotes_list(app: AppHandle) -> Value {
 /// туннели жить от старого конфига.
 #[tauri::command]
 pub async fn remotes_add(app: AppHandle, cfg: Value) -> Value {
+    let _turn = UI_SETTINGS_CHANGES.lock().await;
     let d = Daemon::get(&app);
     let name = cfg.get("name").and_then(Value::as_str).unwrap_or("").trim();
     let host = cfg.get("sshHost").and_then(Value::as_str).unwrap_or("").trim();
@@ -3474,12 +3710,20 @@ pub async fn remotes_add(app: AppHandle, cfg: Value) -> Value {
     }) {
         return err(format!("Узел «{name}» уже есть"));
     }
-    let mut entry = json!({ "name": name, "sshHost": host });
+    let mut connection: crate::install::remote::Connection = match serde_json::from_value(cfg.clone()) {
+        Ok(connection) => connection, Err(error) => return err(error.to_string()),
+    };
+    if connection.transport == "teleport" && connection.node_tcp_port.is_none() {
+        connection.node_tcp_port = Some(crate::install::remote::DEFAULT_TCP_PORT);
+    }
+    if let Err(error) = connection.validate() { return err(error); }
+    let mut entry = serde_json::to_value(connection).unwrap_or_else(|_| json!({}));
+    entry["name"] = json!(name);
     if !dir.is_empty() {
         entry["jarvisDir"] = json!(dir);
     }
     list.push(entry);
-    d.settings.set_top("remotes", Value::Array(list));
+    if let Err(error) = d.settings.try_set_top("remotes", Value::Array(list)) { return err(error); }
     d.start_remotes();
     ok()
 }
@@ -3488,13 +3732,14 @@ pub async fn remotes_add(app: AppHandle, cfg: Value) -> Value {
 /// бы строки машины, за которой уже никто не следит.
 #[tauri::command]
 pub async fn remotes_remove(app: AppHandle, name: String) -> Value {
+    let _turn = UI_SETTINGS_CHANGES.lock().await;
     let d = Daemon::get(&app);
     let name = name.trim();
     let list: Vec<Value> = remotes_array(&d)
         .into_iter()
         .filter(|v| v.get("name").and_then(Value::as_str).map(str::trim) != Some(name))
         .collect();
-    d.settings.set_top("remotes", Value::Array(list));
+    if let Err(error) = d.settings.try_set_top("remotes", Value::Array(list)) { return err(error); }
     d.start_remotes();
     d.forget_remote_sessions(name);
     ok()
@@ -3520,13 +3765,13 @@ pub async fn remotes_test(app: AppHandle, name: String) -> Value {
             .unwrap_or(crate::remote::TunnelState::Failed);
         if state == crate::remote::TunnelState::Failed {
             let why = node.why();
-            let host = &node.cfg.ssh_host;
+            let transport = if node.cfg.transport == "teleport" { "Teleport" } else { "SSH" };
             // Ровно та команда, которой это проверяется за пять секунд: без неё
             // человек остаётся один на один с «не работает».
             return err(if why.is_empty() {
-                format!("ssh не поднял туннель. Проверь руками: ssh {host} true")
+                format!("{transport} не поднял туннель. Проверь параметры подключения и авторизацию в настройках узла")
             } else {
-                format!("туннель не поднялся: {why}\nПроверь руками: ssh {host} true")
+                format!("{transport}: туннель не поднялся: {why}")
             });
         }
         // ждём, пока форвард начнёт принимать, а не гадаем о таймингах
@@ -3538,9 +3783,8 @@ pub async fn remotes_test(app: AppHandle, name: String) -> Value {
         .unwrap_or(false);
         if !ready {
             let why = node.why();
-            let host = &node.cfg.ssh_host;
             return err(format!(
-                "ssh не открыл туннель за 15 секунд{}\nПроверь руками: ssh {host} true",
+                "Туннель не открылся за 15 секунд{}",
                 if why.is_empty() { String::new() } else { format!(": {why}") }
             ));
         }
@@ -3557,6 +3801,7 @@ pub async fn remotes_test(app: AppHandle, name: String) -> Value {
             json!({
                 "ok": true, "host": h.host, "version": h.version,
                 "buffered": h.buffered, "outdated": node.outdated(),
+                "protocol": h.protocol, "capabilities": h.capabilities, "sources": h.sources,
             })
         }
         // Узел не ответил при живом ssh — почти всегда это «сокета нет»:
@@ -3576,9 +3821,14 @@ static REMOTE_INSTALL_BUSY: std::sync::atomic::AtomicBool =
 /// Разведка машины до установки: ОС, что там есть и как туда попадёт узел.
 /// Долгая (ssh), поэтому в блокирующем потоке — иначе подвисает вся панель.
 #[tauri::command]
-pub async fn remotes_preflight(ssh_host: String, jarvis_dir: Option<String>) -> Value {
+pub async fn remotes_preflight(ssh_host: String, jarvis_dir: Option<String>, connection: Option<Value>) -> Value {
+    let connection: crate::install::remote::Connection = match connection {
+        Some(value) => match serde_json::from_value(value) { Ok(connection) => connection, Err(e) => return err(e.to_string()) },
+        None => crate::install::remote::Connection::ssh(&ssh_host),
+    };
+    if let Err(error) = connection.validate() { return err(error); }
     let out = tokio::task::spawn_blocking(move || {
-        crate::install::remote::preflight(&ssh_host, jarvis_dir.as_deref())
+        crate::install::remote::preflight_connection(&connection, jarvis_dir.as_deref())
     })
     .await;
     match out {
@@ -3617,6 +3867,13 @@ pub fn remotes_install(app: AppHandle, cfg: Value) -> Value {
     if host.is_empty() {
         return err("Нужен ssh-хост");
     }
+    let mut connection: crate::install::remote::Connection = match serde_json::from_value(cfg.clone()) {
+        Ok(connection) => connection, Err(error) => return err(error.to_string()),
+    };
+    if connection.transport == "teleport" && connection.node_tcp_port.is_none() {
+        connection.node_tcp_port = Some(crate::install::remote::DEFAULT_TCP_PORT);
+    }
+    if let Err(error) = connection.validate() { return err(error); }
     if REMOTE_INSTALL_BUSY.swap(true, Ordering::SeqCst) {
         return err("Уже ставлю другой узел — дождись конца");
     }
@@ -3625,15 +3882,15 @@ pub fn remotes_install(app: AppHandle, cfg: Value) -> Value {
         // Паника внутри установки не должна оставить панель с вечным «ставлю»:
         // ловим её и отдаём как обычный отказ.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::install::remote::add(
+            crate::install::remote::add_connection(
                 &|step| windows::emit_to_panel(&app, "remote_install_progress", &step),
                 &name,
-                &host,
+                &connection,
                 dir.as_deref(),
                 // Порт для телефона поднимаем сразу: узнать, что его не хватает,
                 // человек может только на чужом устройстве и уже без панели.
                 // Кому не нужен — `jarvis-setup remote add --no-tcp`.
-                Some(crate::install::remote::DEFAULT_TCP_PORT),
+                Some(connection.node_tcp_port.unwrap_or(crate::install::remote::DEFAULT_TCP_PORT)),
             )
         }));
         let res = match outcome {
@@ -3754,15 +4011,26 @@ fn public_ssh_key(create: bool) -> Result<(String, String, bool), String> {
 /// туннель к узлу переподнимается сам после сна и смены сети, спросить пароль
 /// в этот момент не у кого — транспорт обязан работать по ключу.
 #[tauri::command]
-pub async fn remotes_ssh_authorize(app: AppHandle, ssh_host: String, password: String) -> Value {
+pub async fn remotes_ssh_authorize(app: AppHandle, ssh_host: String, password: String, connection: Option<Value>) -> Value {
+    let mut connection = match connection {
+        Some(value) => match serde_json::from_value::<crate::install::remote::Connection>(value) {
+            Ok(value) => value,
+            Err(error) => return json!({"ok":false,"error":format!("Параметры подключения: {error}")}),
+        },
+        None => crate::install::remote::Connection::ssh(&ssh_host),
+    };
+    connection.ssh_host = ssh_host.trim().into();
+    if let Err(error) = connection.validate() { return json!({"ok":false,"error":error}); }
+    // Reject before creating a local key or starting a password helper.
+    if connection.transport == "teleport" { return json!({"ok":false,"error":"Для Teleport используй вход через tsh"}); }
     let out = tokio::task::spawn_blocking(move || {
         let (key, _, created) = public_ssh_key(true)?;
         if key.is_empty() {
             return Err("не нашёл и не смог создать ssh-ключ".to_string());
         }
-        crate::install::remote::authorize_key(
+        crate::install::remote::authorize_key_connection(
             &|step| windows::emit_to_panel(&app, "remote_install_progress", &step),
-            &ssh_host,
+            &connection,
             &password,
             &key,
         )?;
@@ -3824,9 +4092,9 @@ fn host_of(d: &std::sync::Arc<Daemon>, s: &crate::model::Session) -> Result<Host
     match &s.remote {
         None => Ok(Host::Local),
         Some(name) => match d.remotes.node(name) {
-            Some(node) => Ok(Host::Ssh {
+            Some(node) => Ok(Host::ConfiguredSsh {
                 machine: name.clone(),
-                host: node.cfg.ssh_host.clone(),
+                connection: node.cfg.connection(),
             }),
             None => Err(format!("узел «{name}» не найден в настройках")),
         },

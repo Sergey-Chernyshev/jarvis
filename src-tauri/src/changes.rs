@@ -349,7 +349,7 @@ pub async fn review(
         // На узле бинарь и авторизация свои — команду собираем строкой. Stderr
         // гасим прямо в ней: ssh склеивает потоки, и чужая строка прилипла бы
         // к json агента.
-        Host::Ssh { .. } => {
+        Host::Ssh { .. } | Host::ConfiguredSsh { .. } => {
             let mut cmd = format!(
                 "claude -p {} --output-format json --dangerously-skip-permissions",
                 crate::util::shell_quote(&prompt)

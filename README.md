@@ -38,6 +38,7 @@ Running several coding agents at once turns **you** into the bottleneck. Session
 - **⚙️ Remote control** — switch model (Opus / Sonnet / Haiku) and reasoning effort from the panel; answer multi-choice agent questions with native pickers.
 - **🛰 Remote sessions** — agents running on a VPS show up in the same list, over your own SSH; a thin node buffers events while the laptop sleeps ([docs/remote.md](docs/remote.md)).
 - **📊 Usage, costs and limits** — token and cost tracking per model and project; when a session hits the usage limit, Jarvis shows when it resets and can auto-resume it.
+- **AI workflow analytics** — configurable local Claude/Codex and normalized event sources, explainable harness scores, tool failures, prompt signals, Git attribution with explicit unknowns, and outcome-based model/time/cost comparisons ([guide, Russian](docs/ai-analytics.md), [configuration and adapters](docs/ai-analytics-integrations.md), [industry research](docs/ai-analytics-research.md)).
 - **🗣 Jarvis speaks** — a local TTS voice reads out what a session did or what it's waiting for (Russian-first for now).
 - **🎤 "Hey Jarvis" voice assistant** *(experimental)* — say the wake word and talk to your sessions: route a reply by voice, ask what an agent did, control media/volume, ask a general question.
 - **🎙 Dictation** — push-to-talk (F8): speech is transcribed locally (Whisper / Qwen3) and inserted into the active session; full dictation history with re-transcription.

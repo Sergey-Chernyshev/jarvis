@@ -1,0 +1,153 @@
+{
+  "ok": true,
+  "steps": [
+    {
+      "name": "Root is a usable list of eight modules",
+      "ok": true,
+      "elapsedMs": 529
+    },
+    {
+      "name": "Native input-device discovery responds without microphone capture",
+      "ok": true,
+      "elapsedMs": 184
+    },
+    {
+      "name": "Root search and Escape restore navigation state",
+      "ok": true,
+      "elapsedMs": 93
+    },
+    {
+      "name": "Module list opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 369
+    },
+    {
+      "name": "Module history opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 358
+    },
+    {
+      "name": "Module voicehist opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 352.0000000000002
+    },
+    {
+      "name": "Module meetings opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 346.9999999999998
+    },
+    {
+      "name": "Module loops opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 386
+    },
+    {
+      "name": "Module bundlePane opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 355
+    },
+    {
+      "name": "Module stats opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 351
+    },
+    {
+      "name": "Module settings opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 344
+    },
+    {
+      "name": "Settings general settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 342.0000000000009
+    },
+    {
+      "name": "Settings look settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 389.9999999999991
+    },
+    {
+      "name": "Settings remotes settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 1920
+    },
+    {
+      "name": "Settings agents settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 346
+    },
+    {
+      "name": "Settings stt settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 393
+    },
+    {
+      "name": "Settings voice settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 392
+    },
+    {
+      "name": "Settings wake settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 403
+    },
+    {
+      "name": "Settings notify settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 398
+    },
+    {
+      "name": "Settings awake settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 394
+    },
+    {
+      "name": "Settings keys settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 344
+    },
+    {
+      "name": "Settings launch settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 390
+    },
+    {
+      "name": "Settings service settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 395
+    },
+    {
+      "name": "Settings integration settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 486
+    },
+    {
+      "name": "Settings about settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 388
+    },
+    {
+      "name": "A settings toggle persists through actual IPC and reopening",
+      "ok": true,
+      "elapsedMs": 50
+    },
+    {
+      "name": "Missing speech model reports its real backend failure",
+      "ok": true,
+      "elapsedMs": 397.0000000000018
+    },
+    {
+      "name": "Settings search opens the actual parameter and scopes errors",
+      "ok": true,
+      "elapsedMs": 394.9999999999982
+    },
+    {
+      "name": "Light appearance and root restore",
+      "ok": true,
+      "elapsedMs": 348
+    }
+  ],
+  "failure": null,
+  "errors": [],
+  "elapsedMs": 11843
+}

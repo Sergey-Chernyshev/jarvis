@@ -1,0 +1,10 @@
+{
+  "ok": true,
+  "records": [
+    "programmatic-newChat-remote-reloads-only-remote-profiles",
+    "programmatic-return-local-reloads-only-local-profiles",
+    "late-local-profile-response-cannot-replace-current-remote-options",
+    "failed-profile-refresh-clears-stale-options-blocks-launch-keeps-draft"
+  ],
+  "errors": []
+}

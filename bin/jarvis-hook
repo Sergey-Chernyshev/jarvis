@@ -54,10 +54,17 @@ EVENT_JSON=$(json_safe "$EVENT")
 PANE_JSON=$(json_safe "${TMUX_PANE:-}")
 HOST_JSON=$(json_safe "$HOST_TERM")
 TTY_JSON=$(json_safe "$TTY")
+case "$AGENT" in
+  codex) PROVIDER_HOME="${CODEX_HOME:-$HOME/.codex}" ;;
+  claude) PROVIDER_HOME="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" ;;
+  *) PROVIDER_HOME='' ;;
+esac
+PROVIDER_HOME_JSON=$(json_safe "$PROVIDER_HOME")
+INSTANCE_JSON=$(json_safe "${JARVIS_PROVIDER_INSTANCE_ID:-}")
 case "${PPID:-}" in ''|*[!0-9]*) HOOK_PID=0 ;; *) HOOK_PID=$PPID ;; esac
 
-printf '{"agent":"%s","event":"%s","tmux_pane":"%s","host":"%s","tty":"%s","pid":%d,"payload":%s}' \
-  "$AGENT_JSON" "$EVENT_JSON" "$PANE_JSON" "$HOST_JSON" "$TTY_JSON" "$HOOK_PID" "$PAYLOAD" \
+printf '{"agent":"%s","event":"%s","tmux_pane":"%s","host":"%s","tty":"%s","pid":%d,"providerHome":"%s","instanceId":"%s","payload":%s}' \
+  "$AGENT_JSON" "$EVENT_JSON" "$PANE_JSON" "$HOST_JSON" "$TTY_JSON" "$HOOK_PID" "$PROVIDER_HOME_JSON" "$INSTANCE_JSON" "$PAYLOAD" \
 | curl -s --max-time 0.3 --unix-socket "$SOCK" \
     -X POST --data-binary @- \
     http://jarvis/event >/dev/null 2>&1 || true

@@ -1,0 +1,13 @@
+{
+  "verifiedAt": "2026-09-05T20:07:15.114701+00:00",
+  "binarySha256": "a82ce972d58ee5b7f91e47fb49726e1bc2d30c236af061e9856e74b9f12558ef",
+  "observedPid": 47055,
+  "checks": [
+    "Native CUA launcher exposes Machines after Projects",
+    "Launcher click opens standalone inventory and selected-machine inspector with no Settings sidebar",
+    "Production inventory contains 2 registered remotes and 1 local VM",
+    "Cmd8 returns from imported chat to Machines",
+    "Imported Codex Personal chat exposes Continue in Jarvis; no continuation submitted"
+  ],
+  "connectionStateAtObservation": "Both remotes report SSH tunnel timeout (15 seconds); integration task is checking reconnect independently. No connection/login/VM actions were performed during this visual check."
+}

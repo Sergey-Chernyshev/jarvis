@@ -1,0 +1,1548 @@
+{
+  "ok": false,
+  "failure": null,
+  "errors": [
+    {
+      "type": "error",
+      "message": "SyntaxError: Unexpected token '<'",
+      "file": "tauri://localhost/ai-analytics.js",
+      "line": 1
+    }
+  ],
+  "steps": [
+    {
+      "name": "The owned AppKit editor enters a real fullscreen Space",
+      "ok": true,
+      "elapsedMs": 2235
+    },
+    {
+      "name": "Fullscreen cycle 1: production HUD listening preserves the Space and input",
+      "ok": true,
+      "elapsedMs": 1197
+    },
+    {
+      "name": "Fullscreen cycle 1: production HUD analyzing preserves the Space and input",
+      "ok": true,
+      "elapsedMs": 1230
+    },
+    {
+      "name": "Fullscreen cycle 1: production HUD empty preserves the Space and input",
+      "ok": true,
+      "elapsedMs": 1107
+    },
+    {
+      "name": "Fullscreen cycle 1: dismissing the HUD keeps the original Space",
+      "ok": true,
+      "elapsedMs": 517
+    },
+    {
+      "name": "Fullscreen cycle 2: production HUD listening preserves the Space and input",
+      "ok": true,
+      "elapsedMs": 1183
+    },
+    {
+      "name": "Fullscreen cycle 2: production HUD analyzing preserves the Space and input",
+      "ok": true,
+      "elapsedMs": 1215
+    },
+    {
+      "name": "Fullscreen cycle 2: production HUD empty preserves the Space and input",
+      "ok": true,
+      "elapsedMs": 1225
+    },
+    {
+      "name": "Fullscreen cycle 2: dismissing the HUD keeps the original Space",
+      "ok": true,
+      "elapsedMs": 530
+    },
+    {
+      "name": "The fullscreen regression never changes native permissions",
+      "ok": true,
+      "elapsedMs": 16
+    }
+  ],
+  "evidence": {
+    "jarvisActivationPolicy": {
+      "accepted": true,
+      "nativeValue": 1,
+      "policy": "accessory"
+    },
+    "fullscreenBaseline": {
+      "editor": {
+        "key": true,
+        "expectedWindowServerFrame": {
+          "y": 33,
+          "x": 0,
+          "width": 1728,
+          "height": 1084
+        },
+        "screenFrame": {
+          "y": 0,
+          "x": 0,
+          "width": 1728,
+          "height": 1117
+        },
+        "windowServerFrameStable": true,
+        "frame": {
+          "y": 0,
+          "x": 0,
+          "width": 1728,
+          "height": 1084
+        },
+        "monitoring": true,
+        "violations": [],
+        "foregroundPid": 46921,
+        "fullscreen": true,
+        "screenSafeAreaFrame": {
+          "y": 0,
+          "x": 0,
+          "width": 1728,
+          "height": 1085
+        },
+        "fullscreenEntered": true,
+        "fullscreenEvents": [
+          "will-enter",
+          "did-enter"
+        ],
+        "ownedOnScreenWindows": [
+          {
+            "number": 4717,
+            "layer": 26,
+            "alpha": 0,
+            "frontToBackOrder": 1,
+            "pid": 46921,
+            "bounds": {
+              "X": 0,
+              "Height": 33,
+              "Y": 0,
+              "Width": 1728
+            }
+          },
+          {
+            "number": 4712,
+            "layer": 0,
+            "alpha": 0,
+            "frontToBackOrder": 3,
+            "pid": 46921,
+            "bounds": {
+              "X": 0,
+              "Height": 32,
+              "Y": 33,
+              "Width": 1728
+            }
+          },
+          {
+            "number": 4704,
+            "layer": 0,
+            "alpha": 1,
+            "frontToBackOrder": 4,
+            "pid": 46921,
+            "bounds": {
+              "X": 0,
+              "Height": 1084,
+              "Y": 33,
+              "Width": 1728
+            }
+          }
+        ],
+        "monitoredSamples": 2,
+        "windowNumber": 4704,
+        "command": "monitor-on",
+        "fullscreenTransition": "",
+        "pid": 46921,
+        "focused": true,
+        "onActiveSpace": true,
+        "a": "",
+        "b": ""
+      },
+      "focus": {
+        "available": true,
+        "trusted": true,
+        "ownsForeground": true,
+        "operation": "capture",
+        "provenance": "production AXUIElementCopyAttributeValue; scratch app only"
+      },
+      "permissionsBefore": {
+        "microphone": "authorized",
+        "accessibility": true,
+        "provenance": "native authorization status; no request made"
+      }
+    },
+    "fullscreenPhases": [
+      {
+        "cycle": 1,
+        "rendered": {
+          "phase": "listening",
+          "opacity": 1,
+          "rect": {
+            "x": 107.5,
+            "y": 24,
+            "width": 225,
+            "height": 48,
+            "top": 24,
+            "right": 332.5,
+            "bottom": 72,
+            "left": 107.5
+          },
+          "finiteAnimations": 0
+        },
+        "phase": "listening",
+        "editor": {
+          "key": true,
+          "expectedWindowServerFrame": {
+            "y": 33,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "screenFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1117
+          },
+          "windowServerFrameStable": true,
+          "frame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "monitoring": true,
+          "violations": [],
+          "foregroundPid": 46921,
+          "fullscreen": true,
+          "screenSafeAreaFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1085
+          },
+          "fullscreenEntered": true,
+          "fullscreenEvents": [
+            "will-enter",
+            "did-enter"
+          ],
+          "ownedOnScreenWindows": [
+            {
+              "number": 4671,
+              "layer": 1000,
+              "alpha": 1,
+              "frontToBackOrder": 0,
+              "pid": 46738,
+              "bounds": {
+                "X": 644,
+                "Height": 100,
+                "Y": 1003,
+                "Width": 440
+              }
+            },
+            {
+              "number": 4717,
+              "layer": 26,
+              "alpha": 0,
+              "frontToBackOrder": 2,
+              "pid": 46921,
+              "bounds": {
+                "X": 0,
+                "Height": 33,
+                "Y": 0,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 4712,
+              "layer": 0,
+              "alpha": 0,
+              "frontToBackOrder": 4,
+              "pid": 46921,
+              "bounds": {
+                "X": 0,
+                "Height": 32,
+                "Y": 33,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 4704,
+              "layer": 0,
+              "alpha": 1,
+              "frontToBackOrder": 5,
+              "pid": 46921,
+              "bounds": {
+                "X": 0,
+                "Height": 1084,
+                "Y": 33,
+                "Width": 1728
+              }
+            }
+          ],
+          "monitoredSamples": 32,
+          "windowNumber": 4704,
+          "command": "monitor-on",
+          "fullscreenTransition": "",
+          "pid": 46921,
+          "focused": true,
+          "onActiveSpace": true,
+          "a": "",
+          "b": ""
+        },
+        "toast": {
+          "visible": true,
+          "key": false,
+          "canBecomeKey": false,
+          "windowNumber": 4671,
+          "nativeClass": "NSKVONotifying_JarvisNotificationPanel",
+          "isPanel": true,
+          "styleMask": 128,
+          "nonactivatingPanel": true,
+          "onActiveSpace": true,
+          "level": 1000,
+          "collectionBehavior": 262465,
+          "joinsAllSpaces": true,
+          "fullScreenAuxiliary": true,
+          "joinsAllApplications": true,
+          "ignoresCycle": true,
+          "frame": {
+            "x": 644,
+            "y": 14,
+            "width": 440,
+            "height": 100
+          },
+          "screenWorkArea": {
+            "x": 0,
+            "y": 0,
+            "width": 1728,
+            "height": 1084
+          }
+        },
+        "overlay": {
+          "number": 4671,
+          "layer": 1000,
+          "alpha": 1,
+          "frontToBackOrder": 0,
+          "pid": 46738,
+          "bounds": {
+            "X": 644,
+            "Height": 100,
+            "Y": 1003,
+            "Width": 440
+          }
+        },
+        "fullscreenWindow": {
+          "number": 4704,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 5,
+          "pid": 46921,
+          "bounds": {
+            "X": 0,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        "identity": {
+          "available": true,
+          "sameElement": true,
+          "trusted": true,
+          "ownsForeground": true,
+          "operation": "compare",
+          "provenance": "production retained AXUIElement CFEqual; scratch app only"
+        }
+      },
+      {
+        "cycle": 1,
+        "rendered": {
+          "phase": "analyzing",
+          "opacity": 1,
+          "rect": {
+            "x": 107.5,
+            "y": 24,
+            "width": 225,
+            "height": 48,
+            "top": 24,
+            "right": 332.5,
+            "bottom": 72,
+            "left": 107.5
+          },
+          "finiteAnimations": 0
+        },
+        "phase": "analyzing",
+        "editor": {
+          "key": true,
+          "expectedWindowServerFrame": {
+            "y": 33,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "screenFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1117
+          },
+          "windowServerFrameStable": true,
+          "frame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "monitoring": true,
+          "violations": [],
+          "foregroundPid": 46921,
+          "fullscreen": true,
+          "screenSafeAreaFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1085
+          },
+          "fullscreenEntered": true,
+          "fullscreenEvents": [
+            "will-enter",
+            "did-enter"
+          ],
+          "ownedOnScreenWindows": [
+            {
+              "number": 4671,
+              "layer": 1000,
+              "alpha": 1,
+              "frontToBackOrder": 0,
+              "pid": 46738,
+              "bounds": {
+                "X": 644,
+                "Height": 100,
+                "Y": 1003,
+                "Width": 440
+              }
+            },
+            {
+              "number": 4717,
+              "layer": 26,
+              "alpha": 0,
+              "frontToBackOrder": 2,
+              "pid": 46921,
+              "bounds": {
+                "X": 0,
+                "Height": 33,
+                "Y": 0,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 4712,
+              "layer": 0,
+              "alpha": 0,
+              "frontToBackOrder": 4,
+              "pid": 46921,
+              "bounds": {
+                "X": 0,
+                "Height": 32,
+                "Y": 33,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 4704,
+              "layer": 0,
+              "alpha": 1,
+              "frontToBackOrder": 5,
+              "pid": 46921,
+              "bounds": {
+                "X": 0,
+                "Height": 1084,
+                "Y": 33,
+                "Width": 1728
+              }
+            }
+          ],
+          "monitoredSamples": 62,
+          "windowNumber": 4704,
+          "command": "monitor-on",
+          "fullscreenTransition": "",
+          "pid": 46921,
+          "focused": true,
+          "onActiveSpace": true,
+          "a": "",
+          "b": ""
+        },
+        "toast": {
+          "visible": true,
+          "key": false,
+          "canBecomeKey": false,
+          "windowNumber": 4671,
+          "nativeClass": "NSKVONotifying_JarvisNotificationPanel",
+          "isPanel": true,
+          "styleMask": 128,
+          "nonactivatingPanel": true,
+          "onActiveSpace": true,
+          "level": 1000,
+          "collectionBehavior": 262465,
+          "joinsAllSpaces": true,
+          "fullScreenAuxiliary": true,
+          "joinsAllApplications": true,
+          "ignoresCycle": true,
+          "frame": {
+            "x": 644,
+            "y": 14,
+            "width": 440,
+            "height": 100
+          },
+          "screenWorkArea": {
+            "x": 0,
+            "y": 0,
+            "width": 1728,
+            "height": 1084
+          }
+        },
+        "overlay": {
+          "number": 4671,
+          "layer": 1000,
+          "alpha": 1,
+          "frontToBackOrder": 0,
+          "pid": 46738,
+          "bounds": {
+            "X": 644,
+            "Height": 100,
+            "Y": 1003,
+            "Width": 440
+          }
+        },
+        "fullscreenWindow": {
+          "number": 4704,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 5,
+          "pid": 46921,
+          "bounds": {
+            "X": 0,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        "identity": {
+          "available": true,
+          "sameElement": true,
+          "trusted": true,
+          "ownsForeground": true,
+          "operation": "compare",
+          "provenance": "production retained AXUIElement CFEqual; scratch app only"
+        }
+      },
+      {
+        "cycle": 1,
+        "rendered": {
+          "phase": "empty",
+          "opacity": 1,
+          "rect": {
+            "x": 107.5,
+            "y": 57,
+            "width": 225,
+            "height": 48,
+            "top": 57,
+            "right": 332.5,
+            "bottom": 105,
+            "left": 107.5
+          },
+          "finiteAnimations": 0
+        },
+        "phase": "empty",
+        "editor": {
+          "key": true,
+          "expectedWindowServerFrame": {
+            "y": 33,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "screenFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1117
+          },
+          "windowServerFrameStable": true,
+          "frame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "monitoring": true,
+          "violations": [],
+          "foregroundPid": 46921,
+          "fullscreen": true,
+          "screenSafeAreaFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1085
+          },
+          "fullscreenEntered": true,
+          "fullscreenEvents": [
+            "will-enter",
+            "did-enter"
+          ],
+          "ownedOnScreenWindows": [
+            {
+              "number": 4671,
+              "layer": 1000,
+              "alpha": 1,
+              "frontToBackOrder": 0,
+              "pid": 46738,
+              "bounds": {
+                "X": 644,
+                "Height": 133,
+                "Y": 970,
+                "Width": 440
+              }
+            },
+            {
+              "number": 4717,
+              "layer": 26,
+              "alpha": 0,
+              "frontToBackOrder": 2,
+              "pid": 46921,
+              "bounds": {
+                "X": 0,
+                "Height": 33,
+                "Y": 0,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 4712,
+              "layer": 0,
+              "alpha": 0,
+              "frontToBackOrder": 4,
+              "pid": 46921,
+              "bounds": {
+                "X": 0,
+                "Height": 32,
+                "Y": 33,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 4704,
+              "layer": 0,
+              "alpha": 1,
+              "frontToBackOrder": 5,
+              "pid": 46921,
+              "bounds": {
+                "X": 0,
+                "Height": 1084,
+                "Y": 33,
+                "Width": 1728
+              }
+            }
+          ],
+          "monitoredSamples": 83,
+          "windowNumber": 4704,
+          "command": "monitor-on",
+          "fullscreenTransition": "",
+          "pid": 46921,
+          "focused": true,
+          "onActiveSpace": true,
+          "a": "",
+          "b": ""
+        },
+        "toast": {
+          "visible": true,
+          "key": false,
+          "canBecomeKey": false,
+          "windowNumber": 4671,
+          "nativeClass": "NSKVONotifying_JarvisNotificationPanel",
+          "isPanel": true,
+          "styleMask": 128,
+          "nonactivatingPanel": true,
+          "onActiveSpace": true,
+          "level": 1000,
+          "collectionBehavior": 262465,
+          "joinsAllSpaces": true,
+          "fullScreenAuxiliary": true,
+          "joinsAllApplications": true,
+          "ignoresCycle": true,
+          "frame": {
+            "x": 644,
+            "y": 14,
+            "width": 440,
+            "height": 133
+          },
+          "screenWorkArea": {
+            "x": 0,
+            "y": 0,
+            "width": 1728,
+            "height": 1084
+          }
+        },
+        "overlay": {
+          "number": 4671,
+          "layer": 1000,
+          "alpha": 1,
+          "frontToBackOrder": 0,
+          "pid": 46738,
+          "bounds": {
+            "X": 644,
+            "Height": 133,
+            "Y": 970,
+            "Width": 440
+          }
+        },
+        "fullscreenWindow": {
+          "number": 4704,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 5,
+          "pid": 46921,
+          "bounds": {
+            "X": 0,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        "identity": {
+          "available": true,
+          "sameElement": true,
+          "trusted": true,
+          "ownsForeground": true,
+          "operation": "compare",
+          "provenance": "production retained AXUIElement CFEqual; scratch app only"
+        }
+      },
+      {
+        "cycle": 2,
+        "rendered": {
+          "phase": "listening",
+          "opacity": 1,
+          "rect": {
+            "x": 107.5,
+            "y": 24,
+            "width": 225,
+            "height": 48,
+            "top": 24,
+            "right": 332.5,
+            "bottom": 72,
+            "left": 107.5
+          },
+          "finiteAnimations": 0
+        },
+        "phase": "listening",
+        "editor": {
+          "key": true,
+          "expectedWindowServerFrame": {
+            "y": 33,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "screenFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1117
+          },
+          "windowServerFrameStable": true,
+          "frame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "monitoring": true,
+          "violations": [],
+          "foregroundPid": 46921,
+          "fullscreen": true,
+          "screenSafeAreaFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1085
+          },
+          "fullscreenEntered": true,
+          "fullscreenEvents": [
+            "will-enter",
+            "did-enter"
+          ],
+          "ownedOnScreenWindows": [
+            {
+              "number": 4671,
+              "layer": 1000,
+              "alpha": 1,
+              "frontToBackOrder": 0,
+              "pid": 46738,
+              "bounds": {
+                "X": 644,
+                "Height": 100,
+                "Y": 1003,
+                "Width": 440
+              }
+            },
+            {
+              "number": 4717,
+              "layer": 26,
+              "alpha": 0,
+              "frontToBackOrder": 2,
+              "pid": 46921,
+              "bounds": {
+                "X": 0,
+                "Height": 33,
+                "Y": 0,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 4712,
+              "layer": 0,
+              "alpha": 0,
+              "frontToBackOrder": 4,
+              "pid": 46921,
+              "bounds": {
+                "X": 0,
+                "Height": 32,
+                "Y": 33,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 4704,
+              "layer": 0,
+              "alpha": 1,
+              "frontToBackOrder": 5,
+              "pid": 46921,
+              "bounds": {
+                "X": 0,
+                "Height": 1084,
+                "Y": 33,
+                "Width": 1728
+              }
+            }
+          ],
+          "monitoredSamples": 132,
+          "windowNumber": 4704,
+          "command": "monitor-on",
+          "fullscreenTransition": "",
+          "pid": 46921,
+          "focused": true,
+          "onActiveSpace": true,
+          "a": "",
+          "b": ""
+        },
+        "toast": {
+          "visible": true,
+          "key": false,
+          "canBecomeKey": false,
+          "windowNumber": 4671,
+          "nativeClass": "NSKVONotifying_JarvisNotificationPanel",
+          "isPanel": true,
+          "styleMask": 128,
+          "nonactivatingPanel": true,
+          "onActiveSpace": true,
+          "level": 1000,
+          "collectionBehavior": 262465,
+          "joinsAllSpaces": true,
+          "fullScreenAuxiliary": true,
+          "joinsAllApplications": true,
+          "ignoresCycle": true,
+          "frame": {
+            "x": 644,
+            "y": 14,
+            "width": 440,
+            "height": 100
+          },
+          "screenWorkArea": {
+            "x": 0,
+            "y": 0,
+            "width": 1728,
+            "height": 1084
+          }
+        },
+        "overlay": {
+          "number": 4671,
+          "layer": 1000,
+          "alpha": 1,
+          "frontToBackOrder": 0,
+          "pid": 46738,
+          "bounds": {
+            "X": 644,
+            "Height": 100,
+            "Y": 1003,
+            "Width": 440
+          }
+        },
+        "fullscreenWindow": {
+          "number": 4704,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 5,
+          "pid": 46921,
+          "bounds": {
+            "X": 0,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        "identity": {
+          "available": true,
+          "sameElement": true,
+          "trusted": true,
+          "ownsForeground": true,
+          "operation": "compare",
+          "provenance": "production retained AXUIElement CFEqual; scratch app only"
+        }
+      },
+      {
+        "cycle": 2,
+        "rendered": {
+          "phase": "analyzing",
+          "opacity": 1,
+          "rect": {
+            "x": 107.5,
+            "y": 24,
+            "width": 225,
+            "height": 48,
+            "top": 24,
+            "right": 332.5,
+            "bottom": 72,
+            "left": 107.5
+          },
+          "finiteAnimations": 0
+        },
+        "phase": "analyzing",
+        "editor": {
+          "key": true,
+          "expectedWindowServerFrame": {
+            "y": 33,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "screenFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1117
+          },
+          "windowServerFrameStable": true,
+          "frame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "monitoring": true,
+          "violations": [],
+          "foregroundPid": 46921,
+          "fullscreen": true,
+          "screenSafeAreaFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1085
+          },
+          "fullscreenEntered": true,
+          "fullscreenEvents": [
+            "will-enter",
+            "did-enter"
+          ],
+          "ownedOnScreenWindows": [
+            {
+              "number": 4671,
+              "layer": 1000,
+              "alpha": 1,
+              "frontToBackOrder": 0,
+              "pid": 46738,
+              "bounds": {
+                "X": 644,
+                "Height": 100,
+                "Y": 1003,
+                "Width": 440
+              }
+            },
+            {
+              "number": 4717,
+              "layer": 26,
+              "alpha": 0,
+              "frontToBackOrder": 2,
+              "pid": 46921,
+              "bounds": {
+                "X": 0,
+                "Height": 33,
+                "Y": 0,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 4712,
+              "layer": 0,
+              "alpha": 0,
+              "frontToBackOrder": 4,
+              "pid": 46921,
+              "bounds": {
+                "X": 0,
+                "Height": 32,
+                "Y": 33,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 4704,
+              "layer": 0,
+              "alpha": 1,
+              "frontToBackOrder": 5,
+              "pid": 46921,
+              "bounds": {
+                "X": 0,
+                "Height": 1084,
+                "Y": 33,
+                "Width": 1728
+              }
+            }
+          ],
+          "monitoredSamples": 163,
+          "windowNumber": 4704,
+          "command": "monitor-on",
+          "fullscreenTransition": "",
+          "pid": 46921,
+          "focused": true,
+          "onActiveSpace": true,
+          "a": "",
+          "b": ""
+        },
+        "toast": {
+          "visible": true,
+          "key": false,
+          "canBecomeKey": false,
+          "windowNumber": 4671,
+          "nativeClass": "NSKVONotifying_JarvisNotificationPanel",
+          "isPanel": true,
+          "styleMask": 128,
+          "nonactivatingPanel": true,
+          "onActiveSpace": true,
+          "level": 1000,
+          "collectionBehavior": 262465,
+          "joinsAllSpaces": true,
+          "fullScreenAuxiliary": true,
+          "joinsAllApplications": true,
+          "ignoresCycle": true,
+          "frame": {
+            "x": 644,
+            "y": 14,
+            "width": 440,
+            "height": 100
+          },
+          "screenWorkArea": {
+            "x": 0,
+            "y": 0,
+            "width": 1728,
+            "height": 1084
+          }
+        },
+        "overlay": {
+          "number": 4671,
+          "layer": 1000,
+          "alpha": 1,
+          "frontToBackOrder": 0,
+          "pid": 46738,
+          "bounds": {
+            "X": 644,
+            "Height": 100,
+            "Y": 1003,
+            "Width": 440
+          }
+        },
+        "fullscreenWindow": {
+          "number": 4704,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 5,
+          "pid": 46921,
+          "bounds": {
+            "X": 0,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        "identity": {
+          "available": true,
+          "sameElement": true,
+          "trusted": true,
+          "ownsForeground": true,
+          "operation": "compare",
+          "provenance": "production retained AXUIElement CFEqual; scratch app only"
+        }
+      },
+      {
+        "cycle": 2,
+        "rendered": {
+          "phase": "empty",
+          "opacity": 1,
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "width": 392,
+            "height": 81,
+            "top": 24,
+            "right": 416,
+            "bottom": 105,
+            "left": 24
+          },
+          "finiteAnimations": 0
+        },
+        "phase": "empty",
+        "editor": {
+          "key": true,
+          "expectedWindowServerFrame": {
+            "y": 33,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "screenFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1117
+          },
+          "windowServerFrameStable": true,
+          "frame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "monitoring": true,
+          "violations": [],
+          "foregroundPid": 46921,
+          "fullscreen": true,
+          "screenSafeAreaFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1085
+          },
+          "fullscreenEntered": true,
+          "fullscreenEvents": [
+            "will-enter",
+            "did-enter"
+          ],
+          "ownedOnScreenWindows": [
+            {
+              "number": 4671,
+              "layer": 1000,
+              "alpha": 1,
+              "frontToBackOrder": 0,
+              "pid": 46738,
+              "bounds": {
+                "X": 644,
+                "Height": 133,
+                "Y": 970,
+                "Width": 440
+              }
+            },
+            {
+              "number": 4717,
+              "layer": 26,
+              "alpha": 0,
+              "frontToBackOrder": 2,
+              "pid": 46921,
+              "bounds": {
+                "X": 0,
+                "Height": 33,
+                "Y": 0,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 4712,
+              "layer": 0,
+              "alpha": 0,
+              "frontToBackOrder": 4,
+              "pid": 46921,
+              "bounds": {
+                "X": 0,
+                "Height": 32,
+                "Y": 33,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 4704,
+              "layer": 0,
+              "alpha": 1,
+              "frontToBackOrder": 5,
+              "pid": 46921,
+              "bounds": {
+                "X": 0,
+                "Height": 1084,
+                "Y": 33,
+                "Width": 1728
+              }
+            }
+          ],
+          "monitoredSamples": 193,
+          "windowNumber": 4704,
+          "command": "monitor-on",
+          "fullscreenTransition": "",
+          "pid": 46921,
+          "focused": true,
+          "onActiveSpace": true,
+          "a": "",
+          "b": ""
+        },
+        "toast": {
+          "visible": true,
+          "key": false,
+          "canBecomeKey": false,
+          "windowNumber": 4671,
+          "nativeClass": "NSKVONotifying_JarvisNotificationPanel",
+          "isPanel": true,
+          "styleMask": 128,
+          "nonactivatingPanel": true,
+          "onActiveSpace": true,
+          "level": 1000,
+          "collectionBehavior": 262465,
+          "joinsAllSpaces": true,
+          "fullScreenAuxiliary": true,
+          "joinsAllApplications": true,
+          "ignoresCycle": true,
+          "frame": {
+            "x": 644,
+            "y": 14,
+            "width": 440,
+            "height": 133
+          },
+          "screenWorkArea": {
+            "x": 0,
+            "y": 0,
+            "width": 1728,
+            "height": 1084
+          }
+        },
+        "overlay": {
+          "number": 4671,
+          "layer": 1000,
+          "alpha": 1,
+          "frontToBackOrder": 0,
+          "pid": 46738,
+          "bounds": {
+            "X": 644,
+            "Height": 133,
+            "Y": 970,
+            "Width": 440
+          }
+        },
+        "fullscreenWindow": {
+          "number": 4704,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 5,
+          "pid": 46921,
+          "bounds": {
+            "X": 0,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        "identity": {
+          "available": true,
+          "sameElement": true,
+          "trusted": true,
+          "ownsForeground": true,
+          "operation": "compare",
+          "provenance": "production retained AXUIElement CFEqual; scratch app only"
+        }
+      }
+    ],
+    "screenshots": [
+      {
+        "name": "fullscreen-empty-hud",
+        "label": "toast",
+        "path": "fullscreen-empty-hud.png"
+      }
+    ],
+    "fullscreenMonitoring": {
+      "key": true,
+      "expectedWindowServerFrame": {
+        "y": 33,
+        "x": 0,
+        "width": 1728,
+        "height": 1084
+      },
+      "screenFrame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1117
+      },
+      "windowServerFrameStable": true,
+      "frame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1084
+      },
+      "monitoring": true,
+      "violations": [],
+      "foregroundPid": 46921,
+      "fullscreen": true,
+      "screenSafeAreaFrame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1085
+      },
+      "fullscreenEntered": true,
+      "fullscreenEvents": [
+        "will-enter",
+        "did-enter"
+      ],
+      "ownedOnScreenWindows": [
+        {
+          "number": 4717,
+          "layer": 26,
+          "alpha": 0,
+          "frontToBackOrder": 1,
+          "pid": 46921,
+          "bounds": {
+            "X": 0,
+            "Height": 33,
+            "Y": 0,
+            "Width": 1728
+          }
+        },
+        {
+          "number": 4712,
+          "layer": 0,
+          "alpha": 0,
+          "frontToBackOrder": 3,
+          "pid": 46921,
+          "bounds": {
+            "X": 0,
+            "Height": 32,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        {
+          "number": 4704,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 4,
+          "pid": 46921,
+          "bounds": {
+            "X": 0,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          }
+        }
+      ],
+      "monitoredSamples": 206,
+      "windowNumber": 4704,
+      "command": "monitor-on",
+      "fullscreenTransition": "",
+      "pid": 46921,
+      "focused": true,
+      "onActiveSpace": true,
+      "a": "",
+      "b": ""
+    },
+    "scope": {
+      "provenance": "Actual NSWindow toggleFullScreen delegate lifecycle, NSWorkspace foreground PID, retained production AX field, and WindowServer on-screen order/bounds; 40 ms independent native sampling includes fullscreen surface movement",
+      "capture": "Only the owned toast WKWebView is snapshotted; no display pixels or user window metadata is captured",
+      "trigger": "Synthetic listening → analyzing → empty → dismiss through the production HUD event, DOM, resize IPC, and native show path; two consecutive cycles",
+      "excluded": [
+        "microphone capture",
+        "global hotkey callback",
+        "user applications",
+        "multiple physical displays"
+      ]
+    },
+    "fullscreenBeforeCleanup": {
+      "key": true,
+      "expectedWindowServerFrame": {
+        "y": 33,
+        "x": 0,
+        "width": 1728,
+        "height": 1084
+      },
+      "screenFrame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1117
+      },
+      "windowServerFrameStable": true,
+      "frame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1084
+      },
+      "monitoring": true,
+      "violations": [],
+      "foregroundPid": 46921,
+      "fullscreen": true,
+      "screenSafeAreaFrame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1085
+      },
+      "fullscreenEntered": true,
+      "fullscreenEvents": [
+        "will-enter",
+        "did-enter"
+      ],
+      "ownedOnScreenWindows": [
+        {
+          "number": 4717,
+          "layer": 26,
+          "alpha": 0,
+          "frontToBackOrder": 1,
+          "pid": 46921,
+          "bounds": {
+            "X": 0,
+            "Height": 33,
+            "Y": 0,
+            "Width": 1728
+          }
+        },
+        {
+          "number": 4712,
+          "layer": 0,
+          "alpha": 0,
+          "frontToBackOrder": 3,
+          "pid": 46921,
+          "bounds": {
+            "X": 0,
+            "Height": 32,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        {
+          "number": 4704,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 4,
+          "pid": 46921,
+          "bounds": {
+            "X": 0,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          }
+        }
+      ],
+      "monitoredSamples": 206,
+      "windowNumber": 4704,
+      "command": "monitor-on",
+      "fullscreenTransition": "",
+      "pid": 46921,
+      "focused": true,
+      "onActiveSpace": true,
+      "a": "",
+      "b": ""
+    },
+    "fullscreenCleanup": {
+      "key": true,
+      "expectedWindowServerFrame": {
+        "y": 186,
+        "x": 544,
+        "width": 640,
+        "height": 472
+      },
+      "screenFrame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1117
+      },
+      "windowServerFrameStable": true,
+      "frame": {
+        "y": 459,
+        "x": 544,
+        "width": 640,
+        "height": 472
+      },
+      "monitoring": false,
+      "violations": [],
+      "foregroundPid": 46921,
+      "fullscreen": false,
+      "screenSafeAreaFrame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1085
+      },
+      "fullscreenEntered": false,
+      "fullscreenEvents": [
+        "will-enter",
+        "did-enter",
+        "will-exit",
+        "did-exit"
+      ],
+      "ownedOnScreenWindows": [
+        {
+          "number": 4704,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 20,
+          "pid": 46921,
+          "bounds": {
+            "X": 544,
+            "Height": 472,
+            "Y": 186,
+            "Width": 640
+          }
+        },
+        {
+          "number": 4669,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 21,
+          "pid": 46738,
+          "bounds": {
+            "X": 304,
+            "Height": 780,
+            "Y": 109,
+            "Width": 1120
+          }
+        }
+      ],
+      "monitoredSamples": 206,
+      "windowNumber": 4704,
+      "command": "exit-fullscreen",
+      "fullscreenTransition": "",
+      "pid": 46921,
+      "focused": true,
+      "onActiveSpace": true,
+      "a": "",
+      "b": ""
+    },
+    "permissionsAfter": {
+      "microphone": "authorized",
+      "accessibility": true,
+      "provenance": "native authorization status; no request made"
+    }
+  },
+  "elapsedMs": 11269,
+  "provenance": {
+    "purpose": "Preliminary NSPanel regression: ten fullscreen behavior steps passed, overall harness still failed on an unrelated missing UI resource",
+    "status": "PRELIMINARY; not an overall passing validation",
+    "applicationPolicy": "Actual NSApplicationActivationPolicyAccessory",
+    "observations": "Owned helper true fullscreen lifecycle, independent 40 ms WindowServer surface monitoring, retained production AX, and physically visible HUD above fullscreen",
+    "remaining": "Repeat with the final coherent application bundle under both Accessory and Regular activation policies",
+    "safety": "Disposable debug profile and owned helper only; no live microphone capture or user application control"
+  }
+}

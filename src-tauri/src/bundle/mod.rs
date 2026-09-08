@@ -16,9 +16,10 @@ pub mod ipc;
 pub mod launch;
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Где рука сейчас.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -80,6 +81,8 @@ pub struct Bundle {
     pub name: String,
     /// Где связка живёт: `local` — эта машина, иначе имя узла из настроек.
     pub machine: String,
+    /// Explicit provider; empty in legacy files means Claude.
+    pub agent: String,
     /// Директория проекта. Как в «Проектах»: git она не обязана быть — нет
     /// `.git` или самого каталога, связка инициализирует и создаст сама.
     #[serde(alias = "repo")]
@@ -97,9 +100,20 @@ pub struct Bundle {
 }
 
 impl Bundle {
+    pub fn provider(&self) -> &str {
+        if self.agent.is_empty() {
+            "claude"
+        } else {
+            self.agent.as_str()
+        }
+    }
+
     /// Чего не хватает для старта.
     pub fn problems(&self) -> Vec<String> {
         let mut out = Vec::new();
+        if !matches!(self.provider(), "claude" | "codex") {
+            out.push("неизвестный агент связки".into());
+        }
         if self.name.trim().is_empty() {
             out.push("у связки нет имени".into());
         }
@@ -114,13 +128,20 @@ impl Bundle {
 
     /// Очередь слияний: готовые руки в порядке готовности.
     pub fn queue(&self) -> Vec<&Hand> {
-        let mut q: Vec<&Hand> = self.hands.iter().filter(|h| h.state == HandState::Ready).collect();
+        let mut q: Vec<&Hand> = self
+            .hands
+            .iter()
+            .filter(|h| h.state == HandState::Ready)
+            .collect();
         q.sort_by_key(|h| h.ready_at);
         q
     }
 
     pub fn event(&mut self, text: impl Into<String>) {
-        self.events.push(Event { at: crate::util::now_ms(), text: text.into() });
+        self.events.push(Event {
+            at: crate::util::now_ms(),
+            text: text.into(),
+        });
         let extra = self.events.len().saturating_sub(50);
         if extra > 0 {
             self.events.drain(..extra);
@@ -130,7 +151,10 @@ impl Bundle {
     /// Связка ещё живёт: есть кому работать или вливаться.
     pub fn active(&self) -> bool {
         self.hands.iter().any(|h| {
-            matches!(h.state, HandState::Working | HandState::Ready | HandState::Conflict)
+            matches!(
+                h.state,
+                HandState::Working | HandState::Ready | HandState::Conflict
+            )
         })
     }
 }
@@ -152,9 +176,7 @@ fn atomic_write(path: &Path, text: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path)
+    crate::stt::transcripts::write_private_atomic(path, text.as_bytes())
 }
 
 /// Реестр связок: как у циклов — целиком в памяти, целиком на диск.
@@ -173,7 +195,10 @@ impl Store {
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
-        Self { root, items: Mutex::new(items) }
+        Self {
+            root,
+            items: Mutex::new(items),
+        }
     }
 
     pub fn all(&self) -> Vec<Bundle> {
@@ -195,6 +220,46 @@ impl Store {
         self.flush();
     }
 
+    /// Forms edit configuration, never overwrite a newer runtime snapshot.
+    pub fn save_form(&self, mut item: Bundle) {
+        let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(old) = items.iter_mut().find(|b| b.id == item.id) {
+            item.events = old.events.clone();
+            item.created_at = old.created_at;
+            item.last_merge_at = old.last_merge_at;
+            item.paused = old.paused;
+            if old
+                .hands
+                .iter()
+                .any(|h| h.state != HandState::New || !h.worktree.is_empty())
+            {
+                item.agent = old.agent.clone();
+                item.dir = old.dir.clone();
+                item.machine = old.machine.clone();
+                item.base = old.base.clone();
+            }
+            for live in &old.hands {
+                if let Some(form) = item.hands.iter_mut().find(|h| h.id == live.id) {
+                    let name = form.name.clone();
+                    let task = form.task.clone();
+                    *form = live.clone();
+                    form.name = name;
+                    if live.state == HandState::New && live.worktree.is_empty() {
+                        form.task = task;
+                    }
+                } else if live.state != HandState::New || !live.worktree.is_empty() {
+                    item.hands.push(live.clone());
+                }
+            }
+            *old = item;
+        } else {
+            items.push(item);
+        }
+        if let Ok(text) = serde_json::to_string_pretty(&*items) {
+            let _ = atomic_write(&bundles_path(&self.root), &text);
+        }
+    }
+
     /// Изменить связку на месте; вернуть изменённую.
     pub fn with<F: FnOnce(&mut Bundle)>(&self, id: &str, edit: F) -> Option<Bundle> {
         let out = {
@@ -208,13 +273,16 @@ impl Store {
     }
 
     pub fn remove(&self, id: &str) {
-        self.items.lock().unwrap_or_else(|e| e.into_inner()).retain(|b| b.id != id);
+        self.items
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|b| b.id != id);
         self.flush();
     }
 
     fn flush(&self) {
-        let items = self.items.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Ok(text) = serde_json::to_string_pretty(&items) {
+        let items = self.items.lock().unwrap_or_else(|e| e.into_inner());
+        if let Ok(text) = serde_json::to_string_pretty(&*items) {
             let _ = atomic_write(&bundles_path(&self.root), &text);
         }
     }
@@ -225,6 +293,7 @@ pub struct Bundles {
     pub store: Store,
     /// Такт — по одному за раз: он ходит в git и гоняет гейты.
     ticking: AtomicBool,
+    operations: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Default for Bundles {
@@ -235,7 +304,21 @@ impl Default for Bundles {
 
 impl Bundles {
     pub fn new() -> Self {
-        Self { store: Store::load(), ticking: AtomicBool::new(false) }
+        Self {
+            store: Store::load(),
+            ticking: AtomicBool::new(false),
+            operations: Arc::default(),
+        }
+    }
+
+    pub fn claim_operation(&self, id: &str) -> Option<Operation> {
+        if !self.operations.lock().unwrap().insert(id.to_string()) {
+            return None;
+        }
+        Some(Operation {
+            id: id.to_string(),
+            operations: self.operations.clone(),
+        })
     }
 
     pub fn claim_tick(&self) -> bool {
@@ -247,12 +330,73 @@ impl Bundles {
     }
 }
 
+/// Release on success, error or cancellation, including early IPC returns.
+pub struct Operation {
+    id: String,
+    operations: Arc<Mutex<HashSet<String>>>,
+}
+impl Drop for Operation {
+    fn drop(&mut self) {
+        self.operations.lock().unwrap().remove(&self.id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn hand(id: &str, state: HandState, ready_at: i64) -> Hand {
-        Hand { id: id.into(), state, ready_at, ..Default::default() }
+        Hand {
+            id: id.into(),
+            state,
+            ready_at,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn bundle_operations_exclude_each_other_and_release_on_drop() {
+        let dir = std::env::temp_dir().join(format!("jarvis-bundle-lock-{}", std::process::id()));
+        let bundles = Bundles {
+            store: Store::load_at(dir),
+            ticking: AtomicBool::new(false),
+            operations: Arc::default(),
+        };
+        let first = bundles.claim_operation("one").unwrap();
+        assert!(bundles.claim_operation("one").is_none());
+        assert!(bundles.claim_operation("two").is_some());
+        drop(first);
+        assert!(bundles.claim_operation("one").is_some());
+    }
+
+    #[test]
+    fn stale_form_keeps_runtime_and_omitted_live_hands_on_disk() {
+        let dir = std::env::temp_dir().join(format!("jarvis-bundle-form-{}", std::process::id()));
+        let store = Store::load_at(dir.clone());
+        let mut initial = Bundle {
+            id: "b".into(),
+            dir: "/original".into(),
+            hands: vec![hand("a", HandState::New, 0)],
+            ..Default::default()
+        };
+        store.save(initial.clone());
+        store.with("b", |b| {
+            b.hands[0].state = HandState::Working;
+            b.hands[0].pane = "%42".into();
+            b.hands[0].worktree = "/original-worktree".into();
+            b.hands.push(hand("live", HandState::Ready, 42));
+            b.event("started");
+        });
+        initial.name = "edited".into();
+        initial.dir = "/stale".into();
+        store.save_form(initial);
+        let again = Store::load_at(dir.clone()).get("b").unwrap();
+        assert_eq!(again.name, "edited");
+        assert_eq!(again.dir, "/original");
+        assert_eq!(again.hands[0].pane, "%42");
+        assert_eq!(again.hands.len(), 2);
+        assert_eq!(again.events[0].text, "started");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -283,7 +427,10 @@ mod tests {
         let ok = Bundle {
             name: "клевер-релиз".into(),
             dir: "/repo".into(),
-            hands: vec![Hand { task: "экран логина".into(), ..Default::default() }],
+            hands: vec![Hand {
+                task: "экран логина".into(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
         assert!(ok.problems().is_empty());
@@ -313,7 +460,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::load_at(dir.clone());
-        store.save(Bundle { id: "b1".into(), name: "клевер-релиз".into(), ..Default::default() });
+        store.save(Bundle {
+            id: "b1".into(),
+            name: "клевер-релиз".into(),
+            ..Default::default()
+        });
         store.with("b1", |b| b.event("рука запущена"));
 
         let again = Store::load_at(dir.clone());
@@ -331,7 +482,8 @@ mod compat_tests {
     /// Старые bundles.json звали директорию «repo» — они обязаны читаться.
     #[test]
     fn old_files_with_repo_field_still_load() {
-        let b: Bundle = serde_json::from_str(r#"{ "id": "b1", "name": "x", "repo": "/старый/путь" }"#).unwrap();
+        let b: Bundle =
+            serde_json::from_str(r#"{ "id": "b1", "name": "x", "repo": "/старый/путь" }"#).unwrap();
         assert_eq!(b.dir, "/старый/путь");
         assert_eq!(b.machine, "");
     }

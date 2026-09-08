@@ -7,24 +7,147 @@ const MAX_CARDS = 4;
 const cards = new Map(); // id → {el, timer}
 let hovering = false; // курсор над окном тостов (из нативного poll'а)
 
-function reportHeight() {
-  if (!cards.size) { window.toast.resize(0); return; }
-  window.toast.resize(Math.min(480, stackEl.scrollHeight + 4));
+// Native geometry must be committed before motion begins. Keep the transparent
+// canvas large enough for both shapes while a pill grows into its result card.
+const retiringCards = new Map();
+const cardMotions = new WeakMap();
+let lastReportedHeight = -1;
+let lastResize = Promise.resolve();
+const reducedMotion = () => !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+const canAnimate = el => typeof el.animate === 'function' && typeof window.getComputedStyle === 'function';
+const stackHeight = () => stackEl.children.length ? Math.min(480, Math.ceil(stackEl.scrollHeight)) : 0;
+
+function reportHeight(reserved = 0) {
+  const height = Math.max(reserved, stackHeight());
+  if (height === lastReportedHeight) return lastResize;
+  lastReportedHeight = height;
+  // All deduplicated callers share the handled promise, including failures.
+  lastResize = lastResize.catch(() => {}).then(() => window.toast.resize(height)).catch(() => {
+    if (lastReportedHeight === height) lastReportedHeight = -1;
+  });
+  // IPC failure must never leave an otherwise usable card permanently invisible.
+  return lastResize;
+}
+
+function stopMotion(card) {
+  const motion = cardMotions.get(card);
+  if (!motion) return;
+  cardMotions.delete(card);
+  clearTimeout(motion.fallback);
+  for (const animation of motion.animations) animation.cancel();
+  card.querySelector('.card-ghost')?.remove();
+  card.style.width = ''; card.style.height = ''; card.style.overflow = '';
+  const content = card.querySelector('.card-content');
+  if (content) content.style.opacity = '';
+}
+
+function captureCard(card) {
+  if (!canAnimate(card)) return null;
+  const rect = card.getBoundingClientRect();
+  const style = window.getComputedStyle(card);
+  const content = card.querySelector('.card-content')?.cloneNode(true);
+  if (content) content.style.opacity = '';
+  const before = { width: rect.width, height: rect.height, radius: style.borderRadius, content,
+    contentWidth: rect.width - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - 2 };
+  stopMotion(card);
+  return before;
+}
+
+function liveContent(card) {
+  let content = card.querySelector('.card-content');
+  if (content) return content;
+  content = document.createElement('div'); content.className = 'card-content';
+  while (card.firstChild) content.appendChild(card.removeChild(card.firstChild));
+  card.appendChild(content);
+  return content;
+}
+
+function presentCard(card, before = null) {
+  if (!canAnimate(card)) { card.classList.add('in'); reportHeight(); return; }
+  const content = liveContent(card);
+  const after = card.getBoundingClientRect();
+  const radius = window.getComputedStyle(card).borderRadius;
+  const motion = { animations: [], fallback: null };
+  cardMotions.set(card, motion);
+  const morph = before && before.width > 0 && before.height > 0 && !reducedMotion();
+  const reserved = Math.min(480, stackHeight() + (morph ? Math.max(0, before.height - after.height) : 0));
+  let ghost;
+  if (morph) {
+    card.style.width = `${before.width}px`; card.style.height = `${before.height}px`;
+    card.style.overflow = 'hidden'; content.style.opacity = '0';
+    if (before.content) {
+      ghost = document.createElement('div'); ghost.className = 'card-ghost';
+      ghost.setAttribute('aria-hidden', 'true'); ghost.setAttribute('inert', '');
+      before.content.style.width = `${before.contentWidth}px`;
+      ghost.appendChild(before.content); card.appendChild(ghost);
+    }
+  }
+  reportHeight(reserved).then(() => {
+    if (cardMotions.get(card) !== motion || !card.isConnected) return;
+    const firstTime = !card.classList.contains('in');
+    card.classList.remove('out'); card.classList.add('in');
+    const finish = () => {
+      if (cardMotions.get(card) !== motion) return;
+      stopMotion(card); reportHeight();
+    };
+    if (reducedMotion()) { finish(); return; }
+    const animate = (el, frames, options) => {
+      const animation = el.animate(frames, options);
+      animation.finished.catch(() => {}); // interruption is expected for every crossfade layer
+      motion.animations.push(animation); return animation;
+    };
+    const ease = 'cubic-bezier(.22, 1, .36, 1)';
+    let main;
+    if (morph) {
+      main = animate(card, [
+        { width: `${before.width}px`, height: `${before.height}px`, borderRadius: before.radius },
+        { width: `${after.width}px`, height: `${after.height}px`, borderRadius: radius },
+      ], { duration: 340, easing: ease, fill: 'forwards' });
+      animate(content, [{ opacity: 0, transform: 'translateY(3px)' }, { opacity: 1, transform: 'translateY(0)' }],
+        { duration: 220, delay: 70, easing: 'ease-out', fill: 'forwards' });
+      if (ghost) animate(ghost, [{ opacity: 1 }, { opacity: 0 }], { duration: 130, easing: 'ease-out', fill: 'forwards' });
+    } else if (firstTime) {
+      main = animate(card, [{ opacity: 0, transform: 'translateY(8px) scale(.985)' }, { opacity: 1, transform: 'translateY(0) scale(1)' }],
+        { duration: 280, easing: ease });
+    }
+    if (!main) { finish(); return; }
+    main.finished.then(finish, () => {});
+    // A non-key WKWebView can pause its compositor after a Space change. The
+    // settled state must remain usable even if animation.finished is delayed.
+    motion.fallback = setTimeout(finish, morph ? 430 : 370);
+  });
+}
+
+function existingCard(id) {
+  const active = cards.get(id);
+  if (active) return active;
+  const retiring = retiringCards.get(id);
+  if (!retiring) return null;
+  retiringCards.delete(id); stopMotion(retiring.el);
+  retiring.el.classList.remove('out'); retiring.el.classList.add('in');
+  cards.set(id, retiring);
+  return retiring;
 }
 
 function removeCard(id, instant) {
   const c = cards.get(id);
   if (!c) return;
-  cards.delete(id);
-  clearTimeout(c.timer);
-  if (instant) {
-    c.el.remove();
-    reportHeight();
-    return;
-  }
-  c.el.classList.remove('in');
+  cards.delete(id); clearTimeout(c.timer); stopMotion(c.el);
+  const finish = () => {
+    if (retiringCards.get(id) !== c) return;
+    retiringCards.delete(id); stopMotion(c.el); c.el.remove(); reportHeight();
+  };
+  retiringCards.set(id, c);
+  if (instant || reducedMotion()) { finish(); return; }
   c.el.classList.add('out');
-  setTimeout(() => { c.el.remove(); reportHeight(); }, 190);
+  if (!canAnimate(c.el)) { setTimeout(finish, 190); return; }
+  const animation = c.el.animate([
+    { opacity: 1, transform: 'translateY(0) scale(1)' },
+    { opacity: 0, transform: 'translateY(5px) scale(.99)' },
+  ], { duration: 180, easing: 'cubic-bezier(.4, 0, 1, 1)', fill: 'forwards' });
+  const motion = { animations: [animation], fallback: setTimeout(finish, 260) };
+  cardMotions.set(c.el, motion);
+  animation.finished.then(finish, () => {});
 }
 
 // кольцо стартует заново вместе с таймером — они всегда в фазе
@@ -85,14 +208,14 @@ window.toast.onHover((h) => {
 window.toast.onAdd((d) => {
   // дедуп: карточка с таким id уже на экране (стабильный id «done-<sid>» и т.п.)
   // — обновляем её на месте, а не плодим вторую «одна за другой»
-  const existing = cards.get(d.id);
+  const existing = existingCard(d.id);
   if (existing) {
+    const before = captureCard(existing.el);
     const t = existing.el.querySelector('.title');
     if (t) t.textContent = d.title || '';
-    const b = existing.el.querySelector('.body');
-    if (b) b.textContent = d.body || '';
+    updateBody(existing.el, d.body);
     armTimer(d.id); // таймер заново — карточка «обновилась»
-    reportHeight();
+    presentCard(existing.el, before);
     return;
   }
 
@@ -127,6 +250,7 @@ window.toast.onAdd((d) => {
     const close = document.createElement('button');
     close.className = 'close';
     close.title = 'Скрыть';
+    close.setAttribute('aria-label', 'Скрыть уведомление');
     // кольцо-таймер вокруг ✕ (SVG: подложка + стекающая дуга)
     const SVG = 'http://www.w3.org/2000/svg';
     const ring = document.createElementNS(SVG, 'svg');
@@ -184,12 +308,12 @@ window.toast.onAdd((d) => {
     const qq = d.question || null;
     const count = qq && typeof qq.count === 'number' ? qq.count : (qq && qq.options ? 1 : 0);
     const opts = qq && Array.isArray(qq.options) ? qq.options : null;
-    if (count > 1) {
+    if (count > 1 || (count > 0 && !opts?.length) || qq?.multiSelect || ['external', 'codex-rpc'].includes(qq?.transport)) {
       sticky = true;
       card.classList.add('sticky');
       const note = document.createElement('div');
       note.className = 'body';
-      note.textContent = `Несколько вопросов (${count}) — ответь в приложении`;
+      note.textContent = count > 1 ? `Вопросов: ${count} · открой, чтобы выбрать и проверить ответы` : 'Открой вопрос, чтобы выбрать варианты и написать ответ';
       card.appendChild(note);
     } else if (opts && opts.length) {
       sticky = true; // ждём выбор — карточка не тикает по TTL
@@ -221,10 +345,26 @@ window.toast.onAdd((d) => {
           otext.appendChild(od);
         }
         opt.append(num, otext);
-        opt.addEventListener('click', (e) => {
+        let pendingAnswer = false;
+        opt.addEventListener('click', async (e) => {
           e.stopPropagation();
-          window.toast.answerQuestion(d.sessionId, { answers: [[i + 1]] });
-          if (!qq.multiSelect) removeCard(d.id);
+          if (pendingAnswer || list.dataset.sending === 'true') return;
+          pendingAnswer = true; list.dataset.sending = 'true';
+          const status = document.createElement('div'); status.className = 'body'; status.setAttribute('role', 'status');
+          status.textContent = 'Отправляю · жду подтверждения…'; list.appendChild(status);
+          const submissionId = globalThis.crypto?.randomUUID?.() || `toast-${Date.now()}-${i}`;
+          try {
+            const result = await window.toast.answerQuestion(d.sessionId, {
+              requestId: qq.requestId, revision: qq.revision, submissionId, answers: [[i + 1]],
+            });
+            if (result.ok && result.delivery === 'confirmed') removeCard(d.id);
+            else {
+              status.textContent = result.error || 'Проверь ответ в приложении агента';
+              if (result.delivery !== 'unknown' && result.delivery !== 'sending' && !result.ok) {
+                pendingAnswer = false; delete list.dataset.sending;
+              }
+            }
+          } catch (error) { status.textContent = 'Связь прервалась. Ответ мог дойти — проверь терминал.'; }
         });
         list.appendChild(opt);
       });
@@ -256,8 +396,7 @@ window.toast.onAdd((d) => {
   cards.set(d.id, { el: card, timer: null, ttl, sticky });
   armTimer(d.id);
 
-  reportHeight();
-  requestAnimationFrame(() => requestAnimationFrame(() => card.classList.add('in')));
+  presentCard(card);
 });
 
 // вопрос ответили (хоткеем/панелью/в терминале) → снять «липкую» карточку
@@ -287,15 +426,20 @@ window.toast.onExtend((d) => {
   c.timer = setTimeout(() => removeCard(d.id), ms);
 });
 
-// текст приходит готовым в onAdd; onUpdate оставлен как безопасный no-op-путь
-// на случай отложенного обновления тела существующей карточки
+// A delayed body may arrive after a title-only notification.
+function updateBody(card, text) {
+  let body = card.querySelector('.body');
+  if (!body && text) {
+    body = document.createElement('div'); body.className = 'body';
+    (card.querySelector('.card-content') || card).appendChild(body);
+  }
+  if (body) { body.textContent = text || ''; if (!text) body.remove(); }
+}
 window.toast.onUpdate((d) => {
   const c = cards.get(d.id);
   if (!c) return;
-  const body = c.el.querySelector('.body');
-  if (body) body.textContent = d.body || '';
-  armTimer(d.id);
-  reportHeight();
+  const before = captureCard(c.el);
+  updateBody(c.el, d.body); armTimer(d.id); presentCard(c.el, before);
 });
 
 /* ===================== голосовая маршрутизация (HUD) ===================== */
@@ -307,7 +451,7 @@ const VOICE_TERMINAL = new Set(['sent', 'cancelled', 'empty', 'nosessions', 'err
 // Фазы, где разговор УЖЕ завершён — × просто закрывает карточку, без abort и без
 // «Отмена». ВАЖНО: 'reply' тут НЕТ — пока Джарвис ОЗВУЧИВАЕТ ответ, крестик должен
 // оборвать речь и завершить разговор (RC1), а не молча спрятать карточку.
-const VOICE_FINISHED = new Set(['sent', 'cancelled', 'empty', 'nosessions', 'error', 'dismiss']);
+const VOICE_FINISHED = new Set(['sent', 'cancelled', 'empty', 'nosessions', 'error', 'dismiss', 'heard']);
 
 // Освободить место под новую карточку, НЕ трогая «липкие» (пикер/стейдж/мик/
 // вопрос — интерактивные, должны выжить). Если все липкие — не вытесняем: стек
@@ -323,7 +467,8 @@ function evictForRoom() {
 function voiceClose(p) {
   const close = document.createElement('button');
   close.className = 'close';
-  close.title = 'Стоп';
+  close.title = VOICE_FINISHED.has(p.phase) ? 'Скрыть' : 'Стоп';
+  close.setAttribute('aria-label', VOICE_FINISHED.has(p.phase) ? 'Скрыть уведомление' : 'Остановить голосовой ввод');
   const x = document.createElement('span');
   x.textContent = '✕';
   close.appendChild(x);
@@ -351,14 +496,26 @@ function voiceClose(p) {
 function renderVoiceHud(p) {
   if (!p || !p.id) return;
   // «dismiss» — естественный конец разговора: тихо убрать карточку, без «Отмена» (RC3).
-  if (p.phase === 'dismiss') { removeCard(p.id, true); return; }
+  if (p.phase === 'dismiss') { removeCard(p.id); return; }
   const id = p.id;
-  const terminal = VOICE_TERMINAL.has(p.phase);
+  const permissionBlocked = p.phase === 'heard' && p.insertionBlocked === 'accessibility'
+    && !p.inserted && !p.pasteSent && !p.insertionCancelled;
+  const terminal = VOICE_TERMINAL.has(p.phase) && !permissionBlocked;
   // «Услышал»: вставка подтверждена (текст уже в поле) — короткие 2с;
   // не подтверждена — 5с, успеть прочитать/скопировать/кликнуть в историю.
   const ttl = p.phase === 'heard' ? (p.inserted ? 2000 : 5000) : 4200;
 
-  const existing = cards.get(id);
+  const existing = existingCard(id);
+  // Listening sends elapsed-time updates. Keep its waveform node and phase
+  // clock running instead of crossfading the whole HUD every second.
+  if (existing && existing.el.dataset.phase === p.phase
+      && ['listening', 'thinking', 'analyzing', 'transcribing'].includes(p.phase)
+      && (existing.el.querySelector('.body')?.textContent || '') === (p.body || '')) {
+    const title = existing.el.querySelector('.title');
+    if (title) title.textContent = p.title || '';
+    return;
+  }
+  const before = existing ? captureCard(existing.el) : null;
   const firstTime = !existing;
   let card;
   if (existing) {
@@ -370,6 +527,10 @@ function renderVoiceHud(p) {
     card.className = 'card voice';
   }
   card.style.setProperty('--ttl', `${ttl}ms`);
+  card.dataset.phase = p.phase;
+  card.dataset.attemptId = String(p.insertionAttemptId || '');
+  card.setAttribute('role', 'status');
+  card.setAttribute('aria-live', 'polite');
   // узел переиспользуется между фазами — сбрасываем клик/курсор/подсказку прошлой фазы
   card.onclick = null;
   card.style.cursor = '';
@@ -384,13 +545,59 @@ function renderVoiceHud(p) {
   // staged: показываем КУДА уйдёт промпт — это и есть смысл окна отмены (VR-2)
   if (p.phase === 'staged' && p.label) title.textContent = `Отправлю → ${p.label}`;
   else title.textContent = p.title || '';
-  crow.append(dot, title, voiceClose(p));
+  if (['listening', 'thinking', 'analyzing', 'transcribing'].includes(p.phase)) {
+    const wave = document.createElement('span'); wave.className = 'hud-wave'; wave.setAttribute('aria-hidden', 'true');
+    for (let i = 0; i < 5; i++) wave.appendChild(document.createElement('i'));
+    crow.append(wave, title, voiceClose(p));
+  } else crow.append(dot, title, voiceClose(p));
   card.appendChild(crow);
 
+  if (permissionBlocked) {
+    const permission = document.createElement('section'); permission.className = 'hud-permission';
+    permission.setAttribute('aria-label', 'Разрешение автоматической вставки');
+    const heading = document.createElement('div'); heading.className = 'hud-permission-title';
+    heading.textContent = 'Для вставки нужен Универсальный доступ';
+    const help = document.createElement('div'); help.className = 'hud-permission-help';
+    help.textContent = 'Текст готов. Разреши Jarvis доступ в настройках macOS или скопируй текст вручную.';
+    const actions = document.createElement('div'); actions.className = 'hud-permission-actions';
+    const allow = document.createElement('button'); allow.className = 'cont hud-permission-allow';
+    allow.textContent = 'Разрешить вставку';
+    allow.addEventListener('click', async event => {
+      event.stopPropagation(); if (allow.disabled) return; allow.disabled = true;
+      try {
+        if (typeof window.toast.systemAccessibilitySettings !== 'function') throw new Error();
+        const result = await window.toast.systemAccessibilitySettings();
+        if (result?.ok === false) throw new Error();
+        if (card.dataset.attemptId !== String(p.insertionAttemptId || '')) return;
+        help.textContent = 'Включи Jarvis в «Универсальном доступе». Этот текст остаётся здесь: скопируй и вставь его в нужное поле.';
+      } catch (_) { help.textContent = 'Не удалось открыть настройки. Открой macOS → Конфиденциальность и безопасность → Универсальный доступ.'; }
+      finally { allow.disabled = false; }
+    });
+    const cancel = document.createElement('button'); cancel.className = 'cont hud-permission-cancel';
+    cancel.textContent = 'Отменить автовставку';
+    cancel.addEventListener('click', async event => {
+      event.stopPropagation(); if (cancel.disabled) return; cancel.disabled = true;
+      try {
+        if (!Number.isSafeInteger(p.insertionAttemptId) || typeof window.toast.dictationCancelInsertion !== 'function') throw new Error();
+        const result = await window.toast.dictationCancelInsertion(p.insertionAttemptId);
+        if (result?.ok !== true || result.cancelled !== true) throw new Error();
+        if (card.dataset.attemptId !== String(p.insertionAttemptId)) return;
+        heading.textContent = 'Автовставка отменена';
+        help.textContent = 'Текст сохранён в этой карточке. Его можно скопировать; следующая диктовка работает как обычно.';
+        actions.remove(); permission.dataset.cancelled = 'true';
+      } catch (_) { help.textContent = 'Не удалось подтвердить отмену. Текст остаётся доступен для копирования.'; cancel.disabled = false; }
+    });
+    actions.append(allow, cancel); permission.append(heading, help, actions); card.appendChild(permission);
+  }
+
   if (p.body) {
+    if (p.phase === 'heard') {
+      const label = document.createElement('div'); label.className = 'hud-transcript-label';
+      label.textContent = p.formatted ? 'Отформатировано' : 'Распознано'; card.appendChild(label);
+    }
     const body = document.createElement('div');
-    body.className = 'body';
-    body.textContent = p.body;
+    body.className = p.phase === 'heard' ? 'body hud-transcript' : 'body';
+    body.textContent = p.phase === 'heard' && typeof p.full === 'string' ? p.full : p.body;
     card.appendChild(body);
   }
 
@@ -452,33 +659,50 @@ function renderVoiceHud(p) {
     });
     card.append(yes, no);
   } else if (p.phase === 'heard') {
+    const recovery = document.createElement('div'); recovery.className = 'hud-recovery';
+    recovery.setAttribute('aria-label', 'Состояние доставки текста');
+    recovery.textContent = p.insertionCancelled ? 'Автовставка отменена. Текст доступен для копирования.' : p.inserted ? 'Текст вставлен' : p.pasteSent ? 'Команда вставки отправлена. Если текст не появился, скопируй его.' : p.copied ? 'Текст скопирован в буфер обмена.' : p.saved ? 'Текст сохранён в истории диктовки.' : 'Скопируй текст перед закрытием уведомления.';
+    if (p.insertionError && !permissionBlocked && !p.pasteSent && !p.inserted) recovery.textContent += ' ' + p.insertionError;
+    card.appendChild(recovery);
     // Надиктовка завершена. Кнопка ручного копирования — на случай, если
     // автоматическая вставка/копия не сработала (полный текст из p.full).
     const copy = document.createElement('button');
     copy.className = 'cont';
     copy.textContent = 'Копировать';
-    copy.addEventListener('click', (e) => {
-      e.stopPropagation();
-      try { window.toast.copy(p.full || p.body || ''); } catch {}
-      copy.textContent = 'Скопировано';
-      setTimeout(() => { copy.textContent = 'Копировать'; }, 1200);
+    copy.addEventListener('click', async (e) => {
+      e.stopPropagation(); copy.disabled = true;
+      try { await window.toast.copy(p.full || p.body || ''); copy.textContent = 'Скопировано'; }
+      catch (_) { copy.textContent = 'Повторить копирование'; }
+      finally { copy.disabled = false; }
     });
     card.appendChild(copy);
+    if (typeof p.rawText === 'string' && p.rawText !== (p.full || p.body || '')) {
+      const raw = document.createElement('details'); raw.className = 'hud-raw';
+      const summary = document.createElement('summary'); summary.textContent = 'Исходное распознавание';
+      const original = document.createElement('div'); original.className = 'hud-raw-text'; original.textContent = p.rawText;
+      const rawCopy = document.createElement('button'); rawCopy.className = 'hud-raw-copy'; rawCopy.textContent = 'Копировать исходный текст';
+      rawCopy.addEventListener('click', async event => { event.stopPropagation();
+        try { await window.toast.copy(p.rawText); rawCopy.textContent = 'Скопировано'; }
+        catch (_) { rawCopy.textContent = 'Повторить копирование'; }
+      });
+      raw.addEventListener('click', event => event.stopPropagation());
+      raw.addEventListener('toggle', () => reportHeight());
+      raw.append(summary, original, rawCopy); card.appendChild(raw);
+    }
     // Клик по карточке → открыть «Историю голоса» (× и кнопка копирования
     // гасят всплытие, так что не конфликтуют).
     card.style.cursor = 'pointer';
     card.title = 'Открыть историю голоса';
-    card.onclick = () => { try { window.toast.openVoiceHistory(); } catch {} };
+    card.onclick = event => { if (event.target.closest?.('button, details, .hud-permission, .hud-transcript')) return; try { window.toast.openVoiceHistory(); } catch {} };
   }
 
   if (firstTime) {
     if (cards.size >= MAX_CARDS) evictForRoom();
     stackEl.appendChild(card);
-    requestAnimationFrame(() => requestAnimationFrame(() => card.classList.add('in')));
   }
   cards.set(id, { el: card, timer: null, ttl, sticky: !terminal });
   armTimer(id); // терминальные — тикают к TTL; липкие — ждут следующую фазу
-  reportHeight();
+  presentCard(card, before);
 }
 
 window.toast.onVoiceHud(renderVoiceHud);
@@ -493,12 +717,15 @@ function renderMicState(s) {
   if (!s) return;
   const denied = s.state === 'denied';
   const noDevice = s.state === 'no-device';
-  const silent = !!s.mic_silent;
-  if (!denied && !noDevice && !silent) {
+  const pending = s.state === 'permission-pending';
+  const starting = s.state === 'starting';
+  const silent = !!s.mic_silent && !s.muted && s.state === 'listening';
+  if (s.muted || (!denied && !noDevice && !pending && !starting && !silent)) {
     removeCard(MIC_ID, true);
     return;
   }
-  const existing = cards.get(MIC_ID);
+  const existing = existingCard(MIC_ID);
+  const before = existing ? captureCard(existing.el) : null;
   const firstTime = !existing;
   let card;
   if (existing) {
@@ -514,30 +741,111 @@ function renderMicState(s) {
   dot.className = 'dot waiting';
   const title = document.createElement('div');
   title.className = 'title';
-  title.textContent = denied
-    ? 'Нет доступа к микрофону'
+  title.textContent = pending ? 'Ожидаем разрешения на микрофон'
+    : starting ? 'Подключаем микрофон…'
+    : denied ? 'Нет доступа к микрофону'
     : noDevice
       ? 'Микрофон не найден'
-      : 'Микрофон молчит — говори громче';
+      : 'С микрофона не поступает звук';
   const close = document.createElement('button');
   close.className = 'close';
   close.title = 'Скрыть';
+  close.setAttribute('aria-label', 'Скрыть уведомление');
   const x = document.createElement('span');
   x.textContent = '✕';
   close.appendChild(x);
   close.addEventListener('click', (e) => { e.stopPropagation(); removeCard(MIC_ID); });
   crow.append(dot, title, close);
   card.appendChild(crow);
+  if (pending || denied || silent) {
+    const hint = document.createElement('div'); hint.className = 'subtitle';
+    hint.textContent = pending ? 'Ответьте на системный запрос macOS. Окно Jarvis остаётся доступным.'
+      : denied ? 'Разрешите Jarvis доступ: Системные настройки → Конфиденциальность → Микрофон.'
+      : 'Проверьте выбранное устройство и его выключатель звука в настройках голосового ввода.';
+    card.appendChild(hint);
+  }
   if (firstTime) {
     if (cards.size >= MAX_CARDS) evictForRoom();
     stackEl.appendChild(card);
-    requestAnimationFrame(() => requestAnimationFrame(() => card.classList.add('in')));
   }
   cards.set(MIC_ID, { el: card, timer: null, ttl: TTL, sticky: true });
-  reportHeight();
+  presentCard(card, before);
 }
 
 window.toast.onAudioState(renderMicState);
 // дотянуть текущее состояние на загрузке: audio_state эмитится лишь на изменении,
 // ранний denied/«нет устройства» мог уйти до регистрации слушателя (VR-3)
 if (window.toast.audioState) window.toast.audioState().then(renderMicState).catch(() => {});
+
+
+// A recording remains visible outside the main window. Its Stop button affects
+// only the meeting; it never aborts a CLI session or clears dictation text.
+const MEETING_HUD = 'meeting-recording';
+let recordingMeeting = null;
+let meetingEventGeneration = 0;
+let stoppingMeetingId = null;
+function renderMeetingHud(meeting) {
+  if (meeting && recordingMeeting && meeting.id !== recordingMeeting.id && meeting.status !== 'recording') return;
+  if (!meeting || !['recording', 'transcribing'].includes(meeting.status)) {
+    recordingMeeting = null;
+    removeCard(MEETING_HUD);
+    return;
+  }
+  recordingMeeting = meeting;
+  const prior = existingCard(MEETING_HUD);
+  const before = prior ? captureCard(prior.el) : null;
+  const card = prior?.el || document.createElement('div');
+  if (!prior) card.className = 'card meeting-hud';
+  card.setAttribute('role', 'status');
+  card.textContent = '';
+  const row = document.createElement('div'); row.className = 'crow';
+  row.appendChild(window.jarvisIcons.create('record', 18));
+  const title = document.createElement('div'); title.className = 'title';
+  title.textContent = meeting.status === 'recording' ? 'Запись встречи' : 'Готовим расшифровку';
+  const time = document.createElement('span'); time.className = 'meeting-hud-time';
+  row.append(title, time); card.appendChild(row);
+  const body = document.createElement('div'); body.className = 'body'; body.textContent = meeting.title; card.appendChild(body);
+  if (meeting.status === 'recording') {
+    const stop = document.createElement('button'); stop.className = 'cont'; stop.textContent = stoppingMeetingId === meeting.id ? 'Сохраняем…' : 'Остановить запись';
+    stop.disabled = stoppingMeetingId === meeting.id;
+    stop.addEventListener('click', async e => {
+      e.stopPropagation();
+      if (stoppingMeetingId === meeting.id) return;
+      stoppingMeetingId = meeting.id;
+      const generation = meetingEventGeneration;
+      stop.disabled = true; stop.textContent = 'Сохраняем…';
+      try {
+        const result = await window.toast.meetingStop();
+        if (generation === meetingEventGeneration) renderMeetingHud(result);
+      } catch (error) {
+        const current = cards.get(MEETING_HUD)?.el;
+        if (recordingMeeting?.id === meeting.id && current) {
+          current.querySelector('.body').textContent = String(error);
+          current.querySelector('.cont').textContent = 'Повторить остановку';
+        }
+      } finally {
+        if (stoppingMeetingId === meeting.id) stoppingMeetingId = null;
+        const button = cards.get(MEETING_HUD)?.el.querySelector('.cont');
+        if (button) button.disabled = false;
+      }
+    });
+    card.appendChild(stop);
+  }
+  if (!prior) stackEl.appendChild(card);
+  cards.set(MEETING_HUD, { el: card, sticky: true, timer: null, ttl: 0 });
+  updateMeetingClock(); presentCard(card, before);
+}
+function updateMeetingClock() {
+  const meeting = recordingMeeting;
+  if (!meeting) return;
+  const ms = meeting.status === 'recording' ? Date.now() - meeting.startedAt : meeting.durationMs;
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const clock = cards.get(MEETING_HUD)?.el.querySelector('.meeting-hud-time');
+  if (clock) clock.textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+if (window.toast.onMeetingChanged) {
+  let receivedMeeting = false;
+  window.toast.onMeetingChanged(meeting => { receivedMeeting = true; meetingEventGeneration++; renderMeetingHud(meeting); });
+  window.toast.meetingStatus().then(meeting => { if (!receivedMeeting) renderMeetingHud(meeting); }).catch(() => {});
+  setInterval(updateMeetingClock, 1000);
+}

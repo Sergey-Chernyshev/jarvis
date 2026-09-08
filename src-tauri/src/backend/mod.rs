@@ -16,6 +16,7 @@ use crate::transcript::ChatItem;
 pub mod codex;
 pub mod codex_agent;
 pub mod codex_transcript;
+pub mod events;
 
 /// Какой CLI-агент стоит за сессией/вызовом.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

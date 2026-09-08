@@ -1,0 +1,22 @@
+{
+  "checks": [
+    "compact profiles expose identity and truthful event state; technical fields stay closed",
+    "profile overview controls fit at 1280px",
+    "profile overview controls fit at 900px",
+    "rejected default change restores persisted selection with a visible error",
+    "default profile persists after retry",
+    "Escape after keyboard opening a profile closes only that disclosure",
+    "keyboard disclosure and rename failure preserve the user draft",
+    "renaming preserves account identity/default selection and disclosure",
+    "hook repair targets only the selected profile",
+    "long profile and CLI paths wrap within details at 900px",
+    "Escape closes profile details and restores focus without leaving settings",
+    "rejected monitoring change restores its switch",
+    "disabled monitoring is explicit, excluded from defaults, and cannot repair hooks",
+    "Add reveals labeled fields; Escape cancels locally and restores focus",
+    "invalid new profile retains both fields for correction",
+    "busy submit prevents duplicate saves and successful Add closes its form",
+    "post-save discovery failure blocks stale writes; refresh restores saved state"
+  ],
+  "errors": []
+}

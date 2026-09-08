@@ -22,6 +22,10 @@ pub fn float_above_everything(win: &WebviewWindow) {
     let _ = win.set_visible_on_all_workspaces(true);
 }
 
+pub fn clip_panel_surface(_win: &WebviewWindow, _radius: f64) {
+    // The transparent WebView and CSS own clipping on Linux.
+}
+
 /// Обычное окно: снять «поверх всего» и вернуть на свой рабочий стол.
 pub fn float_normal(win: &WebviewWindow) {
     let _ = win.set_always_on_top(false);

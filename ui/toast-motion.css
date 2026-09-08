@@ -1,0 +1,61 @@
+/* A transparent native canvas. Shadows belong to individual rounded cards;
+   no surface or backdrop may paint the rectangular window's outer gutters. */
+html, body, .stack { background: transparent; }
+.stack { gap: 10px; padding: 24px 24px 28px; }
+.card {
+  --toast-shadow: 0 6px 16px -6px #0005, 0 1px 3px #0002;
+  position: relative; flex: none; align-self: center; width: 100%;
+  border: 1px solid var(--line-strong); border-radius: 19px;
+  background: var(--paper-2);
+  box-shadow: var(--toast-shadow); padding: 14px 16px;
+  opacity: 0; transform: none; transition: none;
+}
+.card.in { opacity: 1; transform: none; }
+.card.out { opacity: 0; transform: none; transition: none; pointer-events: none; }
+/* The previous :hover rule restored a 48px blur from --shadow-panel. That
+   blur crossed the transparent canvas and produced the clipped rectangle. */
+.card:hover, .card.hot { box-shadow: var(--toast-shadow), 0 0 0 1px var(--accent-line); }
+.card-content { min-width: 0; }
+.card-ghost { position: absolute; inset: 0; padding: inherit; overflow: hidden; border-radius: inherit; pointer-events: none; }
+.card .title { font-size: 13px; font-weight: 600; letter-spacing: -.15px; }
+.card .body, .card .subtitle { margin: 7px 30px 0 17px; font-size: 12px; line-height: 1.55; color: var(--ink-mute); }
+.card .close { transition: background 140ms ease, color 140ms ease; }
+.card .close:focus-visible, .card .cont:focus-visible, .card .opt:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.card.voice[data-phase='listening'], .card.voice[data-phase='thinking'], .card.voice[data-phase='analyzing'], .card.voice[data-phase='transcribing'] {
+  width: fit-content; min-width: 225px; max-width: 100%; padding: 10px 12px 10px 17px;
+  border-radius: 26px; background: #26262bf5; color: #fafafa; border-color: #ffffff24;
+}
+.card.voice[data-phase='listening'] .title, .card.voice[data-phase='thinking'] .title, .card.voice[data-phase='analyzing'] .title, .card.voice[data-phase='transcribing'] .title { color: #fafafa; }
+.card.voice[data-phase='listening'] .close, .card.voice[data-phase='thinking'] .close, .card.voice[data-phase='analyzing'] .close, .card.voice[data-phase='transcribing'] .close { color: #b6b6bf; }
+.hud-wave { height: 22px; display: flex; align-items: center; gap: 3px; width: 27px; flex: none; color: #c6ddce; }
+.hud-wave i { width: 3px; height: 6px; border-radius: 3px; background: currentColor; animation: hud-listening 1050ms ease-in-out infinite alternate; }
+.hud-wave i:nth-child(2) { height: 13px; animation-delay: -650ms; }
+.hud-wave i:nth-child(3) { height: 21px; animation-delay: -300ms; }
+.hud-wave i:nth-child(4) { height: 15px; animation-delay: -800ms; }
+.hud-wave i:nth-child(5) { height: 8px; animation-delay: -450ms; }
+[data-phase='thinking'] .hud-wave i, [data-phase='analyzing'] .hud-wave i, [data-phase='transcribing'] .hud-wave i { animation: hud-thinking 900ms ease-in-out infinite alternate; }
+.hud-recovery { margin: 12px 0 0; padding-top: 9px; border-top: 1px solid var(--line); font: 11px/1.5 var(--font); color: var(--ink-mute); }
+.card.voice[data-phase='heard'] { background: var(--paper-2); max-height: 420px; overflow-y: auto; }
+.hud-permission { margin-top: 11px; padding: 11px 12px; border: 1px solid var(--accent-line); border-radius: 12px; background: var(--fill-2); }
+.hud-permission-title { font: 600 12px/1.4 var(--font); color: var(--ink); }
+.hud-permission-help { margin-top: 5px; font: 11px/1.5 var(--font); color: var(--ink-mute); }
+.hud-permission-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 9px; }
+.card.voice .hud-permission .cont { margin: 0; font-size: 10px; padding: 7px 8px; }
+.card.voice .hud-permission-cancel { background: transparent; color: var(--ink-mute); border: 1px solid var(--line-strong); }
+.hud-transcript-label { margin: 12px 0 5px; font: 600 10px/1.3 var(--font); color: var(--ink-faint); }
+.card.voice .hud-transcript { margin: 0; color: var(--ink); font-size: 13px; line-height: 1.5; white-space: pre-wrap; user-select: text; max-height: 160px; overflow-y: auto; -webkit-line-clamp: unset; display: block; }
+.hud-raw { margin-top: 10px; color: var(--ink-mute); font: 11px/1.5 var(--font); }
+.hud-raw summary { cursor: pointer; }
+.hud-raw-text { max-height: 120px; overflow-y: auto; white-space: pre-wrap; user-select: text; margin-top: 7px; }
+.hud-raw-copy { margin-top: 6px; border: 0; background: transparent; color: var(--ink); text-decoration: underline; font: inherit; cursor: pointer; }
+.card.voice .cont { font-size: 11px; padding: 7px 11px; margin: 11px 17px 0; }
+.card.voice[data-phase='heard'] .dot { border-color: var(--accent); }
+.card.mode, .card.mode.in { transition: none; animation: none; }
+@keyframes hud-listening { 0% { transform: scaleY(.45); opacity: .6; } 100% { transform: scaleY(1); opacity: 1; } }
+@keyframes hud-thinking { 0% { opacity: .25; } 100% { opacity: 1; } }
+.card.meeting-hud { border-radius: 19px; }
+.meeting-hud .ph { color: #db897e; }
+.meeting-hud-time { font: 11px/1 var(--font); color: var(--ink-mute); font-variant-numeric: tabular-nums; }
+.meeting-hud .cont { font-size: 11px; padding: 8px 12px; }
+@media (prefers-reduced-motion: reduce) { .hud-wave i, .ring .fg { animation: none !important; } .card, .card * { transition: none !important; } }
+@media (prefers-reduced-transparency: reduce) { .card { background: var(--paper-2); } }

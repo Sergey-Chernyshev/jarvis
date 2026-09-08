@@ -1,0 +1,107 @@
+{
+  "ok": true,
+  "scope": "Actual isolated jarvis-node, jarvis-hook and tmux; synthetic provider homes and receiver; no provider authorization or VM provisioning",
+  "fixture": "/tmp/jarvis-node-parity-tsfockpm",
+  "checks": [
+    {
+      "scenario": "running protocol advertises per-source capabilities",
+      "passed": true,
+      "details": null
+    },
+    {
+      "scenario": "two Codex homes have distinct stable identities",
+      "passed": true,
+      "details": null
+    },
+    {
+      "scenario": "same raw session ID remains distinct across homes",
+      "passed": true,
+      "details": null
+    },
+    {
+      "scenario": "project history preserves source identities",
+      "passed": true,
+      "details": null
+    },
+    {
+      "scenario": "provider auth file is outside transcript read boundary",
+      "passed": true,
+      "details": null
+    },
+    {
+      "scenario": "configured nondefault transcript is readable",
+      "passed": true,
+      "details": null
+    },
+    {
+      "scenario": "actual installed hook reaches node with canonical instance identity",
+      "passed": true,
+      "details": null
+    },
+    {
+      "scenario": "source-targeted launch receives a real pane",
+      "passed": true,
+      "details": null
+    },
+    {
+      "scenario": "launch selects requested account instead of inherited account",
+      "passed": true,
+      "details": null
+    },
+    {
+      "scenario": "live remote terminal screen is available",
+      "passed": true,
+      "details": null
+    },
+    {
+      "scenario": "written answer has acknowledgement and arrives literally",
+      "passed": true,
+      "details": null
+    },
+    {
+      "scenario": "remote key plan is acknowledged only after literal delivery",
+      "passed": true,
+      "details": null
+    },
+    {
+      "scenario": "managed remote shim replaces stale socket and account on existing server",
+      "passed": true,
+      "details": null
+    },
+    {
+      "scenario": "interactive shim session actually delivers its hook to the node",
+      "passed": true,
+      "details": null
+    },
+    {
+      "scenario": "unknown account cannot silently launch the default",
+      "passed": true,
+      "details": null
+    },
+    {
+      "scenario": "unsupported Codex official quota is explicit, never another account",
+      "passed": true,
+      "details": null
+    },
+    {
+      "scenario": "trust repair cannot select an unregistered home or command",
+      "passed": true,
+      "details": null
+    },
+    {
+      "scenario": "real Codex RPC trusts the selected remote source only",
+      "passed": true,
+      "details": null
+    },
+    {
+      "scenario": "remote trust preserves approvals and sandbox configuration",
+      "passed": true,
+      "details": null
+    },
+    {
+      "scenario": "remote trust repair is idempotent",
+      "passed": true,
+      "details": null
+    }
+  ]
+}

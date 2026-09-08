@@ -87,6 +87,7 @@ impl Sidecar {
     /// Запустить, если установлен и ещё не запущен. Не блокирует на загрузке
     /// модели — health-check движка сам подождёт готовности.
     pub fn ensure_started(&self) {
+        if crate::native_smoke::enabled() { return; }
         if !self.installed() {
             crate::log::line("[voice] silero: сайдкар не установлен");
             return;

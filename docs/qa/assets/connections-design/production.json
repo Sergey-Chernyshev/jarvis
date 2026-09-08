@@ -1,0 +1,52 @@
+{
+  "ok": true,
+  "generatedAt": "2026-09-05T19:14:57.465279+00:00",
+  "app": "/Users/se.chernyshev/jarvis/src-tauri/target/release/bundle/macos/Jarvis.app",
+  "previousPids": [],
+  "pids": [
+    38136
+  ],
+  "executableSha256": "41a6ff5cb1d58436aea41d41e03e123c6b97b46aa4b64f05a1ff91d352e8966f",
+  "signature": "codesign --verify --deep --strict passed before launch",
+  "health": {
+    "stateEndpoint": "ok",
+    "sessionCount": 219
+  },
+  "browserTestSourcesMatch": {
+    "index.html": true,
+    "settings2.js": true,
+    "connection-design.css": true,
+    "select-control.js": true,
+    "select-control.css": true
+  },
+  "nodeSourceFingerprint": "2bea827b8872ea99",
+  "validation": {
+    "uiTests": 322,
+    "connectionBrowserChecks": 20,
+    "connectionNativeChecks": 4,
+    "terminalNativeChecks": 6
+  },
+  "manualUi": {
+    "tool": "CUA native accessibility and screenshot",
+    "page": "Настройки → Машины и VM",
+    "machineCards": 3,
+    "remoteCards": 2,
+    "vmCards": 1,
+    "bothRemoteCardsDisplayedOnline": true,
+    "selectedMachine": "ticksly-runner-2-coder",
+    "importedSessionsShown": 477,
+    "currentCodexChatVisible": true,
+    "currentExternalCodexChatState": "Только просмотр",
+    "layout": "Inventory, selected inspector and actions visible in the running application",
+    "preparedDraft": {
+      "agent": "Claude",
+      "machine": "ticksly-runner-2-coder",
+      "cwd": "/home/coder/workspace/ticksly",
+      "promptEmpty": true,
+      "startDisabled": true,
+      "submitted": false
+    }
+  },
+  "knownFollowUps": [],
+  "profileDiscoveryFollowup": "profile-discovery.json: fixed and deployed to both remote nodes; installer source fix queued for the common desktop bundle."
+}

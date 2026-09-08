@@ -1,0 +1,52 @@
+{
+  "checks": [
+    "no terminal opened while hidden",
+    "initial attach requests only 2000 history lines",
+    "partial history is explained",
+    "load-more requests 100000 explicitly",
+    "100k history retained with bounded DOM",
+    "last live prompt is physically visible",
+    "search reaches old history",
+    "search match is physically visible {\"top\":526.09375,\"bottom\":544.09375,\"viewTop\":516.09375,\"viewBottom\":789.09375}",
+    "Unicode selection exact",
+    "live output preserves selection and viewport {\"selected\":\"row-020000 | Привет 中文 🐈 é\",\"anchor\":20000,\"afterLive\":{\"selection\":\"row-020000 | Привет 中文 🐈 é\",\"viewport\":20000}}",
+    "duplicate chunk not rendered twice",
+    "copy sends exact Unicode to local bridge",
+    "session snapshot does not reset selection",
+    "split UTF-8 preserved",
+    "real mouse drag selects in reading mode",
+    "real mouse selection survives live output",
+    "real wheel scrolls local history",
+    "reading mode does not send keyboard input",
+    "reading mode does not resize remote pane",
+    "explicit input reaches selected stream",
+    "rapid raw keys coalesce behind a delayed request in exact order",
+    "off/on discards old queued input and remaining chunks",
+    "failed input returns to reading with explicit retry available",
+    "failed input is not replayed after explicit re-enable",
+    "multiline Unicode paste is one exact paste payload",
+    "expanded terminal fits its chat container",
+    "offline output remains selectable and input disabled",
+    "reconnect restores recent output without replaying input",
+    "late open cannot replace the new session",
+    "switching session resets expanded control state",
+    "narrow layout has no page horizontal overflow",
+    "disappeared session disables input while tail is still open",
+    "all tail pages render before final close",
+    "tail-only connection cannot re-enable or send input",
+    "no browser exceptions"
+  ],
+  "metrics": {
+    "initial100kMs": 3647,
+    "bufferLines": 100003,
+    "terminalDomNodes": 236,
+    "initialGeometry": {
+      "screenHeight": 576,
+      "viewportHeight": 317,
+      "promptBottom": 771.09375,
+      "visibleBottom": 789.09375,
+      "outerScrollHeight": 587
+    }
+  },
+  "errors": []
+}

@@ -3,9 +3,11 @@
 <head>
 <meta charset="utf-8" />
 <!-- img-src data: — превью вставленных картинок живут в data-URL (FileReader) -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; media-src 'self' blob: data:; frame-src 'self' blob:" />
 <title>Jarvis</title>
+<link rel="stylesheet" href="./vendor/phosphor/style.css" />
 <link rel="stylesheet" href="./theme.css" />
+<script src="./icons.js"></script>
 <script src="./theme.js"></script>
 <script src="./keys.js"></script>
 <style>
@@ -1620,6 +1622,21 @@
   .doc-diff .diff-gap { padding: 4px 12px; margin: 2px 0; font-size: 11.5px; color: var(--ink-faint); background: var(--surface); text-align: center; }
   .doc-diff .diff-empty { padding: 16px; color: var(--ink-mute); text-align: center; }
 </style>
+<link rel="stylesheet" href="./workspace.css" />
+<link rel="stylesheet" href="./settings-layout.css" />
+<link rel="stylesheet" href="./vm-settings.css" />
+<link rel="stylesheet" href="./agent-instances.css" />
+<link rel="stylesheet" href="./session-workspace.css" />
+<link rel="stylesheet" href="./async-state.css" />
+<link rel="stylesheet" href="./artifacts.css" />
+<link rel="stylesheet" href="./vendor/xterm/xterm.css" />
+<link rel="stylesheet" href="./terminal-workspace.css" />
+<link rel="stylesheet" href="./projects.css" />
+<link rel="stylesheet" href="./project-avatars.css" />
+<link rel="stylesheet" href="./ai-analytics.css" />
+  <link rel="stylesheet" href="question-answer.css" />
+<link rel="stylesheet" href="./select-control.css" />
+<link rel="stylesheet" href="./connection-design.css" />
 </head>
 <body>
   <div class="panel entering" id="panel">
@@ -1631,7 +1648,9 @@
         <button class="tl-dot tl-min" id="winMin" title="Свернуть"></button>
         <button class="tl-dot tl-zoom" id="winZoom" title="Развернуть"></button>
       </span>
+      <span class="brand" data-tauri-drag-region>Jarvis</span>
       <span class="spacer" data-tauri-drag-region></span>
+      <button class="workspace-search" id="workspaceCommands">Поиск команд <kbd data-key="K"></kbd></button>
       <button class="tl-btn" id="tlSettings" title="Настройки">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></svg>
       </button>
@@ -1642,31 +1661,48 @@
       </span>
     </div>
 
+    <div class="session-frame" id="sessionFrame">
+    <aside class="session-sidebar" id="sessionSidebar" aria-label="Проекты и чаты" hidden></aside>
+    <main class="session-main">
+    <div class="page-navigation" id="pageNavigation" hidden>
+      <button id="pageBack" type="button" aria-label="Назад" title="Назад · Escape"></button>
+      <button id="pageHome" type="button">Jarvis</button><span class="page-separator" aria-hidden="true">/</span>
+      <span id="pageTitle"></span><span class="spacer"></span>
+      <button id="pageCommands" type="button" title="Перейти в другой раздел">Команды <kbd data-key="K"></kbd></button>
+    </div>
     <div class="cmdrow">
       <!-- lucide: search -->
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-      <input id="query" placeholder="Найти чат…" spellcheck="false" autocomplete="off" />
+      <input id="query" placeholder="Найти команду или чат…" aria-label="Поиск в Jarvis" spellcheck="false" autocomplete="off" />
       <span class="daemon-dot" title="демон активен"></span>
     </div>
 
-    <div class="tabs">
-      <div class="tab active" id="tabSessions">Чаты <span class="tabkey" data-key="1"></span></div>
-      <div class="tab" id="tabHistory">Проекты <span class="tabkey" data-key="2"></span></div>
-      <div class="tab" id="tabStats">Статистика <span class="tabkey" data-key="3"></span></div>
-      <div class="tab" id="tabVoice">Голос <span class="tabkey" data-key="4"></span></div>
-      <div class="tab" id="tabLoops">Циклы <span class="tabkey" data-key="5"></span></div>
-      <div class="tab" id="tabBundle">Связка <span class="tabkey" data-key="6"></span></div>
-      <span class="spacer"></span>
-      <div class="tab icon" id="tabSettings" title="Настройки">
+    <section class="launcher" id="launcher" aria-label="Главная">
+    <div class="launcher-label">Разделы</div>
+    <nav class="tabs" aria-label="Разделы Jarvis">
+      <button type="button" class="tab active" id="tabSessions">Чаты <span class="tabkey" data-key="1"></span></button>
+      <button type="button" class="tab" id="tabHistory">Проекты <span class="tabkey" data-key="2"></span></button>
+      <button type="button" class="tab" id="tabMachines">Машины <span class="tabkey" data-key="8"></span></button>
+      <button type="button" class="tab" id="tabStats">Статистика <span class="tabkey" data-key="3"></span></button>
+      <button type="button" class="tab" id="tabVoice">Голос <span class="tabkey" data-key="4"></span></button>
+      <button type="button" class="tab" id="tabLoops">Циклы <span class="tabkey" data-key="5"></span></button>
+      <button type="button" class="tab" id="tabBundle">Связка <span class="tabkey" data-key="6"></span></button>
+      <button type="button" class="tab" id="tabMeetings">Встречи</button>
+      <button type="button" class="tab icon" id="tabSettings" title="Настройки">
         <!-- lucide: sliders-horizontal -->
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></svg>
-      </div>
-    </div>
+      </button>
+    </nav>
+    <div class="launcher-recents" id="launcherRecents"></div>
+    <div class="launcher-empty" id="launcherEmpty" hidden>Ничего не найдено. Попробуй название раздела или чата.</div>
+    </section>
 
     <div class="limitbanner" id="limitBanner" hidden></div>
+    <section id="chatWelcome" class="chat-welcome" aria-label="Новый чат" hidden></section>
     <div class="list" id="list"></div>
     <div class="content" id="content">
       <div class="voicehist" id="voicehist" hidden></div>
+      <section class="meetings" id="meetings" aria-label="Встречи" hidden></section>
       <div class="chat" id="chat" hidden>
         <div class="chathead">
           <button class="back" id="chatBack" title="Назад · Esc">
@@ -1752,7 +1788,7 @@
           <div class="taskpanel" id="qPanel">
             <div class="tp-head">
               <div class="tp-titlerow">
-                <span class="tp-title">Варианты</span>
+                <span class="tp-title">Ответ агенту</span>
                 <span class="tp-sub" id="qpHeader"></span>
                 <span class="spacer"></span>
                 <button class="tp-close" id="qpClose" title="Закрыть · Esc">
@@ -1763,7 +1799,7 @@
             </div>
             <div class="qvopts" id="qpOpts"></div>
             <div class="qcustomrow" id="qpCustomRow" hidden>
-              <input class="qcustom" id="qpCustom" placeholder="Свой ответ…" spellcheck="false" autocomplete="off" />
+              <textarea class="qcustom" id="qpCustom" placeholder="Свой ответ…" rows="3" spellcheck="false" autocomplete="off" maxlength="32768"></textarea><span class="q-custom-hint">Enter — новая строка · ⌘/Ctrl + Enter — далее</span>
             </div>
             <div class="qvfoot" id="qpFoot"></div>
           </div>
@@ -1835,7 +1871,7 @@
         </div>
         <div class="qvopts" id="qOpts"></div>
         <div class="qcustomrow" id="qCustomRow" hidden>
-          <input class="qcustom" id="qCustom" placeholder="Свой ответ…" spellcheck="false" autocomplete="off" />
+          <textarea class="qcustom" id="qCustom" placeholder="Свой ответ…" rows="3" spellcheck="false" autocomplete="off" maxlength="32768"></textarea><span class="q-custom-hint">Enter — новая строка · ⌘/Ctrl + Enter — далее</span>
         </div>
         <div class="qvfoot" id="qFoot"></div>
       </div>
@@ -1843,6 +1879,7 @@
       <div class="loops" id="loops" hidden></div>
       <div class="bundle" id="bundlePane" hidden></div>
       <div class="history" id="history" hidden></div>
+      <section class="machines" id="machines" aria-label="Машины" hidden></section>
       <div class="settings" id="settings" hidden>
         <div class="stitle">Основное</div>
         <div class="scard">
@@ -1929,8 +1966,23 @@
       </div>
     </div>
 
-    <div class="detailempty" id="detailEmpty" hidden>Выбери сессию слева — разговор откроется здесь.</div>
+    <div class="detailempty" id="detailEmpty" hidden>
+      <main class="home">
+        <div class="home-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+        <h1>С чего начнём?</h1>
+        <p>Продолжи разговор слева или начни новую задачу.<br>Проекты, голос и встречи — всё под рукой.</p>
+        <div class="home-actions">
+          <button class="home-action" data-workspace-view="history"><strong>Начать задачу <span aria-hidden="true">↗</span></strong><span>Выбери проект и подключи Claude или Codex.</span><small>На этом компьютере или удалённо</small></button>
+          <button class="home-action" data-workspace-view="meetings"><strong>Записать встречу <span aria-hidden="true">↗</span></strong><span>Сохрани разговор и вернись к расшифровке.</span><small>Запись начинается только по твоей команде</small></button>
+          <button class="home-action" data-workspace-view="voicehist"><strong>Мои диктовки <span aria-hidden="true">↗</span></strong><span>Найди, скопируй или восстанови свой текст.</span><small>История голосового ввода</small></button>
+          <button class="home-action" id="homeCommands"><strong>Найти команду <span aria-hidden="true">↗</span></strong><span>Переходи к любому разделу с клавиатуры.</span><small data-key="K"></small></button>
+        </div>
+        <div class="home-note"><i></i>Твоё рабочее пространство. Под твоим контролем.</div>
+      </main>
+    </div>
 
+    </main>
+    </div>
     <footer id="footer">
       <!-- 14a: вместо «слушаю» — волна и понятная подпись про будящее слово -->
       <span class="j-wave" id="footerWave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
@@ -1948,23 +2000,46 @@
         </div>
         <div class="fdivider"></div>
         <div class="hint clickable" id="actionsBtn">
-          <span>Действия</span><span class="keycap" data-key="K"></span>
+          <span>Действия</span><span class="keycap" data-key="shift:K"></span>
         </div>
       </div>
     </footer>
     <div class="actions-pop" id="actionsPop" hidden></div>
+    <div class="command-overlay" id="commandDialog" hidden>
+      <section class="command-dialog" role="dialog" aria-modal="true" aria-label="Команды Jarvis">
+        <div class="command-search"><input id="commandQuery" placeholder="Куда перейдём?" aria-label="Поиск команд и чатов" role="combobox" aria-controls="commandResults" aria-expanded="false" aria-autocomplete="list" autocomplete="off" /><button id="commandClose" aria-label="Закрыть палитру">esc</button></div>
+        <div class="command-results" id="commandResults" role="listbox" aria-label="Команды и чаты"></div>
+        <div class="command-footer"><span>↑ ↓ выбрать</span><span>↵ открыть</span><span>esc закрыть</span></div>
+      </section>
+    </div>
   </div>
   <script src="./bridge.js"></script>
+  <script src="./select-control.js"></script>
   <script src="./markdown.js"></script>
   <script src="./diffview.js"></script>
   <script src="./question-answer.js"></script>
   <script src="./settings2.js"></script>
+  <script src="./agent-instances.js"></script>
   <script src="./voice-history.js"></script>
   <script src="./pipeline.js"></script>
   <script src="./loops.js"></script>
   <script src="./bundle.js"></script>
   <script src="./changes.js"></script>
   <script src="./search.js"></script>
+  <script src="./navigation.js"></script>
+  <script src="./workspace.js"></script>
+  <script src="./async-state.js"></script>
+  <script src="./artifacts.js"></script>
+  <script src="./attachments.js"></script>
+  <script src="./session-workspace.js"></script>
+  <script src="./vendor/xterm/xterm.js"></script>
+  <script src="./vendor/xterm/addon-search.js"></script>
+  <script src="./vendor/xterm/addon-fit.js"></script>
+  <script src="./terminal-workspace.js"></script>
+  <script src="./project-avatars.js"></script>
+  <script src="./projects.js"></script>
+  <script src="./meetings.js"></script>
+  <script src="./ai-analytics.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

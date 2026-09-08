@@ -1,0 +1,367 @@
+{
+  "root": "/tmp/jq-0dytbxq2",
+  "binary": "/Users/se.chernyshev/.nvm/versions/node/v22.17.0/bin/claude",
+  "requests": [
+    {
+      "path": "/v1/messages?beta=true",
+      "tools": [],
+      "toolResults": []
+    },
+    {
+      "path": "/v1/messages?beta=true",
+      "tools": [
+        "AskUserQuestion"
+      ],
+      "toolResults": []
+    },
+    {
+      "path": "/v1/messages?beta=true",
+      "tools": [
+        "AskUserQuestion"
+      ],
+      "toolResults": [
+        {
+          "type": "tool_result",
+          "content": "The user answered: \"Where should the synthetic checks run?\"=\"Local\", \"Which synthetic checks are required?\"=\"Unit, Integration\", \"Which extra constraint should we use?\"=\"Первая строка: без сети.\rВторая строка: сохранить черновик.\". Read the answers carefully — they may request clarification, changes, or that you not proceed — and follow what they actually say.",
+          "tool_use_id": "toolu_question_qa"
+        }
+      ]
+    }
+  ],
+  "accepted": [
+    {
+      "type": "tool_result",
+      "content": "The user answered: \"Where should the synthetic checks run?\"=\"Local\", \"Which synthetic checks are required?\"=\"Unit, Integration\", \"Which extra constraint should we use?\"=\"Первая строка: без сети.\rВторая строка: сохранить черновик.\". Read the answers carefully — they may request clarification, changes, or that you not proceed — and follow what they actually say.",
+      "tool_use_id": "toolu_question_qa"
+    }
+  ],
+  "initialScreen": "\n ▐▛███▛█   Claude Code v2.1.258\n▝▜██████▀  Sonnet 5 · API Usage Billing\n  ▝▝ ▝▝    /private/tmp/jq-0dytbxq2/work\n\n⚠ Safe mode: all customizations are disabled (CLAUDE.md, skills, plugins, hooks, MCP, agents, and more)\n  Restart without --safe-mode to re-enable\n\n❯ Ask the synthetic questions now.\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\nPlanning: /tmp/jq-0dytbxq2/claude/plans/ask-the-synthetic-questions-peppy-ladybug.md\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n←  ☐ Machine  ☐ Checks  ☐ Constraint  ✔ Submit  →\n\nWhere should the synthetic checks run?\n\n❯ 1. Local\n     This isolated machine\n  2. VM\n     A synthetic VM\n  3. Type something.\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n  4. Chat about this\n\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+  "plans": [
+    {
+      "question": {
+        "requestId": "qa-codex-real-tui",
+        "revision": 331355428,
+        "transport": "tmux",
+        "providerTurnId": null,
+        "providerItemId": null,
+        "rpcRequestId": null,
+        "screen": {
+          "fingerprint": "71c0141c2b141f3b",
+          "cursor": 2,
+          "selected": [],
+          "optionNumbers": [
+            1,
+            2
+          ],
+          "customIndex": 3,
+          "picker": "terminal",
+          "editing": false
+        },
+        "at": 0,
+        "fromScreen": true,
+        "questions": [
+          {
+            "id": "q1",
+            "question": "Where should the synthetic checks run?",
+            "header": "",
+            "multiSelect": false,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Local",
+                "description": ""
+              },
+              {
+                "id": "o2",
+                "label": "VM",
+                "description": ""
+              }
+            ],
+            "customAllowed": true,
+            "customMode": "alternative",
+            "isSecret": false
+          },
+          {
+            "id": "q1",
+            "question": "Where should the synthetic checks run?",
+            "header": "",
+            "multiSelect": false,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Local",
+                "description": ""
+              },
+              {
+                "id": "o2",
+                "label": "VM",
+                "description": ""
+              }
+            ],
+            "customAllowed": true,
+            "customMode": "alternative",
+            "isSecret": false
+          },
+          {
+            "id": "q1",
+            "question": "Where should the synthetic checks run?",
+            "header": "",
+            "multiSelect": false,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Local",
+                "description": ""
+              },
+              {
+                "id": "o2",
+                "label": "VM",
+                "description": ""
+              }
+            ],
+            "customAllowed": true,
+            "customMode": "alternative",
+            "isSecret": false
+          }
+        ]
+      },
+      "keys": [
+        {
+          "key": "Up"
+        },
+        {
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "question": {
+        "requestId": "qa-codex-real-tui",
+        "revision": 4231832873,
+        "transport": "tmux",
+        "providerTurnId": null,
+        "providerItemId": null,
+        "rpcRequestId": null,
+        "screen": {
+          "fingerprint": "c965e557b19de664",
+          "cursor": 2,
+          "selected": [
+            1
+          ],
+          "optionNumbers": [
+            1,
+            2,
+            3
+          ],
+          "customIndex": 4,
+          "picker": "terminal",
+          "editing": false
+        },
+        "at": 0,
+        "fromScreen": true,
+        "questions": [
+          {
+            "id": "q1",
+            "question": "Which synthetic checks are required?",
+            "header": "",
+            "multiSelect": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Unit",
+                "description": ""
+              },
+              {
+                "id": "o2",
+                "label": "UI",
+                "description": ""
+              },
+              {
+                "id": "o3",
+                "label": "Integration",
+                "description": ""
+              }
+            ],
+            "customAllowed": true,
+            "customMode": "alternative",
+            "isSecret": false
+          },
+          {
+            "id": "q1",
+            "question": "Which synthetic checks are required?",
+            "header": "",
+            "multiSelect": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Unit",
+                "description": ""
+              },
+              {
+                "id": "o2",
+                "label": "UI",
+                "description": ""
+              },
+              {
+                "id": "o3",
+                "label": "Integration",
+                "description": ""
+              }
+            ],
+            "customAllowed": true,
+            "customMode": "alternative",
+            "isSecret": false
+          },
+          {
+            "id": "q1",
+            "question": "Which synthetic checks are required?",
+            "header": "",
+            "multiSelect": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Unit",
+                "description": ""
+              },
+              {
+                "id": "o2",
+                "label": "UI",
+                "description": ""
+              },
+              {
+                "id": "o3",
+                "label": "Integration",
+                "description": ""
+              }
+            ],
+            "customAllowed": true,
+            "customMode": "alternative",
+            "isSecret": false
+          }
+        ]
+      },
+      "keys": [
+        {
+          "key": "Down"
+        },
+        {
+          "key": "Space"
+        },
+        {
+          "key": "Tab"
+        }
+      ]
+    },
+    {
+      "question": {
+        "requestId": "qa-codex-real-tui",
+        "revision": 1148654155,
+        "transport": "tmux",
+        "providerTurnId": null,
+        "providerItemId": null,
+        "rpcRequestId": null,
+        "screen": {
+          "fingerprint": "9361ef01c2150149",
+          "cursor": 1,
+          "selected": [],
+          "optionNumbers": [
+            1,
+            2
+          ],
+          "customIndex": 3,
+          "picker": "terminal",
+          "editing": false
+        },
+        "at": 0,
+        "fromScreen": true,
+        "questions": [
+          {
+            "id": "q1",
+            "question": "Which extra constraint should we use?",
+            "header": "",
+            "multiSelect": false,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Fast",
+                "description": ""
+              },
+              {
+                "id": "o2",
+                "label": "Thorough",
+                "description": ""
+              }
+            ],
+            "customAllowed": true,
+            "customMode": "alternative",
+            "isSecret": false
+          },
+          {
+            "id": "q1",
+            "question": "Which extra constraint should we use?",
+            "header": "",
+            "multiSelect": false,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Fast",
+                "description": ""
+              },
+              {
+                "id": "o2",
+                "label": "Thorough",
+                "description": ""
+              }
+            ],
+            "customAllowed": true,
+            "customMode": "alternative",
+            "isSecret": false
+          },
+          {
+            "id": "q1",
+            "question": "Which extra constraint should we use?",
+            "header": "",
+            "multiSelect": false,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Fast",
+                "description": ""
+              },
+              {
+                "id": "o2",
+                "label": "Thorough",
+                "description": ""
+              }
+            ],
+            "customAllowed": true,
+            "customMode": "alternative",
+            "isSecret": false
+          }
+        ]
+      },
+      "keys": [
+        {
+          "key": "Down"
+        },
+        {
+          "key": "Down"
+        },
+        {
+          "text": "Первая строка: без сети.\nВторая строка: сохранить черновик."
+        },
+        {
+          "key": "Enter"
+        }
+      ]
+    }
+  ],
+  "reviewScreen": "\n ▐▛███▛█   Claude Code v2.1.258\n▝▜██████▀  Sonnet 5 · API Usage Billing\n  ▝▝ ▝▝    /private/tmp/jq-0dytbxq2/work\n\n⚠ Safe mode: all customizations are disabled (CLAUDE.md, skills, plugins, hooks, MCP, agents, and more)\n  Restart without --safe-mode to re-enable\n\n❯ Ask the synthetic questions now.\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n←  ☒ Machine  ☒ Checks  ☒ Constraint  ✔ Submit  →\n\nReview your answers\n\n ● Where should the synthetic checks run?\n   → Local\n ● Which synthetic checks are required?\n   → Unit, Integration\n ● Which extra constraint should we use?\n   → Первая строка: без сети.Вторая строка: сохранить черновик.\n\nReady to submit your answers?\n\n❯ 1. Submit answers\n  2. Cancel\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+  "confirmedAnswers": {
+    "type": "tool_result",
+    "content": "The user answered: \"Where should the synthetic checks run?\"=\"Local\", \"Which synthetic checks are required?\"=\"Unit, Integration\", \"Which extra constraint should we use?\"=\"Первая строка: без сети.\rВторая строка: сохранить черновик.\". Read the answers carefully — they may request clarification, changes, or that you not proceed — and follow what they actually say.",
+    "tool_use_id": "toolu_question_qa"
+  },
+  "finalScreen": "\n ▐▛███▛█   Claude Code v2.1.258\n▝▜██████▀  Sonnet 5 · API Usage Billing\n  ▝▝ ▝▝    /private/tmp/jq-0dytbxq2/work\n\n⚠ Safe mode: all customizations are disabled (CLAUDE.md, skills, plugins, hooks, MCP, agents, and more)\n  Restart without --safe-mode to re-enable\n\n❯ Ask the synthetic questions now.\n\n⏺ User answered Claude's questions:\n  ⎿  · Where should the synthetic checks run? → Local\n     · Which synthetic checks are required? → Unit, Integration\n     · Which extra constraint should we use? → Первая строка: без сети.Вторая строка: сохранить черновик.\n\n⏺ Synthetic answers accepted.\n\n✻ Sautéed for 0s · done 5:21 AM\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                                                                                                                          ● high · /effort\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n  ⏸ plan mode on (shift+tab to cycle) · ← for agents\n",
+  "ok": true
+}

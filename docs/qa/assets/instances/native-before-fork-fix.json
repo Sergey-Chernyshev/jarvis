@@ -1,0 +1,19 @@
+{
+  "ok": false,
+  "steps": [
+    {
+      "name": "Discover real Personal and Work profiles separately",
+      "ok": true,
+      "elapsedMs": 323
+    },
+    {
+      "name": "Production importer finds this actual large Desktop chat",
+      "ok": false,
+      "elapsedMs": 4206,
+      "error": "Current running turn is done\nassert@user-script:15:12:86\n@user-script:15:59:11"
+    }
+  ],
+  "failure": "Current running turn is done\nassert@user-script:15:12:86\n@user-script:15:59:11",
+  "errors": [],
+  "elapsedMs": 4530
+}

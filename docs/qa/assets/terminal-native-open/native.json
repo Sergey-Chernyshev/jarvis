@@ -1,0 +1,180 @@
+{
+  "ok": true,
+  "steps": [
+    {
+      "name": "Production WebKit page loads terminal assets and receives isolated session state",
+      "ok": true,
+      "elapsedMs": 68
+    },
+    {
+      "name": "Real bottom Terminal button reveals and connects the local xterm in WKWebView",
+      "ok": true,
+      "elapsedMs": 489
+    },
+    {
+      "name": "Terminal viewport and final output fit within the actual chat",
+      "ok": true,
+      "elapsedMs": 2
+    },
+    {
+      "name": "Search opens and reaches synthetic terminal output in WKWebView",
+      "ok": true,
+      "elapsedMs": 134
+    },
+    {
+      "name": "Bottom toggle closes, then remote fixture independently opens",
+      "ok": true,
+      "elapsedMs": 315
+    },
+    {
+      "name": "No native terminal actions or JavaScript exceptions escaped the fixture",
+      "ok": true,
+      "elapsedMs": 1
+    }
+  ],
+  "errors": [],
+  "failure": null,
+  "runtime": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+    "url": "tauri://localhost",
+    "viewport": {
+      "width": 988,
+      "height": 747,
+      "dpr": 2
+    }
+  },
+  "elapsedMs": 1010,
+  "hashes": {
+    "ui/terminal-workspace.js": "c339b1967a5c23d2f71f56af1c1aa559a9c487da2566ad81c3641e950203815a",
+    "ui/terminal-workspace.test.mjs": "6097ac3bda62c568c073c89ebf818a73cedfc4994d99e0641b39b8c8a699ef45",
+    "scripts/qa/native-terminal-open.js": "48fa3ec769a0e0d09ea3822742ddbcaf364aba258c34dc7733f5260240806535",
+    "debugBinary": "beecdd6767d5981e568d72430a1994a2a71158090d876d9535faa1e769dbef16"
+  },
+  "terminalFit": {
+    "root": {
+      "x": 0,
+      "y": 403.390625,
+      "width": 988,
+      "height": 343.609375,
+      "top": 403.390625,
+      "right": 988,
+      "bottom": 747,
+      "left": 0
+    },
+    "viewport": {
+      "x": 0,
+      "y": 448.390625,
+      "width": 988,
+      "height": 269.609375,
+      "top": 448.390625,
+      "right": 988,
+      "bottom": 718,
+      "left": 0
+    },
+    "screen": {
+      "x": 14,
+      "y": 458.390625,
+      "width": 783,
+      "height": 444,
+      "top": 458.390625,
+      "right": 797,
+      "bottom": 902.390625,
+      "left": 14
+    },
+    "rows": 24,
+    "finalRow": 2,
+    "finalTop": 495.390625,
+    "finalBottom": 513.890625
+  },
+  "calls": [
+    {
+      "action": "chat-open",
+      "id": "native-terminal-local"
+    },
+    {
+      "id": "native-terminal-local",
+      "action": "open"
+    },
+    {
+      "id": "native-terminal-local",
+      "action": "poll",
+      "streamId": "native-probe-1"
+    },
+    {
+      "id": "native-terminal-local",
+      "action": "poll",
+      "streamId": "native-probe-1"
+    },
+    {
+      "id": "native-terminal-local",
+      "action": "close",
+      "streamId": "native-probe-1"
+    },
+    {
+      "action": "chat-open",
+      "id": "native-fixture:terminal"
+    },
+    {
+      "id": "native-fixture:terminal",
+      "action": "open"
+    },
+    {
+      "id": "native-fixture:terminal",
+      "action": "poll",
+      "streamId": "native-probe-2"
+    },
+    {
+      "id": "native-fixture:terminal",
+      "action": "close",
+      "streamId": "native-probe-2"
+    }
+  ],
+  "screenshots": [
+    "terminal-local-before-click.png",
+    "terminal-local-open.png",
+    "terminal-native-search.png",
+    "terminal-remote-open.png"
+  ],
+  "verification": "Hit-tested production DOM controls in an isolated real WKWebView; synthetic terminal bridge only. Screenshot inspected: short output is visibly rendered. No real SSH/auth/terminal commands or clipboard writes.",
+  "priorFalsePositive": {
+    "status": "superseded",
+    "profile": "/var/folders/sz/1yzw2zzs64x5kcr0c9hqhnr40000gq/T/jarvis-native-smoke-CjvqnQ",
+    "reason": "The former assertion checked only final output bottom. Its six passing steps were invalid as a visual pass: final output was clipped above the viewport. Current scenario asserts both top and bottom and the screenshot was inspected.",
+    "terminalFit": {
+      "root": {
+        "x": 0,
+        "y": 403.390625,
+        "width": 988,
+        "height": 343.609375,
+        "top": 403.390625,
+        "right": 988,
+        "bottom": 747,
+        "left": 0
+      },
+      "viewport": {
+        "x": 0,
+        "y": 448.390625,
+        "width": 988,
+        "height": 269.609375,
+        "top": 448.390625,
+        "right": 988,
+        "bottom": 718,
+        "left": 0
+      },
+      "screen": {
+        "x": 14,
+        "y": 274.390625,
+        "width": 783,
+        "height": 444,
+        "top": 274.390625,
+        "right": 797,
+        "bottom": 718.390625,
+        "left": 14
+      },
+      "rows": 24,
+      "finalRow": 2,
+      "finalBottom": 329.890625
+    },
+    "screenshot": "before-short-output-clipped.png"
+  }
+}

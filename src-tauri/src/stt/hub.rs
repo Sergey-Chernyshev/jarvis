@@ -49,6 +49,8 @@ pub enum AudioState {
     Muted = 2,     // жёсткий mute
     Denied = 3,    // нет разрешения микрофона
     NoDevice = 4,  // нет устройства ввода / ошибка
+    PermissionPending = 5, // системный диалог ещё не получил ответ
+    Starting = 6, // native stream starts asynchronously
 }
 
 impl AudioState {
@@ -58,6 +60,8 @@ impl AudioState {
             2 => AudioState::Muted,
             3 => AudioState::Denied,
             4 => AudioState::NoDevice,
+            5 => AudioState::PermissionPending,
+            6 => AudioState::Starting,
             _ => AudioState::Idle,
         }
     }
@@ -68,6 +72,18 @@ impl AudioState {
             AudioState::Muted => "muted",
             AudioState::Denied => "denied",
             AudioState::NoDevice => "no-device",
+            AudioState::PermissionPending => "permission-pending",
+            AudioState::Starting => "starting",
+        }
+    }
+
+    pub fn capture_error(self) -> Option<&'static str> {
+        match self {
+            AudioState::Denied => super::mic_permission::MicAuth::Denied.capture_error(),
+            AudioState::PermissionPending => super::mic_permission::MicAuth::NotDetermined.capture_error(),
+            AudioState::NoDevice => Some("Не удалось открыть микрофон. Проверьте подключение и выбранное устройство ввода."),
+            AudioState::Muted => Some("Микрофон выключен. Включите его и начните запись ещё раз."),
+            _ => None,
         }
     }
 }
@@ -172,6 +188,7 @@ struct Inner {
     demand: u32,
     session: Option<HubSession>,
     threads: Option<HubThreads>,
+    generation: u64,
 }
 
 /// Единый владелец захвата. Живёт в `Arc<AudioHub>` внутри `Daemon`.
@@ -211,6 +228,7 @@ impl AudioHub {
                 demand: 0,
                 session: None,
                 threads: None,
+                generation: 0,
             }),
             muted: Arc::new(AtomicBool::new(false)),
             state: AtomicU8::new(AudioState::Idle as u8),
@@ -298,17 +316,21 @@ impl AudioHub {
 
     /// Пересчитать видимое состояние из факта работы + mute.
     fn refresh_state(&self) {
-        let running = self.inner.lock().map(|g| g.threads.is_some()).unwrap_or(false);
+        let (running, demand) = self.inner.lock().map(|g| (g.threads.is_some(), g.demand)).unwrap_or_default();
         let s = if !running {
-            AudioState::Idle
+            if demand > 0 && self.state() == AudioState::PermissionPending { AudioState::PermissionPending } else { AudioState::Idle }
         } else if self.is_muted() {
             AudioState::Muted
+        } else if self.state() == AudioState::Starting {
+            AudioState::Starting
         } else {
             AudioState::Listening
         };
-        // не перетираем терминальные Denied/NoDevice, выставленные стартом
+        // Thread handles can remain after native startup fails. Their presence
+        // is not evidence of a live stream; only a new start/ready may clear an
+        // explicit terminal error. The payload still carries the mute flag.
         let cur = self.state();
-        if !matches!(cur, AudioState::Denied | AudioState::NoDevice) || running {
+        if !matches!(cur, AudioState::Denied | AudioState::NoDevice) {
             self.set_state(s);
         }
     }
@@ -376,6 +398,10 @@ impl AudioHub {
     /// Прогнать native-буфер через конвейер и разослать кадры подписчикам.
     /// Вызывается proc-потоком; в тестах — напрямую. Уважает mute (drop у источника).
     fn ingest(&self, interleaved: &[f32], src_rate: u32, channels: u16) {
+        self.ingest_generation(interleaved, src_rate, channels, None);
+    }
+
+    fn ingest_generation(&self, interleaved: &[f32], src_rate: u32, channels: u16, generation: Option<u64>) {
         if self.muted.load(Ordering::SeqCst) {
             return; // жёсткий mute: ничего не обрабатываем и не раздаём
         }
@@ -383,6 +409,7 @@ impl AudioHub {
             Ok(g) => g,
             Err(_) => return,
         };
+        if generation.is_some_and(|generation| generation != g.generation) { return; }
         // пересоздать конвейер при смене формата
         let need_new = match g.session.as_ref() {
             Some(s) => s.src_rate != src_rate || s.channels != channels,
@@ -426,7 +453,16 @@ impl AudioHub {
     pub fn tick(self: &Arc<Self>) {
         // под lifecycle: рестарт/стоп watchdog не разъезжается с subscribe/unsubscribe
         let _lc = self.lifecycle.lock().unwrap();
-        let running = self.inner.lock().map(|g| g.threads.is_some()).unwrap_or(false);
+        let (running, demand) = self.inner.lock().map(|g| (g.threads.is_some(), g.demand)).unwrap_or_default();
+        // A wake subscription may remain pending while the user answers TCC.
+        // Retry only while there is still demand; releasing PTT cancels it.
+        if !running && demand > 0 && !self.is_muted() {
+            match crate::stt::mic_permission::status() {
+                crate::stt::mic_permission::MicAuth::Authorized => self.ensure_running(),
+                crate::stt::mic_permission::MicAuth::Denied | crate::stt::mic_permission::MicAuth::Restricted => self.set_state(AudioState::Denied),
+                crate::stt::mic_permission::MicAuth::NotDetermined => self.set_state(AudioState::PermissionPending),
+            }
+        }
         if !running || self.is_muted() {
             self.last_frames.store(self.frames_seen.load(Ordering::Relaxed), Ordering::Relaxed);
             self.last_nonzero.store(self.nonzero_frames.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -496,6 +532,10 @@ impl AudioHub {
     }
 
     fn ensure_running(self: &Arc<Self>) {
+        if crate::native_smoke::enabled() {
+            self.set_state(AudioState::NoDevice);
+            return; // native UI scenarios must never record the host's microphone
+        }
         // Юнит-тесты не открывают живой микрофон: гоняем `ingest()` напрямую.
         if cfg!(test) {
             return;
@@ -518,14 +558,19 @@ impl AudioHub {
             crate::stt::mic_permission::MicAuth::NotDetermined => {
                 // ещё не спрашивали — показать системный диалог (нужен встроенный
                 // NSMicrophoneUsageDescription: .app или dev-бинарь с Info.plist).
-                // Старт НЕ блокируем: разрешит — кадры пойдут; нет — watchdog
-                // поймает тишину и поднимет mic_silent.
+                // Never open an AudioUnit before the answer: CoreAudio may block
+                // waiting for TCC. The watchdog retries active wake demand later.
+                drop(g);
+                self.set_state(AudioState::PermissionPending);
                 crate::stt::mic_permission::request();
+                return;
             }
             crate::stt::mic_permission::MicAuth::Authorized => {}
         }
 
         let stop = Arc::new(AtomicBool::new(false));
+        g.generation = g.generation.wrapping_add(1);
+        let generation = g.generation;
         let (native_tx, native_rx) = mpsc::sync_channel::<Vec<f32>>(NATIVE_CHAN_CAP);
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(u32, u16), String>>();
         let muted_flag = self.muted_handle();
@@ -544,16 +589,16 @@ impl AudioHub {
                 Ok(Ok(fmt)) => fmt,
                 Ok(Err(e)) => {
                     crate::log::line(&format!("[audio] старт захвата: {e}"));
-                    hub.set_state(AudioState::NoDevice);
+                    hub.set_generation_state(generation, AudioState::NoDevice);
                     return;
                 }
                 Err(_) => return,
             };
-            hub.refresh_state();
+            hub.set_generation_state(generation, if hub.is_muted() { AudioState::Muted } else { AudioState::Listening });
             while let Ok(buf) = native_rx.recv() {
                 // fail-safe: паника в DSP/ресемпле не убивает поток (кадр пропущен)
                 let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    hub.ingest(&buf, rate, channels)
+                    hub.ingest_generation(&buf, rate, channels, Some(generation))
                 }));
                 if res.is_err() {
                     crate::log::line("[audio] паника в ingest — кадр пропущен (демон жив)");
@@ -562,13 +607,20 @@ impl AudioHub {
         });
 
         g.threads = Some(HubThreads { stop, capture, proc });
+        self.set_state(AudioState::Starting);
         // подтверждение/ошибка старта приходит в proc-поток (ready_rx переехал туда);
         // индикатор состояния выставит proc-поток после получения формата.
+    }
+
+    fn set_generation_state(&self, generation: u64, state: AudioState) {
+        let g = self.inner.lock().unwrap();
+        if g.generation == generation { self.set_state(state); }
     }
 
     fn stop_capture(self: &Arc<Self>) {
         let threads = {
             let mut g = self.inner.lock().unwrap();
+            g.generation = g.generation.wrapping_add(1);
             g.session = None;
             g.threads.take()
         };
@@ -633,6 +685,10 @@ impl CaptureSession {
         while let Ok(frame) = self.rx.try_recv() {
             out.extend_from_slice(&frame);
         }
+        if out.is_empty() {
+            if let Some(error) = self.hub.state().capture_error() { return Err(error.into()); }
+            if self.hub.state() == AudioState::Starting { return Err("Микрофон ещё не начал передавать звук. Начните запись ещё раз.".into()); }
+        }
         Ok(out)
         // self выходит из области видимости здесь → Drop::drop → unsubscribe (ровно раз)
     }
@@ -679,6 +735,20 @@ impl Drop for WakeTap {
 /// Имена доступных устройств ввода (микрофонов) для селектора в настройках.
 /// Дедуп + сортировка; пустой список — если хост не отдал устройства. Совпадает по
 /// имени с тем, что ищет `capture_thread` (точный матч `device.name()`).
+#[cfg(target_os = "macos")]
+pub fn input_device_names() -> Vec<String> {
+    input_device_metadata::names(&input_device_metadata::CoreAudio)
+}
+
+// CPAL's macOS `input_devices()` and even `Device::name()` probe stream
+// configurations by opening AudioUnits. Merely showing Settings then requests
+// microphone access and can block indefinitely while the TCC dialog is open.
+// Enumerate HAL metadata only; actual capture remains in the capture worker.
+#[cfg(any(target_os = "macos", test))]
+#[path = "input_devices_macos.rs"]
+mod input_device_metadata;
+
+#[cfg(not(target_os = "macos"))]
 pub fn input_device_names() -> Vec<String> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
@@ -703,6 +773,14 @@ fn capture_thread(
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use cpal::SampleFormat;
 
+    let cancelled = || {
+        if !stop.load(Ordering::SeqCst) { return false; }
+        let _ = ready_tx.send(Err("Запуск микрофона отменён".into()));
+        true
+    };
+    // Native device/configuration calls may outlive a released PTT key. Check
+    // between each stage, so an obsolete capture cannot subsequently start.
+    if cancelled() { return; }
     let host = cpal::default_host();
     let dev = match device {
         None => host.default_input_device(),
@@ -726,6 +804,7 @@ fn capture_thread(
         let _ = ready_tx.send(Err("нет устройства ввода".into()));
         return;
     };
+    if cancelled() { return; }
     crate::log::line(&format!(
         "[audio] захват с устройства: {}",
         dev.name().unwrap_or_else(|_| "<неизвестно>".into())
@@ -741,17 +820,19 @@ fn capture_thread(
     let channels = config.channels();
     let fmt = config.sample_format();
     let stream_config: cpal::StreamConfig = config.into();
+    if cancelled() { return; }
     let err_fn = |e| crate::log::line(&format!("[audio] stream error: {e}"));
 
     // realtime callback: mute → drop у источника; иначе конверсия в f32 + send.
     macro_rules! build {
         ($t:ty, $conv:expr) => {{
             let m = muted.clone();
+            let stopped = stop.clone();
             let tx = native_tx.clone();
             dev.build_input_stream(
                 &stream_config,
                 move |data: &[$t], _: &cpal::InputCallbackInfo| {
-                    if m.load(Ordering::Relaxed) {
+                    if stopped.load(Ordering::SeqCst) || m.load(Ordering::Relaxed) {
                         return; // жёсткий mute у источника
                     }
                     let buf: Vec<f32> = data.iter().map($conv).collect();
@@ -779,6 +860,7 @@ fn capture_thread(
             return;
         }
     };
+    if cancelled() { return; }
     if let Err(e) = stream.play() {
         let _ = ready_tx.send(Err(format!("stream.play: {e}")));
         return;
@@ -817,6 +899,32 @@ mod tests {
         let frames = p.push_native(&input);
         assert_eq!(frames.len(), 3);
         assert!(frames.iter().all(|f| f.len() == FRAME_LEN));
+    }
+
+    #[test]
+    fn cancelled_native_capture_returns_before_touching_a_device() {
+        let (native_tx, native_rx) = mpsc::sync_channel(1);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        // Calls the actual capture function. Its first guard must prevent all
+        // CPAL/native discovery even in tests; no microphone is opened.
+        capture_thread(None, native_tx, ready_tx, Arc::new(AtomicBool::new(true)), Arc::new(AtomicBool::new(false)));
+        assert!(ready_rx.recv().unwrap().unwrap_err().contains("отменён"));
+        assert!(native_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn failed_native_handles_cannot_make_the_capture_look_listening() {
+        let hub = AudioHub::new(None, None);
+        hub.inner.lock().unwrap().threads = Some(HubThreads {
+            stop: Arc::new(AtomicBool::new(false)),
+            capture: std::thread::spawn(|| {}),
+            proc: std::thread::spawn(|| {}),
+        });
+        hub.set_state(AudioState::NoDevice);
+        hub.set_muted(true);
+        hub.set_muted(false);
+        assert_eq!(hub.state(), AudioState::NoDevice);
+        hub.dispose();
     }
 
     #[test]
@@ -950,6 +1058,36 @@ mod tests {
         assert_eq!(AudioState::Listening.as_str(), "listening");
         assert_eq!(AudioState::Muted.as_str(), "muted");
         assert_eq!(AudioState::from_u8(3), AudioState::Denied);
+        assert_eq!(AudioState::from_u8(5).as_str(), "permission-pending");
+        assert_eq!(AudioState::from_u8(6).as_str(), "starting");
+    }
+
+    #[test]
+    fn release_while_permission_pending_cancels_demand_and_returns_guidance() {
+        let hub = AudioHub::new(None, None);
+        let capture = hub.open_capture(false);
+        hub.set_state(AudioState::PermissionPending);
+        assert!(capture.finish().unwrap_err().contains("ещё раз"));
+        assert_eq!(hub.inner.lock().unwrap().demand, 0);
+        assert_eq!(hub.state(), AudioState::Idle);
+        hub.tick();
+        assert_eq!(hub.state(), AudioState::Idle);
+    }
+
+    #[test]
+    fn detached_old_capture_cannot_emit_frames_or_clobber_new_state() {
+        let hub = AudioHub::new(None, None);
+        let tap = hub.subscribe_wake();
+        let old_generation = hub.inner.lock().unwrap().generation;
+        hub.stop_capture();
+        let current_generation = hub.inner.lock().unwrap().generation;
+        hub.set_state(AudioState::Starting);
+        hub.set_generation_state(old_generation, AudioState::NoDevice);
+        assert_eq!(hub.state(), AudioState::Starting);
+        hub.ingest_generation(&vec![0.1; FRAME_LEN], DST_RATE, 1, Some(old_generation));
+        assert!(tap.rx.try_recv().is_err());
+        hub.ingest_generation(&vec![0.2; FRAME_LEN], DST_RATE, 1, Some(current_generation));
+        assert_eq!(tap.rx.try_recv().unwrap()[0], 0.2);
     }
 
     #[test]

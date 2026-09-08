@@ -1,0 +1,205 @@
+{
+  "ok": true,
+  "steps": [
+    {
+      "name": "Native onboarding opens at its intended size",
+      "ok": true,
+      "elapsedMs": 1181
+    }
+  ],
+  "errors": [],
+  "failure": null,
+  "elapsedMs": 1181,
+  "runtime": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+    "url": "tauri://localhost",
+    "viewport": {
+      "width": 1120,
+      "height": 780,
+      "dpr": 2
+    }
+  },
+  "evidence": {
+    "nativeWindows": {
+      "main": {
+        "visible": true,
+        "key": false,
+        "canBecomeKey": true,
+        "onActiveSpace": true,
+        "level": 0,
+        "collectionBehavior": 164,
+        "joinsAllSpaces": false,
+        "fullScreenAuxiliary": false,
+        "joinsAllApplications": false,
+        "ignoresCycle": false,
+        "frame": {
+          "x": 304,
+          "y": 228,
+          "width": 1120,
+          "height": 780
+        },
+        "screenWorkArea": {
+          "x": 0,
+          "y": 0,
+          "width": 1728,
+          "height": 1084
+        }
+      },
+      "toast": {
+        "visible": false,
+        "key": false,
+        "canBecomeKey": false,
+        "onActiveSpace": true,
+        "level": 1000,
+        "collectionBehavior": 262465,
+        "joinsAllSpaces": true,
+        "fullScreenAuxiliary": true,
+        "joinsAllApplications": true,
+        "ignoresCycle": true,
+        "frame": {
+          "x": 644,
+          "y": 723,
+          "width": 440,
+          "height": 120
+        },
+        "screenWorkArea": {
+          "x": 0,
+          "y": 0,
+          "width": 1728,
+          "height": 1084
+        }
+      },
+      "onboarding": {
+        "visible": true,
+        "key": true,
+        "canBecomeKey": true,
+        "onActiveSpace": true,
+        "level": 0,
+        "collectionBehavior": 0,
+        "joinsAllSpaces": false,
+        "fullScreenAuxiliary": false,
+        "joinsAllApplications": false,
+        "ignoresCycle": false,
+        "frame": {
+          "x": 584,
+          "y": 212,
+          "width": 560,
+          "height": 660
+        },
+        "screenWorkArea": {
+          "x": 0,
+          "y": 0,
+          "width": 1728,
+          "height": 1084
+        }
+      }
+    },
+    "onboardingStatus": {
+      "coreReady": false,
+      "agents": [
+        {
+          "id": "claude",
+          "label": "Claude Code",
+          "ready": false,
+          "available": true,
+          "required": true,
+          "detail": "События и lifecycle hooks",
+          "action": "Установить Claude Code или обновить PATH"
+        },
+        {
+          "id": "codex",
+          "label": "Codex",
+          "ready": false,
+          "available": true,
+          "required": true,
+          "detail": "Hooks без глобального bypass; Codex может запросить доверие",
+          "action": "Установить Codex или подтвердить доверие hooks"
+        }
+      ],
+      "transport": [
+        {
+          "id": "hook",
+          "label": "Hook transport",
+          "ready": false,
+          "available": true,
+          "required": true,
+          "detail": "Локальный бинарь событий",
+          "action": "Восстановить интеграцию"
+        },
+        {
+          "id": "tmux",
+          "label": "Terminal remote",
+          "ready": false,
+          "available": false,
+          "required": false,
+          "detail": "Опциональные команды в живую tmux-сессию",
+          "action": "Установить tmux и повторить настройку"
+        },
+        {
+          "id": "socket",
+          "label": "Runtime socket",
+          "ready": false,
+          "available": true,
+          "required": false,
+          "detail": "Запускается вместе с Jarvis"
+        }
+      ],
+      "capabilities": [
+        {
+          "id": "whisper-turbo",
+          "label": "Whisper",
+          "ready": false,
+          "available": true,
+          "required": false,
+          "detail": "Локальная диктовка, ~574 МБ"
+        },
+        {
+          "id": "qwen3-runtime",
+          "label": "Qwen3-ASR",
+          "ready": false,
+          "available": true,
+          "required": false,
+          "detail": "MLX runtime + проверенный комплект весов"
+        },
+        {
+          "id": "silero",
+          "label": "Silero voice",
+          "ready": false,
+          "available": true,
+          "required": false,
+          "detail": "Локальная озвучка; модель имеет non-commercial ограничения"
+        },
+        {
+          "id": "hey_jarvis",
+          "label": "Wake word",
+          "ready": false,
+          "available": true,
+          "required": false,
+          "detail": "Опциональная голосовая активация"
+        }
+      ],
+      "warnings": [
+        "Hook binary отсутствует — запусти восстановление интеграции.",
+        "Claude Code hooks требуют восстановления.",
+        "Codex hooks требуют восстановления или подтверждения доверия.",
+        "Удалённое управление терминалом ограничено; мониторинг hooks продолжит работать."
+      ],
+      "proxyConfigured": false,
+      "job": {
+        "id": 0,
+        "kind": "",
+        "state": "idle",
+        "tasks": [],
+        "steps": [],
+        "failures": []
+      }
+    },
+    "screenshots": [
+      {
+        "name": "native-onboarding-welcome",
+        "label": "onboarding",
+        "path": "/private/var/folders/sz/1yzw2zzs64x5kcr0c9hqhnr40000gq/T/jarvis-native-smoke-KmaoKB/native-onboarding-welcome.png"
+      }
+    ]
+  }
+}

@@ -7,6 +7,7 @@ on:
 
 jobs:
   macos:
+    needs: node
     runs-on: macos-14
     permissions:
       contents: write
@@ -30,6 +31,15 @@ jobs:
       - name: Install deps
         run: npm ci
 
+      - name: Download nodes built from this exact workflow commit
+        uses: actions/download-artifact@v4
+        with:
+          pattern: jarvis-node-*
+          path: node-artifacts
+
+      - name: Verify and prepare embedded Linux nodes
+        run: node scripts/prepare-node-bundle.mjs --from node-artifacts
+
       # whisper.cpp (whisper-rs, фича whisper-native) собирается через CMake.
       - name: Ensure cmake (whisper-native)
         run: cmake --version || brew install cmake
@@ -51,43 +61,55 @@ jobs:
           prerelease: false
           uploadUpdaterJson: true
 
-  # Узел удалённых агентов. Приложение ставит его на VPS само, и брать бинарь
-  # ему неоткуда: у человека с установленным .app нет ни исходников, ни
-  # линкера под Linux. Поэтому кладём готовые сборки в тот же релиз — панель
-  # качает их прямо на удалённую машину (см. install::remote::release_url).
-  node:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            packages: ""
-          - target: aarch64-unknown-linux-gnu
-            packages: gcc-aarch64-linux-gnu
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Cross-линкер
-        if: matrix.packages != ''
-        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
-
-      - name: Сборка узла
-        working-directory: src-tauri/node
-        env:
-          # Имя переменной задаёт cargo: TARGET в верхнем регистре, дефисы → _
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: |
-          cargo build --release --target ${{ matrix.target }}
-          mv target/${{ matrix.target }}/release/jarvis-node jarvis-node-${{ matrix.target }}
-
-      - name: В релиз
+      - name: Attach standalone Linux nodes to the same release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          files: src-tauri/node/jarvis-node-${{ matrix.target }}
+          fail_on_unmatched_files: true
+          files: |
+            src-tauri/node-binaries/jarvis-node-*
+            src-tauri/node-binaries/manifest.json
+
+  # Build both static Linux nodes first. The app embeds these exact sources,
+  # so onboarding works even before release assets become downloadable.
+  node:
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Native musl linker
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Cargo cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Build and fingerprint current node
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: >-
+          node scripts/prepare-node-bundle.mjs --native
+          --target ${{ matrix.target }}
+          --work "$RUNNER_TEMP/jarvis-node-cross"
+          --out "node-artifacts/${{ matrix.target }}"
+      - name: Preserve node and manifest for the macOS bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-node-${{ matrix.target }}
+          path: node-artifacts/${{ matrix.target }}/
+          if-no-files-found: error
+          retention-days: 7

@@ -250,6 +250,7 @@ mod tests {
             "sessions.list",
             "sessions.get",
             "metrics.query",
+            "analytics.query",
             "notifications.history",
             "tasks.get",
             "settings.get",
@@ -261,6 +262,8 @@ mod tests {
         // chats.read всегда untrusted (§6)
         assert_eq!(reg.get("chats.read").unwrap().meta.provenance, Provenance::Untrusted);
         assert_eq!(reg.get("metrics.query").unwrap().meta.class, RiskClass::Read);
+        assert_eq!(reg.get("analytics.query").unwrap().meta.class, RiskClass::Read);
+        assert_eq!(reg.get("analytics.query").unwrap().meta.provenance, Provenance::Untrusted);
         // агент видит read-инструменты в проекции tools/list
         let tools = reg.tools_json(&Consumer::agent().grant);
         let names: Vec<&str> =

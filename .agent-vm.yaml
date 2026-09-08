@@ -1,0 +1,9 @@
+# Jarvis Agent VM project runtime
+modules:
+  - node
+  - claude
+  - codex
+resources:
+  cpus: 6
+  memory: 16GiB
+  disk: 120GiB

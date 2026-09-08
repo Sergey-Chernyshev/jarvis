@@ -6,7 +6,8 @@
 
 use serde_json::{json, Value};
 use std::process::Stdio;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
 
@@ -18,32 +19,42 @@ const CACHE: Duration = Duration::from_secs(5 * 60);
 /// запрос не должен — телефон на том конце ждёт живого ответа.
 const RUN_TIMEOUT: Duration = Duration::from_secs(90);
 
-static CACHED: Mutex<Option<(Instant, String)>> = Mutex::new(None);
+static CACHED: OnceLock<Mutex<HashMap<String, (Instant, String)>>> = OnceLock::new();
 
 /// Свежие лимиты аккаунта: текст `claude /usage` как есть.
-pub async fn usage(fresh: bool) -> Value {
+pub async fn usage(fresh: bool) -> Value { usage_for(fresh, None).await }
+
+pub async fn usage_for(fresh: bool, source: Option<&super::sources::Source>) -> Value {
+    if source.is_some_and(|source| source.agent != "claude") {
+        return json!({"text":"","error":"Официальная квота Codex через /usage недоступна; расход доступен из транскриптов","sourceId":source.map(|source| &source.id)});
+    }
+    let key = source.map(|source| source.id.clone()).unwrap_or_else(|| "default-claude".into());
+    let cache = CACHED.get_or_init(Default::default);
     if !fresh {
-        if let Some((at, text)) = CACHED.lock().unwrap().clone() {
+        if let Some((at, text)) = cache.lock().unwrap().get(&key).cloned() {
             if at.elapsed() < CACHE {
                 return json!({ "text": text, "cached": true, "ageMs": at.elapsed().as_millis() as u64 });
             }
         }
     }
-    match run().await {
+    match run(source).await {
         Ok(text) => {
-            *CACHED.lock().unwrap() = Some((Instant::now(), text.clone()));
+            cache.lock().unwrap().insert(key, (Instant::now(), text.clone()));
             json!({ "text": text, "cached": false, "ageMs": 0 })
         }
         Err(e) => json!({ "text": "", "error": e }),
     }
 }
 
-async fn run() -> Result<String, String> {
+async fn run(source: Option<&super::sources::Source>) -> Result<String, String> {
     // Через логин-шелл с дополненным PATH — по той же причине, что и запуск
     // сессии: под systemd агент иначе просто не находится.
-    let script = super::tmux::with_agent_path("claude -p --no-session-persistence /usage");
+    let command = if let Some(source) = source {
+        format!("export CLAUDE_CONFIG_DIR={}\nclaude -p --no-session-persistence /usage",super::tmux::sh_quote(&source.home.to_string_lossy()))
+    } else { "claude -p --no-session-persistence /usage".into() };
+    let script = super::tmux::with_agent_path(&command);
     let mut cmd = tokio::process::Command::new("bash");
-    cmd.args(["-lc", &script])
+    cmd.env("JARVIS_IGNORE", "1").args(["-lc", &script])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -53,7 +64,7 @@ async fn run() -> Result<String, String> {
         .map_err(|_| "агент не ответил за 90 с".to_string())?
         .map_err(|e| format!("не запустился: {e}"))?;
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if text.is_empty() {
+    if !out.status.success() || text.is_empty() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         return Err(if err.is_empty() { "пустой ответ".into() } else { err });
     }

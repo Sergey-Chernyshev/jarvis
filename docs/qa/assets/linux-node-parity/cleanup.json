@@ -1,0 +1,11 @@
+{
+  "vm": "t-bank",
+  "initialStatus": "Stopped",
+  "finalStatus": "Stopped",
+  "qaUnitsStopped": true,
+  "analyticsTunnelCancelled": true,
+  "foregroundTunnelTerminated": true,
+  "workingProviderAccountsChanged": false,
+  "workingShellProfilesChanged": false,
+  "userRemoteSettingsChanged": false
+}

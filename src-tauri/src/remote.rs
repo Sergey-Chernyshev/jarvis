@@ -45,6 +45,10 @@ const MAX_BACKOFF_SECS: u64 = 30;
 /// туннель не поднимался НИКОГДА: рукопожатие падало, супервизор ронял ssh и
 /// уходил в паузу, круг за кругом. Теперь ждём событие, а не угадываем тайминг.
 const TUNNEL_READY_SECS: u64 = 15;
+// A valid Teleport certificate does not make the proxy/node handshake instant.
+// Observed tsh forwards take ~29s; killing them at 15s prevents every retry
+// from ever reaching readiness. An exited tsh still fails immediately.
+const TELEPORT_READY_SECS: u64 = 45;
 /// Минимальная пауза между кругами поллера. Узел без long-poll (или отдавший
 /// пустую страницу мгновенно) не должен превращать поллер в busy-loop.
 const POLL_FLOOR_MS: u64 = 1000;
@@ -59,6 +63,21 @@ pub struct RemoteCfg {
     pub name: String,
     pub ssh_host: String,
     pub jarvis_dir: String,
+    pub ssh_config_file: Option<String>,
+    pub transport: String,
+    pub teleport_proxy: Option<String>,
+    pub teleport_cluster: Option<String>,
+    pub node_tcp_port: Option<u16>,
+    pub run_as_user: Option<String>,
+}
+
+impl RemoteCfg {
+    pub fn connection(&self) -> crate::install::remote::Connection {
+        crate::install::remote::Connection { ssh_host: self.ssh_host.clone(),
+            ssh_config_file: self.ssh_config_file.clone(), transport: self.transport.clone(),
+            teleport_proxy: self.teleport_proxy.clone(), teleport_cluster: self.teleport_cluster.clone(), node_tcp_port: self.node_tcp_port,
+            run_as_user: self.run_as_user.clone() }
+    }
 }
 
 /// Разобрать ключ `remotes` настроек.
@@ -79,7 +98,7 @@ pub fn parse_remotes(settings: &Value) -> Vec<RemoteCfg> {
         cfg.name = cfg.name.trim().to_string();
         cfg.ssh_host = cfg.ssh_host.trim().to_string();
         cfg.jarvis_dir = cfg.jarvis_dir.trim().trim_end_matches('/').to_string();
-        if cfg.name.is_empty() || cfg.ssh_host.is_empty() {
+        if cfg.name.is_empty() || cfg.connection().validate().is_err() {
             continue; // без имени или хоста узел неадресуем
         }
         if cfg.jarvis_dir.is_empty() {
@@ -162,22 +181,9 @@ fn free_port() -> Option<u16> {
 /// каталог удалённой машины локально неизвестен — спрашиваем его один раз у той
 /// стороны. Дешевле, чем требовать абсолютный путь и молча ломаться, когда
 /// человек напишет привычное `~/.jarvis`.
-fn resolve_home(ssh_host: &str, dir: &str) -> Option<String> {
+fn resolve_home(connection: &crate::install::remote::Connection, dir: &str) -> Option<String> {
     let rest = dir.strip_prefix('~')?.trim_start_matches('/');
-    let out = Command::new("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            ssh_host,
-            // Метка, а не голый $HOME: чужой ~/.bashrc любит печатать в stdout
-            // (баннер, приветствие, вывод чужой утилиты). Без метки этот мусор
-            // становился «домашним каталогом», проверка на «/» его отбрасывала
-            // — и туннель молча уходил в цикл переподъёма без единого слова
-            // о причине.
-            "printf 'JARVIS_HOME=%s\\n' \"$HOME\"",
-        ])
+    let out = connection.command_with_script("printf 'JARVIS_HOME=%s\\n' \"$HOME\"").ok()?
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -220,6 +226,7 @@ pub enum TunnelState {
 /// подъёме (старый мог остаться занятым умирающим соединением).
 pub struct Tunnel {
     ssh_host: String,
+    connection: crate::install::remote::Connection,
     /// Каталог Jarvis на той стороне. `~` разворачивается лениво, при первом
     /// удачном подъёме — до этого момента удалённого $HOME мы не знаем.
     dir: Mutex<String>,
@@ -238,10 +245,11 @@ impl Tunnel {
     pub fn new(cfg: &RemoteCfg) -> Self {
         Tunnel {
             ssh_host: cfg.ssh_host.clone(),
+            connection: cfg.connection(),
             dir: Mutex::new(cfg.jarvis_dir.clone()),
             port: AtomicU16::new(0),
             child: Mutex::new(None),
-            active: AtomicBool::new(false),
+            active: AtomicBool::new(true),
             stderr_tail: Arc::new(Mutex::new(String::new())),
         }
     }
@@ -306,7 +314,7 @@ impl Tunnel {
         if !cur.starts_with('~') {
             return cur;
         }
-        match resolve_home(&self.ssh_host, &cur) {
+        match resolve_home(&self.connection, &cur) {
             Some(abs) => {
                 *self.dir.lock().unwrap() = abs.clone();
                 abs
@@ -324,7 +332,11 @@ impl Tunnel {
     }
 
     pub fn ensure_started(&self) -> TunnelState {
-        self.active.store(true, Ordering::SeqCst);
+        // A queued spawn_blocking may begin after its poll task was aborted.
+        // Only a new Tunnel object can re-arm an explicitly stopped node.
+        if !self.active.load(Ordering::SeqCst) {
+            return TunnelState::Failed;
+        }
         if self.is_up() {
             return TunnelState::Alive;
         }
@@ -351,11 +363,13 @@ impl Tunnel {
             self.note("не нашёл свободный порт на этой машине");
             return TunnelState::Failed;
         };
-        let args = ssh_args(&self.ssh_host, port, &node_sock(&dir));
+        let mut command = match self.connection.tunnel(port, &node_sock(&dir)) {
+            Ok(command) => command,
+            Err(error) => { self.note(&error); return TunnelState::Failed; }
+        };
 
         let mut g = self.child.lock().unwrap();
-        match Command::new("ssh")
-            .args(&args)
+        match command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             // stderr → лог: «Permission denied», «no such file» и прочие причины
@@ -475,6 +489,9 @@ pub struct Hello {
     pub cursor: u64,
     pub buffered: u64,
     pub capacity: u64,
+    pub protocol: u32,
+    pub capabilities: Vec<String>,
+    pub sources: Vec<Value>,
 }
 
 /// Событие из буфера узла: конверт хука + метки узла.
@@ -494,6 +511,8 @@ pub struct Recorded {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct EventsPage {
+    /// Identifies one node process; numeric cursors restart with the process.
+    pub instance: String,
     /// Курсор ПОСЛЕ последнего события страницы — с него идёт следующий запрос.
     pub cursor: u64,
     /// Кольцевой буфер узла переполнился: часть событий потеряна безвозвратно.
@@ -623,11 +642,9 @@ impl NodeClient {
             .send()
             .await
             .map_err(|e| format!("узел недоступен: {e}"))?;
-        if resp.status().is_success() {
-            Ok(())
-        } else {
-            Err(format!("узел rc={} на {path}", resp.status()))
-        }
+        let status = resp.status();
+        let reply: Value = resp.json().await.unwrap_or(Value::Null);
+        parse_command_reply(path, status.as_u16(), &reply)
     }
 
     /// Версия узла и его uptime — рукопожатие после подъёма туннеля.
@@ -637,8 +654,8 @@ impl NodeClient {
 
     /// События с курсора. Запрос долгий: узел держит его до 25с, если событий
     /// нет — так поллер не опрашивает VPS вхолостую каждую секунду.
-    pub async fn events(&self, since: u64) -> Result<EventsPage, String> {
-        self.get_json(&self.poll, "/events", &[("since", since.to_string())])
+    pub async fn events(&self, since: u64, instance: &str) -> Result<EventsPage, String> {
+        self.get_json(&self.poll, "/events", &[("since", since.to_string()), ("instance", instance.to_string())])
             .await
     }
 
@@ -719,6 +736,64 @@ impl NodeClient {
             .await
     }
 
+    /// Visible terminal text. Older nodes return a plain-text health response
+    /// for unknown GET paths, so require the exact screen response shape.
+    pub async fn screen(&self, pane: &str) -> Result<String, String> {
+        let reply: Value = self.get_json(&self.http, "/screen", &[("pane", pane.to_string())]).await?;
+        parse_screen_reply(pane, &reply)
+    }
+
+    /// Streaming terminal endpoints require structured acknowledgements. Old
+    /// nodes accept unknown POST paths as hooks with HTTP 204; that must never
+    /// look like successful input or an empty terminal poll.
+    pub async fn terminal_action(&self, action: &str, payload: &Value) -> Value {
+        if !matches!(action, "open" | "poll" | "input" | "resize" | "close" | "history") {
+            return serde_json::json!({"ok": false, "error": "Неизвестное действие терминала"});
+        }
+        let client = if action == "history" || (action == "open" && payload["historyLines"].as_u64().is_some_and(|n| n > 2000))
+            || (action == "input" && payload["paste"] == true) { &self.poll } else { &self.http };
+        let mut response = match client.post(format!("{}/terminal/{action}", self.base)).json(payload).send().await {
+            Ok(response) => response,
+            Err(error) => return serde_json::json!({"ok": false, "error": format!("Узел недоступен: {error}")}),
+        };
+        let status = response.status().as_u16();
+        let mut body = Vec::new();
+        // Byte arrays expand in JSON; allow a bounded history/initial snapshot
+        // while refusing an unbounded or malformed response from a peer.
+        const MAX_REPLY: usize = 20 * 1024 * 1024;
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) if body.len().saturating_add(chunk.len()) <= MAX_REPLY => body.extend_from_slice(&chunk),
+                Ok(Some(_)) => return serde_json::json!({"ok": false, "error": "Ответ терминала слишком большой"}),
+                Ok(None) => break,
+                Err(error) => return serde_json::json!({"ok": false, "error": format!("Чтение терминала: {error}")}),
+            }
+        }
+        let value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        parse_terminal_reply(action, status, &value)
+    }
+
+    pub async fn sources(&self) -> Result<Value, String> {
+        let value: Value = self.get_json(&self.http, "/sources", &[]).await?;
+        value.get("sources").filter(|v| v.is_array()).cloned()
+            .ok_or_else(|| "Узел не поддерживает источники агентов — обнови jarvis-node".into())
+    }
+
+    pub async fn repair_source(&self, source_id: &str) -> Result<(), String> {
+        let response = Self::client(Duration::from_secs(100))?.post(format!("{}/sources/repair",self.base))
+            .json(&serde_json::json!({"sourceId":source_id})).send().await.map_err(|e| format!("Настройка хуков: {e}"))?;
+        let status = response.status().as_u16();
+        let value: Value = response.json().await.map_err(|e| format!("Ответ настройки хуков: {e}"))?;
+        parse_command_reply("/sources/repair",status,&value)
+    }
+
+    /// Bounded metadata only. Content is fetched through the existing checked /file endpoint.
+    pub async fn sessions(&self) -> Result<Value, String> {
+        let value: Value = self.get_json(&self.http, "/sessions", &[]).await?;
+        if value.get("sessions").is_some_and(Value::is_array) { Ok(value) }
+        else { Err("Узел не поддерживает каталог сессий — обнови jarvis-node".into()) }
+    }
+
     /// Оглавление проектов машины: где там работали. Узел отдаёт только
     /// найденное на диске — что из этого показать, решает панель.
     pub async fn projects(&self) -> Result<Value, String> {
@@ -736,10 +811,13 @@ impl NodeClient {
     /// То же, но с паной в ответе. Связке она нужна: через пану уходят задача,
     /// сообщение о конфликте и прерывание — без неё рука неуправляема.
     pub async fn launch_pane(&self, cwd: &str, cmd: &str, name: &str) -> Result<(String, String), String> {
+        self.launch_pane_source(cwd, cmd, name, None).await
+    }
+    pub async fn launch_pane_source(&self, cwd: &str, cmd: &str, name: &str, source_id: Option<&str>) -> Result<(String, String), String> {
         let resp = self
             .http
             .post(format!("{}/launch", self.base))
-            .json(&serde_json::json!({ "cwd": cwd, "cmd": cmd, "name": name }))
+            .json(&serde_json::json!({ "cwd": cwd, "cmd": cmd, "name": name, "sourceId": source_id }))
             .send()
             .await
             .map_err(|e| format!("узел недоступен: {e}"))?;
@@ -761,9 +839,10 @@ impl NodeClient {
     ///
     /// Нужен, когда локально авторизации нет: человек работает на узле, и
     /// правда о лимитах живёт там же. Узел кэширует ответ на пять минут.
-    pub async fn usage_text(&self, fresh: bool) -> Result<String, String> {
+    pub async fn usage_text(&self, fresh: bool) -> Result<String, String> { self.usage_text_for(fresh, None).await }
+    pub async fn usage_text_for(&self, fresh: bool, source_id: Option<&str>) -> Result<String, String> {
         let v: serde_json::Value = self
-            .get_json(&self.http, "/usage", &[("fresh", if fresh { "1" } else { "0" }.to_string())])
+            .get_json(&self.http, "/usage", &[("fresh", if fresh { "1" } else { "0" }.to_string()), ("sourceId", source_id.unwrap_or_default().to_string())])
             .await?;
         let text = v.get("text").and_then(serde_json::Value::as_str).unwrap_or_default();
         if text.trim().is_empty() {
@@ -808,6 +887,142 @@ impl NodeClient {
     /// Живые паны узла — по ним видно, что удалённая сессия ещё жива.
     pub async fn panes(&self) -> Result<PanesReply, String> {
         self.get_json(&self.http, "/panes", &[]).await
+    }
+}
+
+fn parse_screen_reply(pane: &str, reply: &Value) -> Result<String, String> {
+    if let Some(error) = reply.get("error").and_then(Value::as_str).filter(|error| !error.is_empty()) {
+        return Err(error.to_string());
+    }
+    if reply.get("pane").and_then(Value::as_str) != Some(pane) {
+        return Err("Узел вернул экран другой паны — обнови jarvis-node".into());
+    }
+    reply.get("screen").and_then(Value::as_str).map(str::to_string)
+        .ok_or_else(|| "Узел не вернул экран терминала — обнови jarvis-node".into())
+}
+
+fn terminal_needs_update() -> Value {
+    serde_json::json!({"ok": false, "needsUpdate": true, "error": "Узел не поддерживает живой терминал — обнови jarvis-node"})
+}
+
+fn parse_terminal_reply(action: &str, status: u16, reply: &Value) -> Value {
+    if matches!(status, 204 | 404 | 405) { return terminal_needs_update(); }
+    if !(200..300).contains(&status) {
+        return serde_json::json!({"ok": false, "error": reply["error"].as_str().map(str::to_string)
+            .unwrap_or_else(|| format!("Узел не подтвердил терминал (HTTP {status})"))});
+    }
+    match reply["ok"].as_bool() {
+        Some(false) => return reply.clone(),
+        Some(true) => {},
+        None => return terminal_needs_update(),
+    }
+    let bytes = |value: &Value| value.as_array().is_some_and(|array| array.iter().all(|v| v.as_u64().is_some_and(|b| b <= 255)));
+    let valid = match action {
+        "open" => reply["streamId"].as_str().is_some_and(|id| !id.is_empty() && id.len() <= 160)
+            && reply["cursor"].is_u64() && reply["cols"].is_u64() && reply["rows"].is_u64()
+            && bytes(&reply["initial"]) && reply["historyTruncated"].is_boolean(),
+        "poll" => reply["cursor"].is_u64() && reply["closed"].is_boolean() && reply["gap"].is_boolean()
+            && reply["chunks"].as_array().is_some_and(|chunks| chunks.iter().all(|chunk| chunk["seq"].is_u64() && bytes(&chunk["data"]))),
+        "history" => reply["text"].is_string() && reply["truncated"].is_boolean(),
+        "input" | "resize" | "close" => true,
+        _ => false,
+    };
+    if valid { reply.clone() } else { terminal_needs_update() }
+}
+
+fn parse_command_reply(path: &str, status: u16, reply: &Value) -> Result<(), String> {
+    // An old node records unknown POSTs as hooks and returns 204. That is
+    // delivery to its event buffer, not acknowledgement of terminal input.
+    if status == 204 {
+        return Err(format!("Узел не подтвердил {path} — обнови jarvis-node"));
+    }
+    if let Some(error) = reply.get("error").and_then(Value::as_str).filter(|error| !error.is_empty()) {
+        return Err(error.to_string());
+    }
+    if (200..300).contains(&status) && reply.get("ok").and_then(Value::as_bool) == Some(true) {
+        Ok(())
+    } else {
+        Err(format!("Узел не подтвердил {path} (HTTP {status})"))
+    }
+}
+
+#[cfg(test)]
+mod terminal_screen_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn terminal_open_checks_capability_before_posting_to_a_legacy_node() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0; 1024];
+                let count = socket.read(&mut chunk).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+                if request.windows(4).any(|part| part == b"\r\n\r\n") { break; }
+                assert!(request.len() <= 8192);
+            }
+            let body = r#"{"version":"0.3.3","capabilities":["screen"]}"#;
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap().lines().next().unwrap().to_string()
+        });
+        let node = Node::new(RemoteCfg { name: "legacy-terminal-test".into(), ssh_host: "example.invalid".into(), ..Default::default() });
+        node.tunnel.port.store(port, Ordering::SeqCst);
+        let reply = node.terminal_action("open", &json!({"pane":"%4"})).await;
+        assert_eq!(reply["needsUpdate"], true);
+        assert_eq!(server.await.unwrap(), "GET /hello HTTP/1.1");
+    }
+
+    #[test]
+    fn stream_protocol_rejects_old_node_fallbacks_and_malformed_successes() {
+        for action in ["open", "poll", "input", "resize", "close", "history"] {
+            for (status, reply) in [(204, Value::Null), (200, json!({})), (404, json!({"ok":true}))] {
+                assert_eq!(parse_terminal_reply(action, status, &reply)["needsUpdate"], true);
+            }
+        }
+        let open = json!({"ok":true,"streamId":"node-1","cursor":0,"cols":80,"rows":24,"initial":[27,91,72],"historyTruncated":false});
+        assert_eq!(parse_terminal_reply("open", 200, &open), open);
+        let mut invalid = open.clone(); invalid["initial"] = json!([256]);
+        assert_eq!(parse_terminal_reply("open", 200, &invalid)["needsUpdate"], true);
+        let poll = json!({"ok":true,"cursor":1,"chunks":[{"seq":1,"data":[0,255]}],"closed":false,"gap":false});
+        assert_eq!(parse_terminal_reply("poll", 200, &poll), poll);
+        assert_eq!(parse_terminal_reply("poll", 200, &json!({"ok":true}))["ok"], false);
+        assert_eq!(parse_terminal_reply("history", 200, &json!({"ok":true,"text":"full output","truncated":false}))["ok"], true);
+        assert_eq!(parse_terminal_reply("input", 200, &json!({"ok":true}))["ok"], true);
+        let failure = json!({"ok":false,"closed":true,"error":"stream expired"});
+        assert_eq!(parse_terminal_reply("poll", 200, &failure), failure);
+        assert_eq!(parse_terminal_reply("input", 502, &json!({"ok":true}))["ok"], false);
+    }
+
+    #[test]
+    fn terminal_input_requires_real_acknowledgement_not_legacy_hook_acceptance() {
+        assert!(parse_command_reply("/keys", 200, &json!({"ok":true})).is_ok());
+        for (status, reply) in [(204, Value::Null), (200, json!({})), (200, json!({"ok":false})), (502, json!({"ok":true}))] {
+            assert!(parse_command_reply("/keys", status, &reply).is_err());
+        }
+        assert_eq!(parse_command_reply("/reply", 502, &json!({"error":"can't find pane: %4"})).unwrap_err(), "can't find pane: %4");
+    }
+
+    #[test]
+    fn terminal_screen_preserves_unicode_and_accepts_an_empty_live_screen() {
+        for screen in ["", "Привет 👋\n❯ готов"] {
+            assert_eq!(parse_screen_reply("%7", &json!({"pane":"%7","screen":screen})).unwrap(), screen);
+        }
+    }
+
+    #[test]
+    fn terminal_screen_cannot_masquerade_as_healthy_when_node_reports_an_error() {
+        let missing = json!({"pane":"%7","screen":"","error":"can't find pane: %7"});
+        assert_eq!(parse_screen_reply("%7", &missing).unwrap_err(), "can't find pane: %7");
+        for reply in [json!({}), json!("jarvis-node ok"), json!({"pane":"%8","screen":"other session"}), json!({"pane":"%7"})] {
+            assert!(parse_screen_reply("%7", &reply).is_err());
+        }
     }
 }
 
@@ -864,15 +1079,31 @@ pub fn stamp(remote: &str, mut envelope: Value) -> Value {
 /// молча съело бы всё, что произошло после рестарта узла.
 pub fn fold_page(remote: &str, prev: u64, page: EventsPage) -> Batch {
     let rewound = page.cursor < prev;
+    let mut records = page.events;
+    // Reconnect может повторить хвост страницы. Сначала упорядочиваем его
+    // по серверному курсору, затем убираем уже принятые записи и дубли.
+    // При рестарте узла прежние курсоры больше не сравнимы — принимаем новый
+    // диапазон и сообщаем gap для восстановления состояния.
+    records.sort_by_key(|record| record.cursor);
+    records.dedup_by_key(|record| record.cursor);
+    // Ring::since uses [since, next): cursor zero is the first real event.
+    records.retain(|record| record.cursor < page.cursor
+        && (rewound || record.cursor >= prev)
+        && !record.envelope.is_null());
     Batch {
         remote: remote.to_string(),
         // конверт достаём из обёртки узла: `at` и покусочный курсор нужны были
         // ленте, а редьюсеру демона — ровно тот же конверт, что от локального хука
-        events: page
-            .events
+        events: records
             .into_iter()
-            .filter(|r| !r.envelope.is_null())
-            .map(|r| stamp(remote, r.envelope))
+            .map(|r| {
+                let mut envelope = stamp(remote, r.envelope);
+                if let Some(obj) = envelope.as_object_mut() {
+                    obj.insert("remoteAt".into(), Value::from(r.at));
+                    obj.insert("remoteCursor".into(), Value::from(r.cursor));
+                }
+                envelope
+            })
             .collect(),
         // курсор не откатываем назад без причины: страница без событий и с
         // нулевым cursor не должна заставлять перечитывать буфер заново
@@ -911,22 +1142,45 @@ pub fn cursor_path(name: &str) -> PathBuf {
 
 /// Курсор с диска. Нет файла или он битый → 0: узел отдаст всё, что есть в
 /// буфере, и сам объявит gap, если начало уже вытеснено.
-pub fn read_cursor(name: &str) -> u64 {
-    std::fs::read_to_string(cursor_path(name))
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(0)
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct SavedCursor {
+    cursor: u64,
+    instance: String,
+}
+
+fn parse_cursor(text: &str) -> SavedCursor {
+    serde_json::from_str(text).unwrap_or_else(|_| SavedCursor {
+        cursor: text.trim().parse().unwrap_or(0),
+        instance: String::new(),
+    })
+}
+
+fn read_cursor(name: &str) -> SavedCursor {
+    std::fs::read_to_string(cursor_path(name)).map(|s| parse_cursor(&s)).unwrap_or_default()
 }
 
 /// Курсор на диск: перезапуск ноута не должен ни перечитывать буфер заново
 /// (дубли событий), ни терять хвост. Права 0600 — как у всего в каталоге
 /// Jarvis, хотя секретов в файле нет.
-pub fn write_cursor(name: &str, cursor: u64) {
+fn write_cursor(name: &str, cursor: u64, instance: &str) {
     let path = cursor_path(name);
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = crate::stt::transcripts::write_private_atomic(&path, cursor.to_string().as_bytes());
+    let saved = serde_json::json!({"cursor": cursor, "instance": instance}).to_string();
+    let _ = crate::stt::transcripts::write_private_atomic(&path, saved.as_bytes());
+}
+
+fn align_instance(previous: &str, since: u64, page: &mut EventsPage) {
+    if !page.instance.is_empty() && page.instance != previous
+        && (!previous.is_empty() || since > 0) {
+        // Re-fetch this incarnation from zero after telling the reducer to
+        // refresh transcripts. Filtering the page at an old offset loses data.
+        page.cursor = 0;
+        page.events.clear();
+        page.gap = true;
+    }
 }
 
 /// Состояние узла для панели/диагностики. Форма — та, что читает вкладка
@@ -938,6 +1192,15 @@ pub struct RemoteStatus {
     pub name: String,
     pub ssh_host: String,
     pub jarvis_dir: String,
+    pub ssh_config_file: Option<String>,
+    pub transport: String,
+    pub teleport_proxy: Option<String>,
+    pub teleport_cluster: Option<String>,
+    pub node_tcp_port: Option<u16>,
+    pub run_as_user: Option<String>,
+    pub protocol: u32,
+    pub capabilities: Vec<String>,
+    pub sources: Vec<Value>,
     /// Последний круг поллера удался (туннель жив и узел ответил).
     pub connected: bool,
     /// Локальный порт туннеля; 0 — туннеля нет.
@@ -959,6 +1222,7 @@ pub struct Node {
     pub cfg: RemoteCfg,
     pub tunnel: Tunnel,
     cursor: AtomicU64,
+    instance: Mutex<String>,
     /// Клиент кэшируется по порту: пересобирать пул на каждый запрос незачем,
     /// но при переподъёме туннеля порт меняется и клиент устаревает.
     client: Mutex<Option<(u16, Arc<NodeClient>)>>,
@@ -968,6 +1232,7 @@ pub struct Node {
     last_error: Mutex<String>,
     /// Версия узла с последнего рукопожатия.
     version: Mutex<String>,
+    hello: Mutex<Hello>,
 }
 
 impl Node {
@@ -975,12 +1240,14 @@ impl Node {
         let cursor = read_cursor(&cfg.name);
         Node {
             tunnel: Tunnel::new(&cfg),
-            cursor: AtomicU64::new(cursor),
+            cursor: AtomicU64::new(cursor.cursor),
+            instance: Mutex::new(cursor.instance),
             client: Mutex::new(None),
             online: AtomicBool::new(false),
             fails: AtomicU64::new(0),
             last_error: Mutex::new(String::new()),
             version: Mutex::new(String::new()),
+            hello: Mutex::new(Hello::default()),
             cfg,
         }
     }
@@ -1006,6 +1273,28 @@ impl Node {
         Ok(c)
     }
 
+    pub async fn terminal_action(&self, action: &str, payload: &Value) -> Value {
+        let client = match self.client() {
+            Ok(client) => client,
+            Err(error) => return serde_json::json!({"ok": false, "error": error}),
+        };
+        if action == "open" {
+            // Refresh after an in-place node update; cached version strings do
+            // not prove that a particular terminal protocol is implemented.
+            match client.hello().await {
+                Ok(hello) => {
+                    let supported = hello.capabilities.iter().any(|cap| cap == "terminal.stream.v1");
+                    *self.hello.lock().unwrap_or_else(|e| e.into_inner()) = hello;
+                    if !supported { return terminal_needs_update(); }
+                }
+                Err(error) => return serde_json::json!({"ok": false, "error": error}),
+            }
+        } else if !self.hello.lock().unwrap_or_else(|e| e.into_inner()).capabilities.iter().any(|cap| cap == "terminal.stream.v1") {
+            return terminal_needs_update();
+        }
+        client.terminal_action(action, payload).await
+    }
+
     pub fn status(&self) -> RemoteStatus {
         // Версию берём ОДИН раз в переменную — и только потом собираем ответ.
         //
@@ -1017,11 +1306,22 @@ impl Node {
         // машин. Отсюда и белый экран «Проектов», и вечные скелетоны в
         // настройках удалённых.
         let version = self.version.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let outdated = !version.is_empty() && version != env!("CARGO_PKG_VERSION");
+        let hello = self.hello.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let outdated = !version.is_empty()
+            && (version != env!("CARGO_PKG_VERSION") || hello.protocol < 2);
         RemoteStatus {
             name: self.cfg.name.clone(),
             ssh_host: self.cfg.ssh_host.clone(),
             jarvis_dir: self.cfg.jarvis_dir.clone(),
+            ssh_config_file: self.cfg.ssh_config_file.clone(),
+            transport: self.cfg.transport.clone(),
+            teleport_proxy: self.cfg.teleport_proxy.clone(),
+            teleport_cluster: self.cfg.teleport_cluster.clone(),
+            node_tcp_port: self.cfg.node_tcp_port,
+            run_as_user: self.cfg.run_as_user.clone(),
+            protocol: hello.protocol,
+            capabilities: hello.capabilities,
+            sources: hello.sources,
             connected: self.online.load(Ordering::SeqCst),
             port: self.tunnel.port(),
             cursor: self.cursor(),
@@ -1041,7 +1341,8 @@ impl Node {
     /// что узел ставился другой сборкой.
     pub fn outdated(&self) -> bool {
         let v = self.version.lock().unwrap_or_else(|e| e.into_inner());
-        !v.is_empty() && *v != env!("CARGO_PKG_VERSION")
+        !v.is_empty() && (*v != env!("CARGO_PKG_VERSION")
+            || self.hello.lock().unwrap_or_else(|e| e.into_inner()).protocol < 2)
     }
 
     /// Запомнить версию с рукопожатия.
@@ -1085,9 +1386,14 @@ impl Node {
 
     /// Продвинуть курсор и сохранить его. Пишем только на изменении: холостые
     /// long-poll-круги не должны трогать диск.
-    fn advance(&self, cursor: u64) {
-        if self.cursor.swap(cursor, Ordering::SeqCst) != cursor {
-            write_cursor(&self.cfg.name, cursor);
+    fn advance(&self, cursor: u64, incoming_instance: &str) {
+        let mut instance = self.instance.lock().unwrap();
+        let instance_changed = !incoming_instance.is_empty() && *instance != incoming_instance;
+        if instance_changed {
+            *instance = incoming_instance.to_string();
+        }
+        if self.cursor.swap(cursor, Ordering::SeqCst) != cursor || instance_changed {
+            write_cursor(&self.cfg.name, cursor, &instance);
         }
     }
 }
@@ -1098,6 +1404,7 @@ impl Node {
 /// в сон, сеть меняется. Всё это лечится ожиданием с backoff, а не остановкой
 /// поллера — иначе «проснулся, а событий нет» стало бы нормой.
 async fn poll_loop(node: Arc<Node>, sink: Sink) {
+    let mut replay_before: u64 = 0;
     loop {
         // 1. Туннель. Без него HTTP смысла не имеет.
         let n = node.clone();
@@ -1112,9 +1419,10 @@ async fn poll_loop(node: Arc<Node>, sink: Sink) {
         // 2. Рукопожатие после свежего подъёма: форвард открывается не мгновенно,
         // да и версия узла в логе экономит час разбирательств при рассинхроне.
         if state == TunnelState::Spawned {
+            let ready_secs = if node.cfg.transport == "teleport" { TELEPORT_READY_SECS } else { TUNNEL_READY_SECS };
             let n = node.clone();
             let ready = tokio::task::spawn_blocking(move || {
-                n.tunnel.wait_ready(Duration::from_secs(TUNNEL_READY_SECS))
+                n.tunnel.wait_ready(Duration::from_secs(ready_secs))
             })
             .await
             .unwrap_or(false);
@@ -1122,7 +1430,8 @@ async fn poll_loop(node: Arc<Node>, sink: Sink) {
                 // Форвард так и не открылся: ssh либо не пустили, либо форвард
                 // запрещён на той стороне. Причину, если ssh её назвал, уже
                 // держит туннель — она уедет в панель вместе с этой.
-                let pause = node.fail("ssh не открыл туннель за 15 секунд");
+                let transport = if node.cfg.transport == "teleport" { "Teleport" } else { "SSH" };
+                let pause = node.fail(&format!("{transport} не открыл туннель за {ready_secs} секунд"));
                 let n = node.clone();
                 let _ = tokio::task::spawn_blocking(move || n.tunnel.kick()).await;
                 tokio::time::sleep(pause).await;
@@ -1134,6 +1443,8 @@ async fn poll_loop(node: Arc<Node>, sink: Sink) {
             };
             match hello {
                 Ok(h) => {
+                    replay_before = h.cursor;
+                    *node.hello.lock().unwrap_or_else(|e| e.into_inner()) = h.clone();
                     node.saw_version(&h.version);
                     if node.outdated() {
                         crate::log::line(&format!(
@@ -1164,14 +1475,21 @@ async fn poll_loop(node: Arc<Node>, sink: Sink) {
 
         // 3. Одна страница событий (long-poll на той стороне).
         let since = node.cursor();
+        let instance = node.instance.lock().unwrap().clone();
         let page = match node.client() {
-            Ok(c) => c.events(since).await,
+            Ok(c) => c.events(since, &instance).await,
             Err(e) => Err(e),
         };
         match page {
-            Ok(page) => {
+            Ok(mut page) => {
                 node.ok();
-                let batch = fold_page(&node.cfg.name, since, page);
+                align_instance(&instance, since, &mut page);
+                let incoming_instance = page.instance.clone();
+                let mut batch = fold_page(&node.cfg.name, since, page);
+                for event in &mut batch.events {
+                    let replay = event.get("remoteCursor").and_then(Value::as_u64).is_some_and(|cursor| cursor < replay_before);
+                    if let Some(obj) = event.as_object_mut() { obj.insert("remoteReplay".into(), Value::Bool(replay)); }
+                }
                 if batch.gap {
                     crate::log::line(&format!(
                         "[remote] {}: потеря событий (gap), курсор {since} → {}",
@@ -1187,7 +1505,7 @@ async fn poll_loop(node: Arc<Node>, sink: Sink) {
                 // Курсор двигаем ПОСЛЕ выдачи наружу: падение между ответом узла и
                 // разбором должно приводить к повтору партии, а не к её потере —
                 // дубль событий редьюсер переживает, пропажу нет.
-                node.advance(cursor);
+                node.advance(cursor, &incoming_instance);
                 if empty {
                     tokio::time::sleep(Duration::from_millis(POLL_FLOOR_MS)).await;
                 }
@@ -1331,6 +1649,7 @@ mod lock_tests {
             name: "t".into(),
             ssh_host: "nowhere.invalid".into(),
             jarvis_dir: "/tmp".into(),
+            ..RemoteCfg::default()
         }));
         node.saw_version("0.0.1"); // непустая версия — путь, на котором и вставало
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1352,6 +1671,7 @@ mod lock_tests {
             name: "t".into(),
             ssh_host: "nowhere.invalid".into(),
             jarvis_dir: "/tmp".into(),
+            ..RemoteCfg::default()
         };
         let t = Tunnel::new(&cfg);
         let at = std::time::Instant::now();
@@ -1385,6 +1705,7 @@ mod config_tests {
                 name: "vps".into(),
                 ssh_host: "vps.example".into(),
                 jarvis_dir: "/home/bob/.jarvis".into(),
+            ..RemoteCfg::default()
             }]
         );
     }
@@ -1478,13 +1799,23 @@ mod gap_tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn queued_tunnel_start_cannot_rearm_a_removed_remote() {
+        let tunnel = Tunnel::new(&RemoteCfg::default());
+        tunnel.stop();
+        assert_eq!(tunnel.ensure_started(), TunnelState::Failed);
+        assert_eq!(tunnel.port(), 0);
+        assert!(!tunnel.is_up());
+    }
+
     fn page(cursor: u64, gap: bool, n: usize) -> EventsPage {
         EventsPage {
+            instance: String::new(),
             cursor,
             gap,
             events: (0..n)
                 .map(|i| Recorded {
-                    cursor: cursor - (n - 1 - i) as u64,
+                    cursor: cursor - (n - i) as u64,
                     at: 1_700_000_000_000 + i as i64,
                     envelope: json!({
                         "event": "stop",
@@ -1509,6 +1840,60 @@ mod gap_tests {
         let b = fold_page("vps", 10, page(10, false, 0));
         assert_eq!(b.cursor, 10);
         assert!(b.events.is_empty());
+        assert!(!b.gap);
+    }
+
+    #[test]
+    fn real_node_first_event_is_not_dropped_at_the_exclusive_page_boundary() {
+        // Shape observed through the live SSH fixture: event 0, next cursor 1.
+        let page: EventsPage = serde_json::from_str(r#"{"cursor":1,"instance":"node-a","events":[{"cursor":0,"at":1788562492808,"envelope":{"agent":"claude","event":"prompt","payload":{"session_id":"qa-synthetic","prompt":"Привет 👋"}}}]}"#).unwrap();
+        let batch = fold_page("qa", 0, page);
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0]["payload"]["session_id"], "qa:qa-synthetic");
+        assert_eq!(batch.cursor, 1);
+    }
+
+    #[test]
+    fn changed_instance_rewinds_even_when_new_node_passed_previous_cursor() {
+        let mut fresh = page(20, false, 3);
+        fresh.instance = "node-b".into();
+        align_instance("node-a", 10, &mut fresh);
+        assert!(fresh.gap);
+        assert_eq!(fresh.cursor, 0);
+        assert!(fresh.events.is_empty());
+        let mut next = page(4, false, 4);
+        next.instance = "node-b".into();
+        align_instance("node-b", 0, &mut next);
+        assert_eq!(fold_page("qa", 0, next).events.len(), 4);
+    }
+
+    #[test]
+    fn legacy_cursor_migration_is_safe_and_old_nodes_remain_supported() {
+        let old = parse_cursor("42\n");
+        assert_eq!(old.cursor, 42);
+        assert!(old.instance.is_empty());
+        let new = parse_cursor(r#"{"cursor":42,"instance":"node-a"}"#);
+        assert_eq!((new.cursor, new.instance.as_str()), (42, "node-a"));
+        let mut upgraded = page(45, false, 3);
+        upgraded.instance = "node-a".into();
+        align_instance(&old.instance, old.cursor, &mut upgraded);
+        assert!(upgraded.gap);
+        assert_eq!(upgraded.cursor, 0);
+        let mut legacy = page(45, false, 3);
+        align_instance("node-a", 42, &mut legacy);
+        assert!(!legacy.gap);
+        assert_eq!(legacy.cursor, 45);
+    }
+
+    #[test]
+    fn reconnect_page_is_sorted_and_does_not_replay_old_or_duplicate_events() {
+        let record = |cursor| Recorded { cursor, at: 0,
+            envelope: json!({"event":"stop","payload":{"session_id":format!("s{cursor}")}}) };
+        let b = fold_page("vps", 10, EventsPage { cursor: 13, gap: false, instance: String::new(),
+            events: vec![record(13), record(9), record(12), record(12), record(11), record(10), record(14)] });
+        let ids: Vec<_> = b.events.iter().map(|event| event["payload"]["session_id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["vps:s10", "vps:s11", "vps:s12"]);
+        assert_eq!(b.cursor, 13);
         assert!(!b.gap);
     }
 

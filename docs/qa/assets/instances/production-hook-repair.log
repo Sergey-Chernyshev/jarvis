@@ -1,0 +1,14 @@
+▸ Хуки
+  ✓ claude: исправлены SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Notification, Stop, StopFailure, SessionEnd, SubagentStart, SubagentStop
+  ✓ codex: исправлены SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop, PermissionRequest, SubagentStart, SubagentStop, SessionEnd
+  ✓ codex: добавлены SessionEnd; исправлены SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop, PermissionRequest, SubagentStart, SubagentStop
+▸ Транспорт
+  ✓ шим claude+codex + tmux.conf + PATH-блок
+  • dir=/Users/se.chernyshev/.jarvis hook_bin=true claude_hooks=true codex=true codex_hooks=true codex_shim=true → OK
+  ✓ codex: уже установлены
+  ✓ codex: уже установлены
+codex-personal: правила установлены, доверие Codex — trusted
+codex-work: правила установлены, доверие Codex — trusted
+
+Интеграция починена. Если codex-шим доустановлен — перезапусти
+шелл (exec zsh) или открой новую вкладку, чтобы `codex` пошёл через Jarvis.

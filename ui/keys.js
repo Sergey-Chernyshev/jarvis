@@ -92,7 +92,17 @@
     ? { fileManager: 'Finder', reveal: 'Показать в Finder', os: 'macOS' }
     : { fileManager: 'файловом менеджере', reveal: 'Показать в папке', os: 'Linux' };
 
-  window.jarvisKeys = { isMac, MOD, ALT, SHIFT, CTRL, SUPER, SEP, k, NAMES, NOUNS, displayHotkey, hotkeyKeys };
+  // A physical letter fallback keeps shortcuts usable in Cyrillic layouts.
+  // Latin layouts keep their semantic key (including Dvorak/AZERTY).
+  function matches(event, wanted) {
+    const key = String(event.key || '');
+    if (key.toLowerCase() === wanted.toLowerCase()) return true;
+    return /^[a-z]$/i.test(wanted) && !/^[a-z]$/i.test(key) && event.code === 'Key' + wanted.toUpperCase();
+  }
+  function editing(target) {
+    return !!target && (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable === true || !!target.closest?.('[contenteditable="true"], [role="textbox"], .xterm'));
+  }
+  window.jarvisKeys = { matches, editing, isMac, MOD, ALT, SHIFT, CTRL, SUPER, SEP, k, NAMES, NOUNS, displayHotkey, hotkeyKeys };
 
   /* Разметка в index.html статична, поэтому подписи в ней проставляем здесь:
    * элемент помечается data-key (модификатор+клавиша) или data-keyname (одиночная

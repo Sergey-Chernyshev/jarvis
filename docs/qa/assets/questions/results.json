@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "records": [
+    "multiline-state-push-preserves-node-focus-and-caret",
+    "single-multi-custom-back-review",
+    "duplicate-pending-failed-retry-unknown-no-replay",
+    "unknown-draft-survives-close-reopen",
+    "new-revision-isolated-and-confirmation-closes",
+    "late-answer-cannot-close-another-machine-question",
+    "external-rpc-explicit-open-in-agent-capability"
+  ],
+  "errors": []
+}

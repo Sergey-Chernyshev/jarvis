@@ -1,0 +1,38 @@
+{
+  "checks": [
+    "Escape dismisses keyboard-opened settings picker and restores focus without leaving settings",
+    "Tab leaves a settings picker with no orphaned popup",
+    "Escape closes the native profile popup without navigation or an account mutation",
+    "light/650: custom accent retained, form is single-column and all controls stay inside the window",
+    "dark/650: custom accent retained, form is single-column and all controls stay inside the window"
+  ],
+  "errors": [],
+  "palettes": [
+    {
+      "theme": "light",
+      "paint": "custom",
+      "accent": "#B64C18",
+      "button": "rgb(182, 76, 24)",
+      "ink": "rgb(255, 255, 255)",
+      "width": 464,
+      "scrollWidth": 464,
+      "columns": "424px",
+      "controlCount": 8,
+      "escaping": [],
+      "buttonContrast": 5.203193587227031
+    },
+    {
+      "theme": "dark",
+      "paint": "custom",
+      "accent": "#D29070",
+      "button": "rgb(210, 144, 112)",
+      "ink": "rgb(0, 0, 0)",
+      "width": 464,
+      "scrollWidth": 464,
+      "columns": "424px",
+      "controlCount": 8,
+      "escaping": [],
+      "buttonContrast": 7.963601570934086
+    }
+  ]
+}

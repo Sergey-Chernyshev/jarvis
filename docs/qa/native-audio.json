@@ -1,0 +1,197 @@
+{
+  "ok": true,
+  "steps": [
+    {
+      "name": "Native device metadata stays responsive without capture",
+      "ok": true,
+      "elapsedMs": 72
+    },
+    {
+      "name": "Voice-history edits and deletions survive actual disk round trips",
+      "ok": true,
+      "elapsedMs": 39
+    },
+    {
+      "name": "Synthetic HUD uses a visible nonactivating native window",
+      "ok": true,
+      "elapsedMs": 402
+    },
+    {
+      "name": "Original field identity is compared through production AX when authorized",
+      "ok": true,
+      "elapsedMs": 157
+    },
+    {
+      "name": "Read-only journey leaves native authorization unchanged",
+      "ok": true,
+      "elapsedMs": 11
+    }
+  ],
+  "errors": [],
+  "failure": null,
+  "elapsedMs": 723,
+  "runtime": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+    "url": "tauri://localhost",
+    "viewport": {
+      "width": 1120,
+      "height": 780,
+      "dpr": 2
+    }
+  },
+  "evidence": {
+    "permissionBefore": {
+      "microphone": "authorized",
+      "accessibility": true,
+      "provenance": "native authorization status; no request made"
+    },
+    "discovery": {
+      "count": 1,
+      "elapsedMs": 72
+    },
+    "historyRoundTrip": {
+      "verified": true,
+      "id": 1,
+      "provenance": "actual Tauri commands and JSON file in isolated profile; fixed synthetic text only"
+    },
+    "windowsBefore": {
+      "main": {
+        "visible": true,
+        "key": true,
+        "canBecomeKey": true,
+        "onActiveSpace": true,
+        "level": 0,
+        "collectionBehavior": 164,
+        "joinsAllSpaces": false,
+        "fullScreenAuxiliary": false,
+        "joinsAllApplications": false,
+        "ignoresCycle": false,
+        "frame": {
+          "x": 304,
+          "y": 228,
+          "width": 1120,
+          "height": 780
+        },
+        "screenWorkArea": {
+          "x": 0,
+          "y": 0,
+          "width": 1728,
+          "height": 1084
+        }
+      },
+      "toast": {
+        "visible": false,
+        "key": false,
+        "canBecomeKey": false,
+        "onActiveSpace": true,
+        "level": 1000,
+        "collectionBehavior": 262465,
+        "joinsAllSpaces": true,
+        "fullScreenAuxiliary": true,
+        "joinsAllApplications": true,
+        "ignoresCycle": true,
+        "frame": {
+          "x": 644,
+          "y": 723,
+          "width": 440,
+          "height": 120
+        },
+        "screenWorkArea": {
+          "x": 0,
+          "y": 0,
+          "width": 1728,
+          "height": 1084
+        }
+      }
+    },
+    "windowsWithToast": {
+      "main": {
+        "visible": true,
+        "key": true,
+        "canBecomeKey": true,
+        "onActiveSpace": true,
+        "level": 0,
+        "collectionBehavior": 164,
+        "joinsAllSpaces": false,
+        "fullScreenAuxiliary": false,
+        "joinsAllApplications": false,
+        "ignoresCycle": false,
+        "frame": {
+          "x": 304,
+          "y": 228,
+          "width": 1120,
+          "height": 780
+        },
+        "screenWorkArea": {
+          "x": 0,
+          "y": 0,
+          "width": 1728,
+          "height": 1084
+        }
+      },
+      "toast": {
+        "visible": true,
+        "key": false,
+        "canBecomeKey": false,
+        "onActiveSpace": true,
+        "level": 1000,
+        "collectionBehavior": 262465,
+        "joinsAllSpaces": true,
+        "fullScreenAuxiliary": true,
+        "joinsAllApplications": true,
+        "ignoresCycle": true,
+        "frame": {
+          "x": 644,
+          "y": 14,
+          "width": 440,
+          "height": 132
+        },
+        "screenWorkArea": {
+          "x": 0,
+          "y": 0,
+          "width": 1728,
+          "height": 1084
+        }
+      }
+    },
+    "toastRendered": {
+      "phase": "error",
+      "opacity": 1,
+      "rect": {
+        "x": 12,
+        "y": 23,
+        "width": 416,
+        "height": 99,
+        "top": 23,
+        "right": 428,
+        "bottom": 122,
+        "left": 12
+      },
+      "finiteAnimations": 0
+    },
+    "screenshots": [
+      {
+        "name": "native-synthetic-toast",
+        "label": "toast",
+        "path": "/private/var/folders/sz/1yzw2zzs64x5kcr0c9hqhnr40000gq/T/jarvis-native-smoke-EcoaDo/native-synthetic-toast.png"
+      }
+    ],
+    "axCapture": {
+      "available": false,
+      "trusted": true,
+      "ownsForeground": true,
+      "operation": "capture",
+      "provenance": "production AXUIElementCopyAttributeValue; scratch app only"
+    },
+    "axVerification": {
+      "verified": false,
+      "reason": "Production AX unavailable in the isolated bundle; permission remains user-controlled"
+    },
+    "permissionAfter": {
+      "microphone": "authorized",
+      "accessibility": true,
+      "provenance": "native authorization status; no request made"
+    }
+  },
+  "scope": "Actual AppKit/IPC/disk history and synthetic HUD; no recording, paste, or permission changes."
+}

@@ -5,10 +5,11 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
 
-  // Свой текст доступен только в Claude-пикере: у codex строки «Other» нет,
-  // доставить текст туда некуда.
-  function customAllowed(agent) {
-    return agent !== 'codex';
+  // Capability comes from the observed picker or provider schema. Old payloads
+  // keep the conservative Claude-only fallback until a screen is identified.
+  function customAllowed(agent, item, question) {
+    if (typeof item?.customAllowed === 'boolean') return item.customAllowed;
+    return agent !== 'codex' && !question?.fromScreen;
   }
 
   // Нормализация поля «Свой ответ…»: пробельный ввод — не ответ.
@@ -20,22 +21,61 @@
   // Выбор по текущему вопросу. multiSelect — тогглы, кастом добавляется к ним;
   // single-select — кастом приоритетен (это и есть выбор строки «Other»).
   // null = отправлять нечего (ни варианта, ни текста).
-  function commitRow({ multiSelect, chosen, sel, text }) {
+  function commitRow({ multiSelect, chosen, sel, text, customMode, optionCount = Infinity }) {
     const custom = normalizeText(text);
     const row = multiSelect
       ? [...chosen].sort((a, b) => a - b)
-      : custom ? [] : [sel + 1];
+      : custom && customMode !== 'notes' ? [] : (sel >= 0 && sel < optionCount ? [sel + 1] : []);
     if (!row.length && !custom) return null;
     return { row, text: custom };
   }
 
-  // Payload для question_answer. texts кладём только когда есть хоть один
-  // кастом — без него контракт байт-в-байт старый `{answers}`.
-  function buildPayload(answers, texts) {
+  // Every production submission binds choices to provider identities. The
+  // legacy helper shape is retained only for callers without a Question model.
+  function identity(question) {
+    return { requestId: question.requestId || `legacy-${question.at}`, revision: question.revision || 0 };
+  }
+
+  let sequence = 0;
+  function submissionId() {
+    return globalThis.crypto?.randomUUID?.() || `answer-${Date.now()}-${++sequence}`;
+  }
+
+  function buildPayload(answers, texts, question, id = submissionId()) {
+    if (question) return {
+      ...identity(question), submissionId: id,
+      answers: question.questions.map((item, i) => ({
+        questionId: item.id || `q${i + 1}`,
+        optionIds: (answers[i] || []).map(n => item.options[n - 1]?.id || `o${n}`),
+        text: normalizeText(texts?.[i]),
+      })),
+    };
     const payload = { answers };
     if ((texts || []).some(Boolean)) payload.texts = texts.map((t) => t || null);
     return payload;
   }
 
-  return Object.freeze({ customAllowed, normalizeText, commitRow, buildPayload });
+  function draftKey(sessionId, question) {
+    const { requestId, revision } = identity(question);
+    return JSON.stringify([sessionId, requestId, revision]);
+  }
+
+  function createDraftStore() {
+    const drafts = new Map();
+    return {
+      get(sessionId, question) {
+        const key = draftKey(sessionId, question);
+        if (!drafts.has(key)) {
+          if (drafts.size >= 64) drafts.delete(drafts.keys().next().value);
+          drafts.set(key, { answers: question.questions.map(() => []), texts: question.questions.map(() => ''),
+            selections: question.questions.map(() => 0), index: 0, review: false,
+            submissionId: submissionId(), message: '', unknown: false });
+        }
+        return drafts.get(key);
+      },
+      delete(sessionId, question) { drafts.delete(draftKey(sessionId, question)); },
+    };
+  }
+
+  return Object.freeze({ customAllowed, normalizeText, commitRow, buildPayload, identity, submissionId, draftKey, createDraftStore });
 });

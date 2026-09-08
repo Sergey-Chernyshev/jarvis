@@ -56,6 +56,38 @@ pub fn entries_from_text(text: &str) -> Vec<Value> {
     out
 }
 
+/// API failures are assistant messages too, but their synthetic model is not
+/// the model selected by the user. Keep looking for the last real response.
+pub fn extract_claude_model(entries: &[Value]) -> Option<String> {
+    entries.iter().rev().find_map(|entry| {
+        if entry["type"] != "assistant"
+            || entry["isApiErrorMessage"] == true
+            || entry["is_error"] == true
+            || entry.pointer("/message/is_error") == Some(&Value::Bool(true))
+            || entry.pointer("/message/type").and_then(Value::as_str) == Some("error")
+        {
+            return None;
+        }
+        let model = entry.pointer("/message/model")?.as_str()?;
+        if model.is_empty() || model.len() > 256
+            || !model.as_bytes()[0].is_ascii_alphanumeric()
+            || !model.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-._:/[]".contains(&byte))
+            || model.eq_ignore_ascii_case("synthetic")
+        {
+            return None;
+        }
+        let lower = model.to_ascii_lowercase();
+        // Friendly labels for Claude's own IDs; custom provider/model IDs
+        // retain their complete name instead of being cut at the first '-'.
+        let known = ["opus", "sonnet", "haiku", "fable", "mythos"];
+        if known.iter().any(|family| lower == *family || lower.starts_with(&format!("claude-{family}-"))) {
+            Some(friendly_model(model))
+        } else {
+            Some(model.to_string())
+        }
+    })
+}
+
 /// Отрезать оборванную первую строку, если чтение началось не с начала файла.
 pub fn whole_lines(text: &str, mid_file: bool) -> &str {
     if !mid_file {
@@ -79,17 +111,22 @@ pub fn chain_from_entries(entries: Vec<Value>) -> Vec<Value> {
     let mut last: Option<usize> = None;
     for (i, e) in entries.iter().enumerate().rev() {
         let typ = e.get("type").and_then(Value::as_str).unwrap_or("");
-        if e.get("uuid").and_then(Value::as_str).is_some() && (typ == "user" || typ == "assistant") {
+        if e.get("uuid").and_then(Value::as_str).is_some() && (typ == "user" || typ == "assistant")
+        {
             last = Some(i);
             break;
         }
     }
-    let Some(mut cur) = last else { return Vec::new() };
+    let Some(mut cur) = last else {
+        return Vec::new();
+    };
     let mut chain_idx = Vec::new();
     let mut seen = HashSet::new();
     loop {
         let e = &entries[cur];
-        let Some(uuid) = e.get("uuid").and_then(Value::as_str) else { break };
+        let Some(uuid) = e.get("uuid").and_then(Value::as_str) else {
+            break;
+        };
         if !seen.insert(uuid.to_string()) {
             break;
         }
@@ -117,7 +154,11 @@ pub fn short_tool_label(name: &str, input: Option<&Value>) -> String {
     if let Some(Value::Object(input)) = input {
         for key in ["command", "file_path", "pattern", "url", "description"] {
             if let Some(v) = input.get(key).and_then(Value::as_str) {
-                detail = if key == "file_path" { basename(v) } else { v.to_string() };
+                detail = if key == "file_path" {
+                    basename(v)
+                } else {
+                    v.to_string()
+                };
                 break;
             }
         }
@@ -125,7 +166,10 @@ pub fn short_tool_label(name: &str, input: Option<&Value>) -> String {
     let detail = ellipsize(&one_line(&detail), 64);
     // mcp__plugin_playwright_playwright__browser_click → browser_click
     let name = if name.is_empty() { "tool" } else { name };
-    let short = match name.strip_prefix("mcp__").and_then(|rest| rest.rfind("__").map(|i| &rest[i + 2..])) {
+    let short = match name
+        .strip_prefix("mcp__")
+        .and_then(|rest| rest.rfind("__").map(|i| &rest[i + 2..]))
+    {
         Some(s) if !s.is_empty() => s,
         _ => name,
     };
@@ -139,13 +183,20 @@ pub fn short_tool_label(name: &str, input: Option<&Value>) -> String {
 /// Одна строка JSONL → 0..n элементов чата (юзер-текст, ассистент-текст, тул-чипы).
 pub fn to_chat_items(entry: &Value) -> Vec<ChatItem> {
     let mut items = Vec::new();
-    let Some(obj) = entry.as_object() else { return items };
-    if obj.get("isSidechain").and_then(Value::as_bool).unwrap_or(false)
+    let Some(obj) = entry.as_object() else {
+        return items;
+    };
+    if obj
+        .get("isSidechain")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
         || obj.get("isMeta").and_then(Value::as_bool).unwrap_or(false)
     {
         return items;
     }
-    let Some(msg) = obj.get("message").and_then(Value::as_object) else { return items };
+    let Some(msg) = obj.get("message").and_then(Value::as_object) else {
+        return items;
+    };
     let ts = obj
         .get("timestamp")
         .and_then(Value::as_str)
@@ -153,10 +204,18 @@ pub fn to_chat_items(entry: &Value) -> Vec<ChatItem> {
         .unwrap_or_else(now_ms);
 
     let push_text = |role: &'static str, text: &str, items: &mut Vec<ChatItem>| {
-        let t = text.trim();
-        // служебные вставки (<system-reminder>, <command-name>…) в чат не показываем
-        if !t.is_empty() && !t.starts_with('<') {
-            items.push(ChatItem { role, kind: "text", text: ellipsize(t, 4000), ts });
+        let t = if role == "user" {
+            crate::backend::codex_transcript::normalize_user_text(text)
+        } else {
+            text.trim().to_owned()
+        };
+        if !t.is_empty() {
+            items.push(ChatItem {
+                role,
+                kind: "text",
+                text: ellipsize(&t, 4000),
+                ts,
+            });
         }
     };
 
@@ -166,7 +225,11 @@ pub fn to_chat_items(entry: &Value) -> Vec<ChatItem> {
             Some(Value::Array(blocks)) => {
                 for b in blocks {
                     if b.get("type").and_then(Value::as_str) == Some("text") {
-                        push_text("user", b.get("text").and_then(Value::as_str).unwrap_or(""), &mut items);
+                        push_text(
+                            "user",
+                            b.get("text").and_then(Value::as_str).unwrap_or(""),
+                            &mut items,
+                        );
                     }
                 }
             }
@@ -176,9 +239,11 @@ pub fn to_chat_items(entry: &Value) -> Vec<ChatItem> {
             if let Some(Value::Array(blocks)) = msg.get("content") {
                 for b in blocks {
                     match b.get("type").and_then(Value::as_str) {
-                        Some("text") => {
-                            push_text("assistant", b.get("text").and_then(Value::as_str).unwrap_or(""), &mut items)
-                        }
+                        Some("text") => push_text(
+                            "assistant",
+                            b.get("text").and_then(Value::as_str).unwrap_or(""),
+                            &mut items,
+                        ),
                         Some("tool_use") => items.push(ChatItem {
                             role: "assistant",
                             kind: "tool",
@@ -242,7 +307,10 @@ pub fn squeeze_reply(t: &str) -> String {
             return upto;
         }
     }
-    let sp = cut.rfind(' ').map(|b| cut[..b].chars().count()).unwrap_or(0);
+    let sp = cut
+        .rfind(' ')
+        .map(|b| cut[..b].chars().count())
+        .unwrap_or(0);
     let end = if sp > 150 { sp } else { 220 };
     format!("{}…", chars[..end].iter().collect::<String>())
 }
@@ -302,13 +370,7 @@ pub fn read_model_from_project(cwd: &str) -> Option<String> {
     files.sort_by(|a, b| b.1.cmp(&a.1));
     for (p, _) in files.into_iter().take(4) {
         let entries = read_recent_entries(&p, 64 * 1024);
-        for e in entries.iter().rev() {
-            if e.get("type").and_then(Value::as_str) == Some("assistant") {
-                if let Some(m) = e.pointer("/message/model").and_then(Value::as_str) {
-                    return Some(friendly_model(m));
-                }
-            }
-        }
+        if let Some(model) = extract_claude_model(&entries) { return Some(model); }
     }
     None
 }
@@ -317,6 +379,35 @@ pub fn read_model_from_project(cwd: &str) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn claude_model_ignores_api_errors_and_keeps_the_last_real_response() {
+        let real = json!({"type":"assistant","message":{"model":"claude-opus-4-6"}});
+        for failed in [
+            json!({"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>"}}),
+            json!({"type":"assistant","isApiErrorMessage":true,"message":{"model":"claude-sonnet-4-6"}}),
+            json!({"type":"assistant","is_error":true,"message":{"model":"claude-sonnet-4-6"}}),
+            json!({"type":"assistant","message":{"model":"claude-sonnet-4-6","is_error":true}}),
+            json!({"type":"assistant","message":{"type":"error","model":"claude-sonnet-4-6"}}),
+            json!({"type":"user","message":{"model":"claude-sonnet-4-6"}}),
+        ] {
+            assert_eq!(extract_claude_model(&[real.clone(), failed.clone()]).as_deref(), Some("Opus"));
+            assert_eq!(extract_claude_model(&[failed]), None);
+        }
+        let newer = json!({"type":"assistant","message":{"model":"claude-sonnet-4-6"}});
+        assert_eq!(extract_claude_model(&[real, newer]).as_deref(), Some("Sonnet"));
+    }
+
+    #[test]
+    fn claude_model_rejects_technical_values_without_truncating_custom_ids() {
+        for model in ["<synthetic>", "synthetic", "<internal>", "", " model ", "model\nother", "--model"] {
+            assert_eq!(extract_claude_model(&[json!({"type":"assistant","message":{"model":model}})]), None, "{model}");
+        }
+        for model in ["provider/my-model-v2:fast", "custom-sonnet-compatible", "us.anthropic.claude-opus-4-6-v1"] {
+            assert_eq!(extract_claude_model(&[json!({"type":"assistant","message":{"model":model}})]).as_deref(), Some(model));
+        }
+        assert_eq!(extract_claude_model(&[json!({"type":"assistant","message":{"model":"claude-opus-4-6[1m]"}})]).as_deref(), Some("Opus"));
+    }
 
     #[test]
     fn tool_label_strips_mcp_prefix_and_takes_detail() {
@@ -347,6 +438,16 @@ mod tests {
     }
 
     #[test]
+    fn claude_preserves_user_xml_and_strips_only_known_generated_prefixes() {
+        for role in ["user", "assistant"] {
+            let entry = json!({"type":role,"message":{"content":[{"type":"text","text":"<div>Actual user code</div>"}]}});
+            assert_eq!(to_chat_items(&entry)[0].text, "<div>Actual user code</div>");
+        }
+        let mixed = json!({"type":"user","message":{"content":"<system-reminder>context</system-reminder>\nFix this actual task"}});
+        assert_eq!(to_chat_items(&mixed)[0].text, "Fix this actual task");
+    }
+
+    #[test]
     fn chain_walks_parent_uuid() {
         let entries = vec![
             json!({"type":"user","uuid":"a","message":{"content":"1"}}),
@@ -362,14 +463,21 @@ mod tests {
 
     #[test]
     fn squeeze_strips_markdown() {
-        let s = squeeze_reply("Готово. **Важно**: `cargo test` прошёл.\n```rust\nfn main(){}\n```\n- пункт");
-        assert!(!s.contains("**") && !s.contains("```") && !s.contains('`'), "{s}");
+        let s = squeeze_reply(
+            "Готово. **Важно**: `cargo test` прошёл.\n```rust\nfn main(){}\n```\n- пункт",
+        );
+        assert!(
+            !s.contains("**") && !s.contains("```") && !s.contains('`'),
+            "{s}"
+        );
         assert!(s.contains("cargo test"));
     }
 
     #[test]
     fn project_dir_encodes_cwd() {
         let p = project_dir_for("/Users/x/my.app");
-        assert!(p.to_string_lossy().ends_with("/.claude/projects/-Users-x-my-app"));
+        assert!(p
+            .to_string_lossy()
+            .ends_with("/.claude/projects/-Users-x-my-app"));
     }
 }

@@ -6,7 +6,7 @@
 //! Деньги: прайс per-model; для подписки это «сколько стоило бы по API» —
 //! различаем биллинг per-проект: .claude/settings.json с API-ключом → 'api:<host>'.
 //!
-//! Формат ~/.jarvis/usage.json не менялся (v2) — накопленное переживает порт.
+//! ~/.jarvis/usage.json — кэш v5: профили Codex и исключение скопированной fork-истории.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,8 +22,9 @@ use crate::daemon::Daemon;
 use crate::util::*;
 
 const WINDOW_MS: i64 = 5 * 60 * 60 * 1000; // 5ч-окно подписочных лимитов
-const STATE_V: i64 = 2; // v2: биллинг = 'api:<host>' вместо плоского 'api'
+const STATE_V: i64 = 5; // Rebuild old fork-inflated totals, even for unchanged files.
 const DAY_MS: i64 = 86_400_000;
+const CODEX_SCAN_CHUNK: u64 = 8 * 1024 * 1024;
 
 /// $/1M токенов; кэш: запись ×1.25 input, чтение ×0.1 input (подход ccusage).
 fn price(model: &str) -> (f64, f64) {
@@ -31,17 +32,21 @@ fn price(model: &str) -> (f64, f64) {
         "Opus" | "Fable" => (15.0, 75.0), // у Fable публичного прайса нет — как Opus
         "Haiku" => (1.0, 5.0),
         "GPT-5" | "Codex" => (1.25, 10.0), // ОЦЕНКА OpenAI gpt-5-класс ($/1M)
+        model if model.starts_with("gpt-5") || model.contains("codex") => (1.25, 10.0), // preserve the same family estimate for exact model slugs
         _ => (3.0, 15.0), // Sonnet и дефолт
     }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct Tok {
     #[serde(rename = "in")]
     input: f64,
     out: f64,
     cw: f64,
     cr: f64,
+    /// A subset of `out`, for display only; never added to total or cost.
+    reasoning: f64,
 }
 
 impl Tok {
@@ -71,8 +76,34 @@ struct SessionAgg {
     #[serde(flatten)]
     tok: Tok,
     cost: f64,
+    n: f64,
     first: i64,
     last: i64,
+    instance_id: Option<String>,
+    instance_label: Option<String>,
+    provider_home: Option<String>,
+    provider_session_id: Option<String>,
+    machine: Option<String>,
+}
+
+impl SessionAgg {
+    fn json(&self) -> Value {
+        let input_total = self.tok.input + self.tok.cw + self.tok.cr;
+        serde_json::json!({
+            "tok": self.tok.total(), "cost": self.cost, "billing": self.billing, "model": self.model,
+            "inputTokens": self.tok.input, "outputTokens": self.tok.out,
+            "cacheReadTokens": self.tok.cr, "cacheWriteTokens": self.tok.cw,
+            "reasoningTokens": self.tok.reasoning,
+            "cacheHitPct": if input_total > 0.0 { self.tok.cr / input_total * 100.0 } else { 0.0 },
+            "requests": self.n, "firstAt": self.first, "lastAt": self.last,
+            // These are API-equivalent estimates, including for subscription use.
+            // A family-level price table cannot represent an actual invoice.
+            "costEstimated": true, "costBasis": "model-family-estimate",
+            "source": "local-transcripts",
+            "instanceId":self.instance_id,"instanceLabel":self.instance_label,
+            "providerHome":self.provider_home,"providerSessionId":self.provider_session_id,"machine":self.machine,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -90,11 +121,105 @@ struct State {
     /// "YYYY-MM-DD HH|model|project|billing" → агрегат часа.
     hours: HashMap<String, HourAgg>,
     sessions: HashMap<String, SessionAgg>,
+    /// Keep cumulative counters and model alongside byte offsets across restarts.
+    codex_cursors: HashMap<String, CodexCursor>,
     window: WindowAgg,
     backfilled: bool,
     #[serde(rename = "msgIds")]
     msg_ids: Vec<String>,
     v: i64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+struct CodexCounters {
+    input: f64,
+    cached: f64,
+    output: f64,
+    reasoning: f64,
+}
+
+impl CodexCounters {
+    fn parse(value: Option<&Value>) -> Option<Self> {
+        let value = value?.as_object()?;
+        if !["input_tokens", "output_tokens"].iter().any(|key| value.contains_key(*key)) {
+            return None;
+        }
+        let number = |key: &str| value.get(key).and_then(Value::as_f64)
+            .filter(|n| n.is_finite() && *n >= 0.0).unwrap_or(0.0);
+        Some(Self {
+            input: number("input_tokens"), cached: number("cached_input_tokens"),
+            output: number("output_tokens"), reasoning: number("reasoning_output_tokens"),
+        })
+    }
+
+    fn delta(self, previous: Self) -> Self {
+        Self {
+            input: (self.input - previous.input).max(0.0),
+            cached: (self.cached - previous.cached).max(0.0),
+            output: (self.output - previous.output).max(0.0),
+            reasoning: (self.reasoning - previous.reasoning).max(0.0),
+        }
+    }
+
+    fn tokens(self) -> Tok {
+        let cached = self.cached.min(self.input);
+        Tok {
+            input: self.input - cached, cr: cached, out: self.output,
+            reasoning: self.reasoning.min(self.output), cw: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct CodexCursor {
+    model: String,
+    total: Option<CodexCounters>,
+    last_event: String,
+    skip_partial_line: bool,
+    scope: crate::rollout_scope::RolloutScope,
+}
+
+impl CodexCursor {
+    /// Codex repeats token_count when publishing rate limits. The cumulative
+    /// counter is the authority; `last` alone would count that request twice.
+    /// See ccusage/ccusage#824 and openai/codex's TUI token_usage.rs.
+    fn take_usage(&mut self, info: &Value, timestamp: &str) -> Option<Tok> {
+        let total = CodexCounters::parse(info.get("total_token_usage"));
+        let last = CodexCounters::parse(info.get("last_token_usage"));
+        let raw = if let Some(total) = total {
+            let previous = self.total.replace(total);
+            match previous {
+                Some(previous) if previous == total => return None,
+                // A reset/compaction can lower counters. Account only for the
+                // explicitly reported request, never an invented negative delta.
+                Some(previous) if total.input < previous.input || total.output < previous.output => last?,
+                Some(previous) => total.delta(previous),
+                // A forked/resumed log can start with inherited cumulative use.
+                None if self.scope.forked && last.is_none() => return None,
+                None => last.unwrap_or(total),
+            }
+        } else {
+            let last = last?;
+            let signature = format!("{timestamp}:{}", serde_json::to_string(&last).unwrap_or_default());
+            if self.last_event == signature {
+                return None;
+            }
+            self.last_event = signature;
+            // If cumulative reporting resumes, already consumed fallback records
+            // must be part of its baseline as well.
+            if let Some(total) = self.total.as_mut() {
+                total.input += last.input;
+                total.cached += last.cached;
+                total.output += last.output;
+                total.reasoning += last.reasoning;
+            }
+            last
+        };
+        let tokens = raw.tokens();
+        (tokens.total() > 0.0).then_some(tokens)
+    }
 }
 
 /* -------- официальные лимиты подписки -------- */
@@ -136,16 +261,59 @@ pub struct OfficialInfo {
     /// Чей это `/usage`: "local" или имя узла — человек должен видеть, про чью
     /// авторизацию эти проценты.
     pub source: String,
+    pub instance_id: Option<String>,
+    pub provider_home: Option<String>,
+    pub provider: String,
     pub at: i64,
     pub account: Account,
 }
 
 #[derive(Debug, Clone)]
 struct Official {
+    source:String,
     session: Option<PctReset>,
     week: Option<PctReset>,
     week_model: Option<ModelWeek>,
     at: i64,
+    instance_id: Option<String>,
+    provider_home: Option<String>,
+}
+
+/// Keep the refresh reservation through publication and release it on cancellation.
+struct OfficialFetchGuard<'a>(&'a AtomicBool);
+
+impl<'a> OfficialFetchGuard<'a> {
+    fn acquire(busy: &'a AtomicBool) -> Option<Self> {
+        if busy.swap(true, Ordering::SeqCst) { None } else { Some(Self(busy)) }
+    }
+}
+
+impl Drop for OfficialFetchGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// A successful process exit is not proof that this CLI supports headless /usage.
+/// Validate each source before selecting it, so an unsupported local CLI cannot
+/// mask usable limits from a remote node. Never publish a cost summary as a quota.
+fn official_candidate(
+    source: &str,
+    result: Result<String, String>,
+    errors: &mut Vec<String>,
+) -> Option<(Official, String)> {
+    match result {
+        Ok(text) => match parse_official(&text) {
+            Some((session, week, week_model)) => {
+                return Some((Official { source:source.into(),session, week, week_model, at: now_ms(),instance_id:None,provider_home:None }, source.into()));
+            }
+            None => errors.push(format!(
+                "{source}: CLI не вернул лимиты подписки; проверь /usage в интерактивном Claude Code"
+            )),
+        },
+        Err(error) => errors.push(format!("{source}: {error}")),
+    }
+    None
 }
 
 /// Ринг последних message.id: дедуп с сохранением порядка вставки (как JS Set) —
@@ -219,8 +387,14 @@ fn projects_dir() -> PathBuf {
     claude_dir().join("projects")
 }
 
-fn codex_sessions_dir() -> PathBuf {
-    crate::util::codex_dir().join("sessions")
+#[derive(Clone)]
+struct CodexSourceFile {
+    path: String,
+    key: String,
+    sid: String,
+    instance_id: String,
+    label: String,
+    home: String,
 }
 
 /// cwd + session_id из ПЕРВОЙ строки rollout (session_meta). Нужно при
@@ -230,7 +404,7 @@ fn codex_meta_head(file: &str) -> (Option<String>, String) {
     use std::io::BufRead;
     let Ok(f) = fs::File::open(file) else { return (None, "unknown".into()) };
     let mut first = String::new();
-    if std::io::BufReader::new(f).read_line(&mut first).is_err() {
+    if std::io::BufReader::new(f.take(128 * 1024)).read_line(&mut first).is_err() {
         return (None, "unknown".into());
     }
     if let Ok(v) = serde_json::from_str::<Value>(first.trim()) {
@@ -245,11 +419,20 @@ fn codex_meta_head(file: &str) -> (Option<String>, String) {
 
 impl Usage {
     pub fn load() -> Self {
-        let mut state: State = fs::read_to_string(state_file())
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
+        let raw = fs::read_to_string(state_file()).ok();
+        let mut state: State = raw.as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok())
             .unwrap_or_default();
         if state.v != STATE_V {
+            // Keep the previous cache recoverable: some source transcripts may
+            // already have been removed. Never overwrite an earlier backup.
+            if state.v > 0 {
+                use std::io::Write;
+                let backup = state_file().with_extension(format!("v{}.json", state.v));
+                if let (Some(raw), Ok(mut file)) = (raw, fs::OpenOptions::new().write(true).create_new(true).open(backup)) {
+                    let _ = file.write_all(raw.as_bytes());
+                }
+            }
             // схема агрегатов изменилась — пересобираем с нуля (backfill ~1.5с)
             state = State { v: STATE_V, ..Default::default() };
         }
@@ -275,11 +458,18 @@ impl Usage {
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(Duration::from_secs(2)).await;
             u.persist_pending.store(false, Ordering::SeqCst);
+            // Never snapshot counters while their matching file offsets are
+            // still being advanced by a long backfill.
+            if u.scanning.swap(true, Ordering::SeqCst) {
+                u.persist();
+                return;
+            }
             let json = {
                 let mut state = u.state.lock().unwrap();
                 state.msg_ids = u.msg_seen.lock().unwrap().last_n(3000); // ринг последних id
                 serde_json::to_string(&*state).ok()
             };
+            u.scanning.store(false, Ordering::SeqCst);
             if let Some(json) = json {
                 let _ = fs::create_dir_all(jarvis_dir());
                 let _ = fs::write(state_file(), json);
@@ -340,6 +530,7 @@ impl Usage {
         h.tok.out += u.out;
         h.tok.cw += u.cw;
         h.tok.cr += u.cr;
+        h.tok.reasoning += u.reasoning;
         h.cost += c;
         h.n += 1.0;
 
@@ -355,7 +546,9 @@ impl Usage {
         s.tok.out += u.out;
         s.tok.cw += u.cw;
         s.tok.cr += u.cr;
+        s.tok.reasoning += u.reasoning;
         s.cost += c;
+        s.n += 1.0;
         s.model = model.into();
         s.billing = billing.into();
         s.project = project.into();
@@ -388,14 +581,13 @@ impl Usage {
         if f.read_to_end(&mut buf).is_err() {
             return from_offset;
         }
-        let text = String::from_utf8_lossy(&buf);
-        let Some(last_nl) = text.rfind('\n') else { return from_offset }; // одна недописанная строка
-        let consumed = text[..=last_nl].len() as u64;
-        let text = &text[..last_nl];
+        let Some(last_nl) = buf.iter().rposition(|byte| *byte == b'\n') else { return from_offset };
+        let consumed = (last_nl + 1) as u64;
+        let text = String::from_utf8_lossy(&buf[..last_nl]);
 
         let mut cwd: Option<String> = None;
         for line in text.split('\n') {
-            if !line.contains("\"type\":\"assistant\"") || !line.contains("\"usage\"") {
+            if !line.contains("\"assistant\"") || !line.contains("\"usage\"") {
                 if cwd.is_none() && line.contains("\"cwd\"") {
                     if let Ok(v) = serde_json::from_str::<Value>(line) {
                         cwd = v.get("cwd").and_then(Value::as_str).map(String::from);
@@ -404,6 +596,9 @@ impl Usage {
                 continue;
             }
             let Ok(e) = serde_json::from_str::<Value>(line) else { continue };
+            if e.get("type").and_then(Value::as_str) != Some("assistant") {
+                continue;
+            }
             let Some(m) = e.get("message") else { continue };
             let Some(u0) = m.get("usage") else { continue };
             let Some(mid) = m.get("id").and_then(Value::as_str) else { continue };
@@ -418,11 +613,12 @@ impl Usage {
                 .and_then(Value::as_str)
                 .and_then(crate::transcript::parse_ts)
                 .unwrap_or_else(now_ms);
-            let num = |k: &str| u0.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+            let num = |k: &str| u0.get(k).and_then(Value::as_f64)
+                .filter(|n| n.is_finite() && *n >= 0.0).unwrap_or(0.0);
             let entry_cwd = e.get("cwd").and_then(Value::as_str).map(String::from).or(cwd.clone());
             let billing = self.detect_billing(entry_cwd.as_deref());
             let model = friendly_model_or_other(m.get("model").and_then(Value::as_str).unwrap_or(""));
-            let project = cwd.as_deref().map(basename).unwrap_or_else(|| "другое".into());
+            let project = entry_cwd.as_deref().map(basename).unwrap_or_else(|| "другое".into());
             let sid = e.get("sessionId").and_then(Value::as_str).unwrap_or("unknown");
             Self::add_record(
                 &mut self.state.lock().unwrap(),
@@ -436,6 +632,7 @@ impl Usage {
                     out: num("output_tokens"),
                     cw: num("cache_creation_input_tokens"),
                     cr: num("cache_read_input_tokens"),
+                    reasoning: 0.0,
                 },
             );
         }
@@ -472,13 +669,22 @@ impl Usage {
                 self.state.lock().unwrap().offsets.insert(file, next);
             }
         }
-        // Codex rollouts: token_count.last_token_usage (per-turn) → та же агрегация.
-        for file in Self::list_codex_rollouts() {
-            let prev = self.state.lock().unwrap().offsets.get(&file).copied().unwrap_or(0);
-            let next = self.parse_codex_file_part(&file, prev);
-            if next != prev {
-                self.state.lock().unwrap().offsets.insert(file, next);
+        // Codex rollouts: only new usage from cumulative token_count counters.
+        let registry = crate::session_identity::registry();
+        let mut codex_complete = registry.is_ok();
+        let mut remaining = 256 * 1024 * 1024u64;
+        for file in registry.as_ref().map(Self::list_codex_rollouts).unwrap_or_default() {
+            let offset_key = format!("codex-session:{}", file.key);
+            let mut at = self.state.lock().unwrap().offsets.get(&offset_key).copied().unwrap_or(0);
+            let size = fs::metadata(&file.path).map(|meta| meta.len()).unwrap_or(at);
+            while at < size && remaining >= CODEX_SCAN_CHUNK {
+                let next = self.parse_codex_file_part_scoped(&file.path, at, Some(&file));
+                if next <= at { break; }
+                remaining = remaining.saturating_sub(next - at);
+                self.state.lock().unwrap().offsets.insert(offset_key.clone(), next);
+                at = next;
             }
+            if at < size { codex_complete = false; }
         }
         {
             let mut seen = self.msg_seen.lock().unwrap();
@@ -486,35 +692,60 @@ impl Usage {
                 seen.trim_to(3000);
             }
         }
-        self.state.lock().unwrap().backfilled = true;
+        self.state.lock().unwrap().backfilled = codex_complete;
         self.persist();
         self.scanning.store(false, Ordering::SeqCst);
     }
 
     /// Все rollout-файлы Codex: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl.
-    fn list_codex_rollouts() -> Vec<String> {
-        fn walk(dir: &Path, out: &mut Vec<String>) {
+    fn list_codex_rollouts(registry: &crate::agent_instances::Registry) -> Vec<CodexSourceFile> {
+        fn walk(dir: &Path, depth: u8, out: &mut Vec<PathBuf>) {
+            if depth > 5 || out.len() >= 20_000 { return; }
             let Ok(rd) = fs::read_dir(dir) else { return };
             for e in rd.filter_map(|e| e.ok()) {
+                if out.len() >= 20_000 { break; }
                 let p = e.path();
-                if p.is_dir() {
-                    walk(&p, out);
-                } else if p.extension().is_some_and(|x| x == "jsonl") {
-                    out.push(p.to_string_lossy().into_owned());
+                let Ok(kind) = e.file_type() else { continue };
+                if kind.is_dir() {
+                    walk(&p, depth + 1, out);
+                } else if kind.is_file() && p.extension().is_some_and(|x| x == "jsonl") {
+                    out.push(p);
                 }
             }
         }
-        let mut out = Vec::new();
-        walk(&codex_sessions_dir(), &mut out);
+        let mut files = Vec::new();
+        for root in registry.roots(true) { walk(&root.path, 0, &mut files); }
+        let mut seen = HashSet::new();
+        let mut logical = HashMap::new();
+        for path in files {
+            let Ok(path) = path.canonicalize() else { continue };
+            if !seen.insert(path.clone()) { continue; }
+            let Some(instance) = registry.instance_for_transcript(&path) else { continue };
+            let path_text = path.to_string_lossy().into_owned();
+            let (_, sid) = codex_meta_head(&path_text);
+            if sid == "unknown" || sid.is_empty() { continue; }
+            let home = instance.canonical_home.to_string_lossy().into_owned();
+            let key = crate::session_identity::key(&instance.id, &home, &sid, None);
+            let modified = fs::metadata(&path).and_then(|meta| meta.modified()).unwrap_or(std::time::UNIX_EPOCH);
+            let file = CodexSourceFile { path: path_text, key: key.clone(), sid, instance_id: instance.id.clone(), label: instance.label.clone(), home };
+            let best = logical.entry(key).or_insert_with(|| (modified, file.clone()));
+            if modified > best.0 { *best = (modified, file); }
+        }
+        let mut out: Vec<_> = logical.into_values().map(|(_, file)| file).collect();
+        out.sort_by(|a, b| a.key.cmp(&b.key));
         out
     }
 
-    /// Разбор rollout Codex: `event_msg.token_count.last_token_usage` (per-turn,
-    /// НЕ total — иначе двойной счёт). model — последний `turn_context.model`;
+    /// Разбор rollout Codex: дельта `event_msg.token_count.total_token_usage`,
+    /// с fallback на `last_token_usage`. Модель и counters переживают сканы;
     /// cwd/sid — из `session_meta`. billing="codex". Маппинг в общий `Tok`:
     /// input_tokens включает cached (конвенция OpenAI) → input = input−cached,
-    /// cr = cached, out = output+reasoning, cw = 0 (Codex не делит cache-creation).
+    /// cr = cached, out = output (reasoning уже внутри), cw = 0.
     fn parse_codex_file_part(&self, file: &str, from_offset: u64) -> u64 {
+        self.parse_codex_file_part_scoped(file, from_offset, None)
+    }
+
+    fn parse_codex_file_part_scoped(&self, file: &str, from_offset: u64, source: Option<&CodexSourceFile>) -> u64 {
         let Ok(meta) = fs::metadata(file) else { return from_offset };
         let size = meta.len();
         if size <= from_offset {
@@ -524,60 +755,69 @@ impl Usage {
         if f.seek(SeekFrom::Start(from_offset)).is_err() {
             return from_offset;
         }
-        let mut buf = Vec::with_capacity((size - from_offset) as usize);
-        if f.read_to_end(&mut buf).is_err() {
+        let mut buf = Vec::with_capacity((size - from_offset).min(CODEX_SCAN_CHUNK) as usize);
+        if f.take(CODEX_SCAN_CHUNK).read_to_end(&mut buf).is_err() {
             return from_offset;
         }
-        let text = String::from_utf8_lossy(&buf);
-        let Some(last_nl) = text.rfind('\n') else { return from_offset };
-        let consumed = text[..=last_nl].len() as u64;
-        let text = &text[..last_nl];
+        let cursor_key = source.map(|source| source.key.as_str()).unwrap_or(file);
+        let mut cursor = self.state.lock().unwrap().codex_cursors.get(cursor_key).cloned().unwrap_or_default();
+        let Some(last_nl) = buf.iter().rposition(|byte| *byte == b'\n') else {
+            if buf.len() as u64 == CODEX_SCAN_CHUNK {
+                cursor.skip_partial_line = true;
+                self.state.lock().unwrap().codex_cursors.insert(cursor_key.to_string(), cursor);
+                return from_offset + buf.len() as u64;
+            }
+            return from_offset;
+        };
+        let consumed = (last_nl + 1) as u64;
+        let start = if cursor.skip_partial_line {
+            cursor.skip_partial_line = false;
+            cursor.scope.skip_record();
+            buf.iter().position(|byte| *byte == b'\n').unwrap_or(0) + 1
+        } else { 0 };
+        let text = String::from_utf8_lossy(&buf[start..last_nl + 1]);
 
         // cwd/sid из первой строки (session_meta) — переживают инкрементальный скан
-        let (mut cwd, mut sid) = codex_meta_head(file);
-        let mut model = String::new();
-        for line in text.split('\n') {
-            if line.contains("\"session_meta\"") {
-                if let Ok(v) = serde_json::from_str::<Value>(line) {
-                    if let Some(p) = v.get("payload") {
-                        cwd = p.get("cwd").and_then(Value::as_str).map(String::from);
-                        if let Some(id) = p.get("id").and_then(Value::as_str) {
-                            sid = id.to_string();
-                        }
-                    }
+        let (cwd, sid) = codex_meta_head(file);
+        for line in text.lines() {
+            if !["\"session_meta\"", "\"turn_context\"", "\"token_count\""].iter().any(|kind| line.contains(kind)) {
+                cursor.scope.skip_record();
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(line) else { cursor.scope.skip_record();continue };
+            if !cursor.scope.accept(&v) {continue;}
+            if v.get("type").and_then(Value::as_str) == Some("session_meta") {
+                continue;
+            }
+            if v.get("type").and_then(Value::as_str) == Some("turn_context") {
+                if let Some(m) = v.pointer("/payload/model").and_then(Value::as_str) {
+                    cursor.model = m.to_string();
                 }
                 continue;
             }
-            if line.contains("\"turn_context\"") {
-                if let Ok(v) = serde_json::from_str::<Value>(line) {
-                    if let Some(m) = v.get("payload").and_then(|p| p.get("model")).and_then(Value::as_str) {
-                        model = m.to_string();
-                    }
-                }
+            if v.get("type").and_then(Value::as_str) != Some("event_msg")
+                || v.pointer("/payload/type").and_then(Value::as_str) != Some("token_count") {
                 continue;
             }
-            if !line.contains("\"token_count\"") {
-                continue;
-            }
-            let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-            let Some(lt) = v.pointer("/payload/info/last_token_usage") else { continue };
-            let num = |k: &str| lt.get(k).and_then(Value::as_f64).unwrap_or(0.0);
-            let ts = v
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .and_then(crate::transcript::parse_ts)
-                .unwrap_or_else(now_ms);
-            let cached = num("cached_input_tokens");
-            let tok = Tok {
-                input: (num("input_tokens") - cached).max(0.0),
-                out: num("output_tokens") + num("reasoning_output_tokens"),
-                cw: 0.0,
-                cr: cached,
+            let Some(info) = v.pointer("/payload/info").filter(|info| info.is_object()) else { continue };
+            let timestamp = v.get("timestamp").and_then(Value::as_str).unwrap_or("");
+            let Some(tok) = cursor.take_usage(info, timestamp) else { continue };
+            let ts = crate::transcript::parse_ts(timestamp).unwrap_or_else(now_ms);
+            let friendly = if cursor.model.is_empty() { "Codex".into() } else {
+                crate::backend::backend(crate::backend::Agent::Codex).friendly_model(&cursor.model)
             };
-            let friendly = crate::backend::backend(crate::backend::Agent::Codex).friendly_model(&model);
             let project = cwd.as_deref().map(basename).unwrap_or_else(|| "другое".into());
-            Self::add_record(&mut self.state.lock().unwrap(), ts, &friendly, &project, "codex", &sid, tok);
+            let session_key = source.map(|source| source.key.as_str()).unwrap_or(&sid);
+            let mut state = self.state.lock().unwrap();
+            Self::add_record(&mut state, ts, &friendly, &project, "codex", session_key, tok);
+            if let Some(source) = source {
+                if let Some(session) = state.sessions.get_mut(session_key) {
+                    session.instance_id = Some(source.instance_id.clone()); session.instance_label = Some(source.label.clone());
+                    session.provider_home = Some(source.home.clone()); session.provider_session_id = Some(source.sid.clone()); session.machine = Some("local".into());
+                }
+            }
         }
+        self.state.lock().unwrap().codex_cursors.insert(cursor_key.to_string(), cursor);
         from_offset + consumed
     }
 
@@ -725,10 +965,11 @@ impl Usage {
                 .iter()
                 .filter(|(_, s)| s.last >= since)
                 .map(|(id, s)| {
-                    serde_json::json!({
-                        "id": id, "project": s.project, "model": s.model,
-                        "billing": s.billing, "tok": s.tok.total(), "cost": s.cost,
-                    })
+                    let mut row = s.json();
+                    row["id"] = serde_json::json!(id);
+                    row["project"] = serde_json::json!(s.project);
+                    row["scope"] = serde_json::json!("session-lifetime");
+                    row
                 })
                 .collect()
         };
@@ -742,14 +983,12 @@ impl Usage {
         let win_active = win_start > 0 && now < win_start + WINDOW_MS;
 
         // токены текущего ОФИЦИАЛЬНОГО окна (его старт = сброс − 5ч);
-        // как в Electron: блок официальных лимитов — только при данных СЕССИИ
-        let official_out = self.official_info().filter(|o| o.session.is_some()).map(|o| {
+        // A weekly-only response is still official data, even without a session window.
+        let official_out = self.official_info().map(|o| {
             let win_start = o.session.as_ref().map(|s| s.reset_at - WINDOW_MS).unwrap_or(0);
-            let win_tok: f64 = if win_start > 0 {
-                self.range_hours(win_start).iter().map(|r| r.tok.total()).sum()
-            } else {
-                0.0
-            };
+            let win_tok:Option<f64> = if win_start > 0 && official_is_default_local(&o) {
+                Some(self.range_hours(win_start).iter().filter(|r|r.billing=="plan").map(|r|r.tok.total()).sum())
+            } else { None };
             let mut v = serde_json::to_value(&o).unwrap_or(Value::Null);
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("windowTokens".into(), serde_json::json!(win_tok));
@@ -761,6 +1000,8 @@ impl Usage {
         serde_json::json!({
             "period": if week { "week" } else { "today" },
             "officialError": official_err,
+            "costEstimated": true, "costBasis": "model-family-estimate",
+            "source": "local-transcripts",
             "total": { "tok": total_tok, "api": total_api, "plan": total_plan, "n": total_n },
             "series": series,
             "byModel": by_model,
@@ -780,25 +1021,49 @@ impl Usage {
     pub fn for_session(&self, id: &str) -> Option<Value> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let s = state.sessions.get(id)?;
-        Some(serde_json::json!({
-            "tok": s.tok.total(), "cost": s.cost, "billing": s.billing, "model": s.model,
-        }))
+        Some(s.json())
+    }
+
+    pub async fn for_remote_session(d:&Daemon,session:&crate::model::Session)->Value {
+        let trace=crate::analytics::remote_session_trace(d,session).await;
+        remote_session_usage(trace)
     }
 
     /* ---------- официальные лимиты подписки ---------- */
-    /* Источник правды — headless `claude -p "/usage"`: проценты и времена сброса
-     * сессии/недели. Тариф и аккаунт — из ~/.claude.json (oauthAccount). */
+    /* Принимаем только распознанные проценты и времена сброса из /usage.
+     * Некоторые CLI возвращают вместо них cost summary: это не лимиты.
+     * Тариф и аккаунт — из ~/.claude.json (oauthAccount). */
 
     pub fn official_info(&self) -> Option<OfficialInfo> {
         let o = self.official.lock().unwrap().clone()?;
+        let source = o.source.clone();
+        // A remote CLI may belong to a completely different account.
+        let default_home=crate::agent_instances::canonical_home(&claude_dir()).ok();
+        let default_profile=source=="local" && o.provider_home.as_deref().is_some_and(|home|Some(Path::new(home))==default_home.as_deref());
+        let account = if default_profile { read_account() } else {
+            Account { plan: None, email: String::new(), name: String::new() }
+        };
         Some(OfficialInfo {
             session: o.session,
             week: o.week,
             week_model: o.week_model,
-            source: self.official_source.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            source,
+            instance_id:o.instance_id,
+            provider_home:o.provider_home,
+            provider:"claude".into(),
             at: o.at,
-            account: read_account(),
+            account,
         })
+    }
+
+    pub fn official_info_for_session(&self,session:&crate::model::Session)->Option<OfficialInfo> {
+        let info=self.official_info()?;
+        if session.agent.as_deref().unwrap_or("claude")!="claude"
+            || info.source!=session.remote.as_deref().unwrap_or("local") {return None;}
+        let identity=if let Some(id)=session.instance_id.as_deref() {info.instance_id.as_deref()==Some(id)}
+            else if let Some(home)=session.provider_home.as_deref() {info.provider_home.as_deref()==Some(home)}
+            else {session.remote.is_none() && official_is_default_local(&info)};
+        identity.then_some(info)
     }
 
     /// Свежий /usage как можно скорее (после подтверждённого лимита).
@@ -815,43 +1080,56 @@ impl Usage {
     /// Человек, работающий на узле, может быть не авторизован локально вовсе —
     /// тогда правда о лимитах живёт только там. Ошибки всех источников
     /// собираются в одну строку: чинить будут по ней.
-    async fn obtain_official(self: &Arc<Self>, d: &Arc<Daemon>) -> Result<(String, String), String> {
+    async fn obtain_official(self: &Arc<Self>, d: &Arc<Daemon>) -> Result<(Official, String), String> {
         let mut errs: Vec<String> = Vec::new();
         if crate::claude_bin::resolve_claude_bin().is_none() {
             errs.push("локально: claude не найден".into());
         } else {
-            match crate::claude_bin::run_claude(
+            let result = crate::claude_bin::run_claude(
                 &["-p", "--no-session-persistence", "/usage"],
                 Duration::from_secs(90),
             )
             .await
-            {
-                Some(text) => return Ok((text, "local".into())),
-                None => errs.push("локально: /usage не ответил — не авторизован или нет сети".into()),
+            .ok_or_else(|| "/usage не ответил — проверь авторизацию и сеть".into());
+            if let Some((mut official,source)) = official_candidate("local", result, &mut errs) {
+                let home=std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(claude_dir);
+                let home=crate::agent_instances::canonical_home(&home)?;
+                official.instance_id=Some(crate::agent_instances::provider_instance_id("claude","local",&home)?);
+                official.provider_home=Some(home.to_string_lossy().into_owned());
+                return Ok((official,source));
             }
         }
         for node in d.remotes.all() {
             let name = node.cfg.name.clone();
-            match node.client() {
-                Ok(client) => match client.usage_text(false).await {
-                    Ok(text) => return Ok((text, name)),
-                    Err(e) => errs.push(format!("{name}: {e}")),
-                },
-                Err(e) => errs.push(format!("{name}: {e}")),
+            if !node.status().connected {continue;}
+            let client=match node.client(){Ok(c)=>c,Err(e)=>{errs.push(format!("{name}: {e}"));continue;}};
+            let sources=match client.sources().await {Ok(s)=>s,Err(e)=>{errs.push(format!("{name}: {e}"));continue;}};
+            let profiles:Vec<_>=sources.as_array().into_iter().flatten().filter(|s|s["agent"]=="claude" && s["available"]==true).collect();
+            if profiles.len()!=1 {
+                errs.push(format!("{name}: требуется однозначный профиль Claude для квоты (найдено {})",profiles.len()));
+                continue;
+            }
+            let profile=profiles[0];
+            let Some(id)=profile["instanceId"].as_str() else {continue;};
+            let result=client.usage_text_for(false,Some(id)).await;
+            if let Some((mut official,source)) = official_candidate(&name, result, &mut errs) {
+                official.instance_id=Some(id.into());
+                official.provider_home=profile["providerHome"].as_str().map(String::from);
+                return Ok((official,source));
             }
         }
         Err(if errs.is_empty() { "источников лимитов нет".into() } else { errs.join(" · ") })
     }
 
     pub async fn fetch_official(self: &Arc<Self>, d: &Arc<Daemon>) {
-        if self.official_busy.swap(true, Ordering::SeqCst) {
-            return;
-        }
+        let Some(_reservation) = OfficialFetchGuard::acquire(&self.official_busy) else { return };
         let got = self.obtain_official(d).await;
-        self.official_busy.store(false, Ordering::SeqCst);
-        let (text, source) = match got {
+        let (official, source) = match got {
             Ok(x) => x,
             Err(why) => {
+                // The UI and automatic limit recovery must not act on an old
+                // successful poll after every current source has failed.
+                *self.official.lock().unwrap_or_else(|p| p.into_inner()) = None;
                 // Провал добытчика обязан быть виден: раньше он молчал, и
                 // человек смотрел на пустую полоску, гадая, где сломано.
                 let changed = {
@@ -866,44 +1144,35 @@ impl Usage {
                 return;
             }
         };
-        let Some((session, week, week_model)) = parse_official(&text) else {
-            let head = crate::util::ellipsize(&crate::util::one_line(&text), 120);
-            *self.official_err.lock().unwrap_or_else(|p| p.into_inner()) =
-                Some(format!("{source}: формат /usage не разобрался — {head}"));
-            crate::log::line(&format!("[usage] формат /usage ({source}) не разобрался: {head}"));
-            return; // формат уехал — не перетираем
-        };
         *self.official_err.lock().unwrap_or_else(|p| p.into_inner()) = None;
-        {
+        let source_changed={
             let mut src = self.official_source.lock().unwrap_or_else(|p| p.into_inner());
+            let changed=*src!=source;
             if *src != source {
                 crate::log::line(&format!("[usage] лимиты приехали: источник {source}"));
                 *src = source.clone();
             }
-        }
+            changed
+        };
         let prev_pct = self
             .official
             .lock()
             .unwrap()
             .as_ref()
+            .filter(|o|!source_changed && o.instance_id==official.instance_id)
             .and_then(|o| o.session.as_ref().map(|s| s.pct))
             .unwrap_or(0);
-        let warn = session.as_ref().filter(|s| prev_pct < 90 && s.pct >= 90).cloned();
-        *self.official.lock().unwrap() = Some(Official {
-            session,
-            week,
-            week_model,
-            at: now_ms(),
-        });
+        let warn = official.session.as_ref().filter(|s| prev_pct < 90 && s.pct >= 90).cloned();
+        *self.official.lock().unwrap() = Some(official);
         // предупреждение ДО стены: пересекли 90% окна
         if let Some(w) = warn {
-            let plan = read_account().plan.unwrap_or_default();
+            let plan = self.official_info().filter(official_is_default_local).and_then(|o|o.account.plan).unwrap_or_default();
             d.notify(
                 &format!(
                     "Claude{} — окно почти исчерпано",
                     if plan.is_empty() { String::new() } else { format!(" {plan}") }
                 ),
-                &format!("{}% использовано · сброс через {}", w.pct, fmt_reset_in(w.reset_at)),
+                &format!("{} · {}% использовано · сброс через {}", source,w.pct, fmt_reset_in(w.reset_at)),
                 None,
                 "limit",
             );
@@ -970,6 +1239,46 @@ fn friendly_model_or_other(id: &str) -> String {
     } else {
         "другая".into()
     }
+}
+
+pub(crate) fn remote_session_usage(mut result:Value)->Value {
+    let trace=result.as_object_mut().and_then(|o|o.remove("trace")).unwrap_or(Value::Null);
+    let models=trace["models"].as_array();
+    let mut tok=Tok::default(); let mut cost=0.0; let mut known=false; let mut requests=0.0;
+    for model in models.into_iter().flatten() {
+        let read=|key:&str|model[key].as_f64().filter(|n|n.is_finite() && *n>=0.0).unwrap_or(0.0);
+        let observed=model["inputTokens"].is_number() || model["outputTokens"].is_number();
+        if !observed {continue;}
+        known=true;
+        let tokens=Tok {input:read("inputTokens"),out:read("outputTokens"),cr:read("cacheReadTokens"),
+            cw:read("cacheWriteTokens"),reasoning:read("reasoningTokens").min(read("outputTokens"))};
+        let model_id=model["model"].as_str().unwrap_or("");
+        let friendly=if trace["sourceFormat"]=="codex" {crate::backend::backend(crate::backend::Agent::Codex).friendly_model(model_id)}else{friendly_model_or_other(model_id)};
+        cost+=tokens.cost(&friendly);requests+=read("requests");
+        tok.input+=tokens.input;tok.out+=tokens.out;tok.cr+=tokens.cr;tok.cw+=tokens.cw;tok.reasoning+=tokens.reasoning;
+    }
+    for (key,value) in [("tok",tok.total()),("cost",cost),("inputTokens",tok.input),("outputTokens",tok.out),
+        ("cacheReadTokens",tok.cr),("cacheWriteTokens",tok.cw),("reasoningTokens",tok.reasoning),("requests",requests)] {
+        result[key]=if known {serde_json::json!(value)}else{Value::Null};
+    }
+    let input=tok.input+tok.cr+tok.cw;
+    result["cacheHitPct"]=if known && input>0.0 {serde_json::json!(100.0*tok.cr/input)}else{Value::Null};
+    result["costEstimated"]=serde_json::json!(true);
+    result["costBasis"]=serde_json::json!("model-family-estimate");
+    result["coverage"]=trace["coverage"].clone();
+    result["firstAt"]=trace["firstAt"].clone();result["lastAt"]=trace["lastAt"].clone();
+    result["partial"]=serde_json::json!(trace["coverage"]["truncated"]==true || !known);
+    result["available"]=serde_json::json!(known);
+    if !trace.is_null() {
+        for key in ["machine","instanceId","providerHome","providerSessionId"] {result[key]=trace[key].clone();}
+        result["instanceLabel"]=trace["sourceLabel"].clone();
+    }
+    result
+}
+
+fn official_is_default_local(info:&OfficialInfo)->bool {
+    info.source=="local" && info.provider=="claude" && info.provider_home.as_deref().is_some_and(|home|
+        crate::agent_instances::canonical_home(&claude_dir()).ok().as_deref()==Some(Path::new(home)))
 }
 
 /// JS-truthiness для значений конфига: '', null, false, 0 → false.
@@ -1134,6 +1443,103 @@ fn parse_reset_date(s: &str) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fork_usage_skips_parent_prefix_preserves_child_identity_and_restores_ordinal() {
+        let child=serde_json::json!({"type":"session_meta","payload":{"id":"child","cwd":"/qa/child","forked_from_id":"parent","subagent_history_start_ordinal":4}});
+        let parent=serde_json::json!({"type":"session_meta","payload":{"id":"parent","cwd":"/qa/parent"}});
+        let log=UsageLog::new(&format!("{child}\n{parent}\n{}",codex_event("2026-09-05T01:00:00Z",raw_usage(1000,0,100,0),raw_usage(1000,0,100,0))));
+        let usage=usage_with_state(State::default());
+        let offset=usage.parse_codex_file_part(log.path(),0);
+        assert!(usage.for_session("parent").is_none());assert!(usage.for_session("child").is_none());
+        let restored:State=serde_json::from_str(&serde_json::to_string(&*usage.state.lock().unwrap()).unwrap()).unwrap();
+        let usage=usage_with_state(restored);
+        log.append(&format!("{}\n{}\n{}{}",
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[]}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-5.4"}}),
+            codex_event("2026-09-05T01:00:01Z",raw_usage(1200,0,120,0),raw_usage(200,0,20,0)),
+            codex_event("2026-09-05T01:00:02Z",raw_usage(1300,0,130,0),raw_usage(100,0,10,0))));
+        usage.parse_codex_file_part(log.path(),offset);
+        assert_eq!(usage.for_session("child").unwrap()["tok"],330.0);
+        assert!(usage.for_session("parent").is_none());
+        assert_eq!(usage.state.lock().unwrap().sessions["child"].project,"child");
+    }
+
+    #[test]
+    fn fork_first_total_without_last_is_only_a_baseline() {
+        let mut cursor=CodexCursor::default();cursor.scope.forked=true;
+        assert!(cursor.take_usage(&serde_json::json!({"total_token_usage":raw_usage(1200,0,120,0)}),"first").is_none());
+        let next=cursor.take_usage(&serde_json::json!({"total_token_usage":raw_usage(1300,0,130,0)}),"next").unwrap();
+        assert_eq!(next.total(),110.0);
+    }
+    #[test]
+    fn remote_session_usage_preserves_unknown_offline_and_excludes_reasoning_from_total() {
+        let missing=remote_session_usage(serde_json::json!({"trace":null,"source":"remote-transcripts","machine":"vm-a","stale":true,"error":"offline"}));
+        assert!(missing["tok"].is_null());assert!(missing["cost"].is_null());assert_eq!(missing["available"],false);
+        let observed=remote_session_usage(serde_json::json!({"source":"remote-transcripts","stale":true,"cachedAt":100,"trace":{
+            "sourceFormat":"codex","machine":"vm-a","instanceId":"personal","sourceLabel":"Personal","coverage":{"truncated":true},
+            "models":[{"model":"gpt-5.4","inputTokens":80,"cacheReadTokens":20,"outputTokens":30,"reasoningTokens":12,"requests":1}]}}));
+        assert_eq!(observed["tok"],130.0);assert_eq!(observed["reasoningTokens"],12.0);
+        assert_eq!(observed["instanceId"],"personal");assert_eq!(observed["partial"],true);
+        assert_eq!(observed["stale"],true);assert_eq!(observed["cachedAt"],100);
+        assert!(!observed.to_string().contains("\"trace\""));
+    }
+
+    #[test]
+    fn official_quota_matches_provider_machine_and_profile_only() {
+        let usage=usage_with_state(State::default());
+        *usage.official.lock().unwrap()=Some(Official {source:"vm-a".into(),session:Some(PctReset{pct:95,reset_at:now_ms()+100000}),week:None,week_model:None,at:now_ms(),
+            instance_id:Some("claude-v1-work".into()),provider_home:Some("/guest/work".into())});
+        *usage.official_source.lock().unwrap()="vm-a".into();
+        let mut session=crate::model::Session::new("vm-a:sid".into(),0);
+        session.remote=Some("vm-a".into());session.agent=Some("claude".into());session.instance_id=Some("claude-v1-work".into());
+        let info=usage.official_info_for_session(&session).unwrap();
+        assert_eq!(info.provider_home.as_deref(),Some("/guest/work"));assert!(info.account.plan.is_none());
+        assert!(usage.stats("today")["official"]["windowTokens"].is_null());
+        session.agent=Some("codex".into());assert!(usage.official_info_for_session(&session).is_none());
+        session.agent=Some("claude".into());session.remote=Some("vm-b".into());assert!(usage.official_info_for_session(&session).is_none());
+        session.remote=Some("vm-a".into());session.instance_id=Some("claude-v1-personal".into());assert!(usage.official_info_for_session(&session).is_none());
+        session.instance_id=None;assert!(usage.official_info_for_session(&session).is_none());
+    }
+
+    #[test]
+    fn codex_accounts_with_equal_provider_ids_have_independent_totals_and_cursors() {
+        let log = UsageLog::new(&format!("{}\n{}", serde_json::json!({"type":"session_meta","payload":{"id":"same-id","cwd":"/qa/project"}}),
+            codex_event("2026-09-05T01:00:00Z", raw_usage(100, 20, 10, 0), raw_usage(100, 20, 10, 0))));
+        let usage = usage_with_state(State::default());
+        let first = CodexSourceFile { path: log.path().into(), key: "codex:work:same-id".into(), sid:"same-id".into(), instance_id:"work".into(), label:"Work".into(), home:"/qa/work".into() };
+        let second = CodexSourceFile { key:"codex:personal:same-id".into(), instance_id:"personal".into(), label:"Personal".into(), home:"/qa/personal".into(), ..first.clone() };
+        let at = usage.parse_codex_file_part_scoped(log.path(), 0, Some(&first));
+        usage.parse_codex_file_part_scoped(log.path(), 0, Some(&second));
+        assert_eq!(usage.for_session(&first.key).unwrap()["tok"],110.0);
+        assert_eq!(usage.for_session(&second.key).unwrap()["tok"],110.0);
+        assert_eq!(usage.for_session(&second.key).unwrap()["instanceLabel"],"Personal");
+        assert!(usage.for_session("same-id").is_none());
+        log.append(&codex_event("2026-09-05T01:00:03Z",raw_usage(100,20,10,0),raw_usage(100,20,10,0)));
+        log.append(&codex_event("2026-09-05T01:00:05Z",raw_usage(160,30,20,0),raw_usage(60,10,10,0)));
+        usage.parse_codex_file_part_scoped(log.path(),at,Some(&first));
+        assert_eq!(usage.for_session(&first.key).unwrap()["tok"],180.0);
+        assert_eq!(usage.for_session(&second.key).unwrap()["tok"],110.0);
+    }
+
+    #[test]
+    fn codex_archive_move_preserves_logical_cursor_and_new_usage_only() {
+        let log = UsageLog::new(&format!("{}\n{}", serde_json::json!({"type":"session_meta","payload":{"id":"archive-id","cwd":"/qa/project"}}),
+            codex_event("2026-09-05T01:00:00Z",raw_usage(100,20,10,0),raw_usage(100,20,10,0))));
+        let usage = usage_with_state(State::default());
+        let mut source = CodexSourceFile { path: log.path().into(), key:"codex:personal:archive-id".into(), sid:"archive-id".into(), instance_id:"personal".into(), label:"Personal".into(), home:"/qa/personal".into() };
+        let at = usage.parse_codex_file_part_scoped(log.path(),0,Some(&source));
+        let archived = log.0.with_extension("archived.jsonl");
+        fs::rename(&log.0,&archived).unwrap();
+        source.path=archived.to_string_lossy().into_owned();
+        use std::io::Write;
+        let mut file=fs::OpenOptions::new().append(true).open(&archived).unwrap();
+        file.write_all(codex_event("2026-09-05T01:00:03Z",raw_usage(100,20,10,0),raw_usage(100,20,10,0)).as_bytes()).unwrap();
+        file.write_all(codex_event("2026-09-05T01:00:05Z",raw_usage(150,30,20,0),raw_usage(50,10,10,0)).as_bytes()).unwrap();
+        usage.parse_codex_file_part_scoped(&source.path,at,Some(&source));
+        assert_eq!(usage.for_session(&source.key).unwrap()["tok"],170.0);
+        assert_eq!(usage.for_session(&source.key).unwrap()["requests"],2.0);
+        let _=fs::remove_file(archived);
+    }
 
     /// Живой вывод `claude /usage` от 2026-08-10 — дословно. Каждый дрейф
     /// формата до этого замечал пользователь, а не тест; теперь наоборот.
@@ -1141,6 +1547,33 @@ mod tests {
 Current session: 62% used · resets Aug 10, 6:59pm (UTC)\n\
 Current week (all models): 94% used · resets Aug 10, 10:59pm (UTC)\n\
 Current week (Fable): 54% used · resets Aug 10, 11pm (UTC)\n";
+
+    #[test]
+    fn unsupported_local_usage_does_not_mask_a_valid_remote_source() {
+        // Observed from installed Claude 2.1.258: exit success, but no quota data.
+        let cost = "Total cost: $0.0000\nTotal duration (API): 0s\n";
+        let mut errors = Vec::new();
+        assert!(official_candidate("local", Ok(cost.into()), &mut errors).is_none());
+        assert!(official_candidate("offline", Err("connection failed".into()), &mut errors).is_none());
+        let (official, source) = official_candidate("working-node", Ok(REAL_USAGE.into()), &mut errors)
+            .expect("continue to a source with actual limits");
+        assert_eq!(source, "working-node");
+        assert_eq!(official.session.unwrap().pct, 62);
+        assert_eq!(errors.len(), 2);
+        assert!(errors[0].contains("CLI не вернул лимиты подписки"));
+        assert!(!errors[0].contains("$0.0000"));
+    }
+
+    #[test]
+    fn cancelled_quota_refresh_releases_reservation_without_releasing_another_owner() {
+        let busy = AtomicBool::new(false);
+        let first = OfficialFetchGuard::acquire(&busy).unwrap();
+        assert!(OfficialFetchGuard::acquire(&busy).is_none());
+        assert!(busy.load(Ordering::SeqCst), "a rejected caller must not release the owner");
+        drop(first); // Also happens when the async refresh future is cancelled.
+        assert!(!busy.load(Ordering::SeqCst));
+        assert!(OfficialFetchGuard::acquire(&busy).is_some());
+    }
 
     #[test]
     fn official_parses_the_real_output() {
@@ -1215,7 +1648,7 @@ Current week (Sonnet only): 30% used\n";
 
     #[test]
     fn cost_uses_cache_multipliers() {
-        let t = Tok { input: 1_000_000.0, out: 0.0, cw: 1_000_000.0, cr: 1_000_000.0 };
+        let t = Tok { input: 1_000_000.0, out: 0.0, cw: 1_000_000.0, cr: 1_000_000.0, ..Default::default() };
         // Sonnet: 3 + 3*1.25 + 3*0.1 = 7.05
         assert!((t.cost("Sonnet") - 7.05).abs() < 1e-9);
     }
@@ -1229,5 +1662,155 @@ Current week (Sonnet only): 30% used\n";
         Usage::add_record(&mut st, 6 * 3_600_000, "Sonnet", "p", "plan", "s1", Tok { input: 5.0, ..Default::default() });
         assert_eq!(st.window.start, 6 * 3_600_000);
         assert_eq!(st.window.tokens, 5.0);
+    }
+
+    fn raw_usage(input: u64, cached: u64, output: u64, reasoning: u64) -> Value {
+        serde_json::json!({
+            "input_tokens": input, "cached_input_tokens": cached,
+            "output_tokens": output, "reasoning_output_tokens": reasoning,
+            "total_tokens": input + output,
+        })
+    }
+
+    #[test]
+    fn codex_cumulative_counters_deduplicate_and_include_reasoning_once() {
+        let mut cursor = CodexCursor::default();
+        let first = raw_usage(100, 40, 20, 8);
+        let info = serde_json::json!({ "total_token_usage": first, "last_token_usage": first });
+        let first = cursor.take_usage(&info, "first").unwrap();
+        assert_eq!(first.total(), 120.0);
+        assert_eq!((first.input, first.cr, first.out, first.reasoning), (60.0, 40.0, 20.0, 8.0));
+        assert!(cursor.take_usage(&info, "later quota refresh").is_none());
+        let next = serde_json::json!({
+            "total_token_usage": raw_usage(250, 100, 40, 12),
+            // Intentionally stale: cumulative growth is authoritative.
+            "last_token_usage": raw_usage(100, 40, 20, 8),
+        });
+        let delta = cursor.take_usage(&next, "next").unwrap();
+        assert_eq!(delta.total(), 170.0);
+        assert_eq!((delta.input, delta.cr, delta.out, delta.reasoning), (90.0, 60.0, 20.0, 4.0));
+        let without_last = serde_json::json!({ "total_token_usage": raw_usage(300, 120, 50, 16) });
+        assert_eq!(cursor.take_usage(&without_last, "third").unwrap().total(), 60.0);
+        assert!(cursor.take_usage(&Value::Null, "quota only").is_none());
+    }
+
+    #[test]
+    fn codex_reset_and_legacy_fallback_do_not_recount_a_request() {
+        let mut cursor = CodexCursor::default();
+        cursor.take_usage(&serde_json::json!({ "total_token_usage": raw_usage(1000, 500, 200, 80) }), "first");
+        let reset = serde_json::json!({
+            "total_token_usage": raw_usage(100, 40, 20, 8),
+            "last_token_usage": raw_usage(30, 10, 5, 2),
+        });
+        assert_eq!(cursor.take_usage(&reset, "reset").unwrap().total(), 35.0);
+        assert!(cursor.take_usage(&reset, "reset again").is_none());
+        let legacy = serde_json::json!({ "last_token_usage": raw_usage(30, 10, 5, 2) });
+        assert_eq!(cursor.take_usage(&legacy, "same timestamp").unwrap().total(), 35.0);
+        assert!(cursor.take_usage(&legacy, "same timestamp").is_none());
+        // Restored totals include the fallback event already counted above.
+        let restored = serde_json::json!({ "total_token_usage": raw_usage(130, 50, 25, 10) });
+        assert!(cursor.take_usage(&restored, "restored").is_none());
+    }
+
+    fn usage_with_state(state: State) -> Usage {
+        Usage {
+            msg_seen: Mutex::new(OrderedRing::from_iter(state.msg_ids.iter().cloned())),
+            state: Mutex::new(state), billing_cache: Mutex::new(HashMap::new()),
+            official: Mutex::new(None), official_source: Mutex::new(String::new()),
+            official_err: Mutex::new(None), scanning: AtomicBool::new(false),
+            official_busy: AtomicBool::new(false), persist_pending: AtomicBool::new(false),
+        }
+    }
+
+    struct UsageLog(PathBuf);
+
+    impl UsageLog {
+        fn new(text: &str) -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "jarvis-usage-{}-{}.jsonl", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed),
+            ));
+            fs::write(&path, text).unwrap();
+            Self(path)
+        }
+        fn path(&self) -> &str { self.0.to_str().unwrap() }
+        fn append(&self, text: &str) {
+            use std::io::Write;
+            fs::OpenOptions::new().append(true).open(&self.0).unwrap().write_all(text.as_bytes()).unwrap();
+        }
+    }
+
+    impl Drop for UsageLog {
+        fn drop(&mut self) { let _ = fs::remove_file(&self.0); }
+    }
+
+    fn codex_event(timestamp: &str, total: Value, last: Value) -> String {
+        format!("{}\n", serde_json::json!({
+            "timestamp": timestamp, "type": "event_msg",
+            "payload": { "type": "token_count", "info": {
+                "total_token_usage": total, "last_token_usage": last,
+            } },
+        }))
+    }
+
+    #[test]
+    fn codex_incremental_scan_survives_restart_and_partial_lines() {
+        let first = raw_usage(100, 40, 20, 8);
+        let log = UsageLog::new(&format!(
+            "{}\n{}\n{}",
+            serde_json::json!({ "type": "session_meta", "payload": { "id": "usage-session", "cwd": "/work/project" } }),
+            serde_json::json!({ "type": "turn_context", "payload": { "model": "gpt-5.5" } }),
+            codex_event("2026-09-05T01:00:00Z", first.clone(), first.clone()),
+        ));
+        let usage = usage_with_state(State::default());
+        let offset = usage.parse_codex_file_part(log.path(), 0);
+        usage.state.lock().unwrap().offsets.insert(log.path().into(), offset);
+        assert_eq!(usage.for_session("usage-session").unwrap()["tok"], 120.0);
+
+        // Same persisted state as load() uses, including the model/cumulative cursor.
+        let state: State = serde_json::from_str(&serde_json::to_string(&*usage.state.lock().unwrap()).unwrap()).unwrap();
+        let restarted = usage_with_state(state);
+        let duplicate = codex_event("2026-09-05T01:00:02Z", first.clone(), first);
+        let next = codex_event("2026-09-05T01:00:05Z", raw_usage(250, 100, 40, 12), raw_usage(150, 60, 20, 4));
+        log.append(&duplicate);
+        log.append(&next[..next.len() / 2]);
+        let after_duplicate = restarted.parse_codex_file_part(log.path(), offset);
+        assert_eq!(after_duplicate, offset + duplicate.len() as u64);
+        assert_eq!(restarted.for_session("usage-session").unwrap()["tok"], 120.0);
+        log.append(&next[next.len() / 2..]);
+        let final_offset = restarted.parse_codex_file_part(log.path(), after_duplicate);
+        assert_eq!(final_offset, fs::metadata(&log.0).unwrap().len());
+        let session = restarted.for_session("usage-session").unwrap();
+        assert_eq!(session["tok"], 290.0);
+        assert_eq!(session["model"], "gpt-5.5");
+        assert_eq!(session["requests"], 2.0);
+        assert_eq!(session["reasoningTokens"], 12.0);
+        assert_eq!(session["cacheHitPct"], 40.0);
+        assert_eq!(session["costEstimated"], true);
+        assert_eq!(session["source"], "local-transcripts");
+        assert_eq!(restarted.state.lock().unwrap().sessions["usage-session"].project, "project");
+    }
+
+    #[test]
+    fn claude_usage_accepts_whitespace_deduplicates_and_preserves_byte_offsets() {
+        let entry = serde_json::json!({
+            "type": "assistant", "sessionId": "claude-session", "cwd": "/work/claude-project",
+            "timestamp": "2026-09-05T01:00:00Z", "message": {
+                "id": "claude-message", "model": "claude-sonnet-4-5", "usage": {
+                    "input_tokens": 100, "output_tokens": 20,
+                    "cache_creation_input_tokens": 10, "cache_read_input_tokens": 70,
+                },
+            },
+        }).to_string().replace("\":", "\": ");
+        let log = UsageLog::new("");
+        fs::write(&log.0, b"\xff\n").unwrap(); // Invalid UTF-8 must not shift the byte cursor.
+        log.append(&format!("{entry}\n{entry}\n"));
+        let usage = usage_with_state(State::default());
+        let offset = usage.parse_file_part(log.path(), 0);
+        assert_eq!(offset, fs::metadata(&log.0).unwrap().len());
+        let session = usage.for_session("claude-session").unwrap();
+        assert_eq!(session["tok"], 200.0);
+        assert_eq!(session["requests"], 1.0);
+        assert_eq!(session["cacheReadTokens"], 70.0);
     }
 }

@@ -61,3 +61,38 @@ test('payload carries texts aligned to questions when any custom present', () =>
     { answers: [[], [1, 3]], texts: ['свой ответ', null] },
   );
 });
+
+const request = { requestId: 'rpc-4', revision: 2, transport: 'tmux', questions: [
+  { id: 'storage', options: [{ id: 'local', label: 'Local' }, { id: 'vm', label: 'VM' }] },
+  { id: 'notes', options: [], customAllowed: true },
+] };
+
+test('payload binds every answer to the exact request, revision and option identities', () => {
+  assert.deepEqual(QA.buildPayload([[2], []], ['', 'Строка 1\nСтрока 2'], request, 'send-12'), {
+    requestId: 'rpc-4', revision: 2, submissionId: 'send-12', answers: [
+      { questionId: 'storage', optionIds: ['vm'], text: null },
+      { questionId: 'notes', optionIds: [], text: 'Строка 1\nСтрока 2' },
+    ],
+  });
+});
+
+test('custom is a per-question capability, including Codex notes and text-only questions', () => {
+  assert.equal(QA.customAllowed('codex', { customAllowed: true }), true);
+  assert.equal(QA.customAllowed('claude', { customAllowed: false }), false);
+  assert.equal(QA.customAllowed('claude', {}, { fromScreen: true }), false);
+  assert.deepEqual(QA.commitRow({ multiSelect: false, sel: 0, chosen: new Set(), text: 'Почему', customMode: 'notes', optionCount: 2 }), { row: [1], text: 'Почему' });
+  assert.deepEqual(QA.commitRow({ multiSelect: false, sel: 0, chosen: new Set(), text: 'Свободный ответ', optionCount: 0 }), { row: [], text: 'Свободный ответ' });
+  assert.equal(QA.commitRow({ multiSelect: false, sel: 0, chosen: new Set(), text: '', optionCount: 0 }), null);
+});
+
+test('drafts survive back/reopen but never leak into another request or owning session', () => {
+  const store = QA.createDraftStore();
+  const first = store.get('vm:chat', request);
+  first.texts[1] = '  первая строка\nвторая  '; first.index = 1; first.selections[0] = 1;
+  assert.equal(store.get('vm:chat', request), first);
+  assert.equal(store.get('vm:chat', request).texts[1], '  первая строка\nвторая  ');
+  assert.deepEqual(store.get('chat', request).texts, ['', '']);
+  assert.deepEqual(store.get('vm:chat', { ...request, revision: 3 }).texts, ['', '']);
+  store.delete('vm:chat', request);
+  assert.notEqual(store.get('vm:chat', request).submissionId, first.submissionId);
+});

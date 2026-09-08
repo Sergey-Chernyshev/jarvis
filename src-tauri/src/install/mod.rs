@@ -17,6 +17,131 @@
 /// и локальный, иначе они разъедутся при первой же правке формата.
 pub mod remote;
 
+#[cfg(test)]
+mod instance_hook_tests {
+    use super::*;
+    use crate::agent_instances::{discover_with, DiscoveryContext, InstanceConfig, InstanceEntry, Registry};
+
+    struct Fixture { root: PathBuf, registry: Registry, hook: PathBuf }
+    impl Fixture {
+        fn new() -> Self {
+            let nonce = ATOMIC_WRITE_NONCE.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!("jarvis-hook-instances-{}-{nonce}", std::process::id()));
+            for dir in ["home/.codex", "personal", "disabled"] { fs::create_dir_all(root.join(dir)).unwrap(); }
+            let entries = [true, false].into_iter().zip(["personal", "disabled"]).map(|(enabled, name)| InstanceEntry {
+                home: root.join(name), label: name.into(), enabled, machine: "local".into(), cli: None, desktop_launcher: None,
+            }).collect();
+            let context = DiscoveryContext { machine: "local".into(), home: root.join("home"), codex_home: None, path_dirs: vec![], cli_candidates: vec![], excluded_dirs: vec![] };
+            let registry = discover_with(&InstanceConfig { entries, ..Default::default() }, &context).unwrap();
+            let hook = root.join("Jarvis test's/bin/jarvis-hook");
+            Self { root, registry, hook }
+        }
+    }
+    impl Drop for Fixture { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.root); } }
+
+    #[test]
+    fn repairs_all_enabled_accounts_without_touching_disabled_or_foreign_rules() {
+        let f = Fixture::new();
+        let personal = f.root.join("personal/hooks.json");
+        let disabled = f.root.join("disabled/hooks.json");
+        let foreign = json!({"type":"command","command":"foreign-notifier --keep-exact"});
+        fs::write(&personal, json!({"custom":"keep", "hooks": {
+            "SessionEnd":[{"hooks":[{"type":"command","command":"/old-dev/bin/jarvis-hook codex session-end"}]}],
+            "Stop":[{"matcher":"*", "other":"retain", "hooks":[foreign.clone(),{"type":"command","command":"/old/bin/jarvis-hook codex stop"}]}]
+        }}).to_string()).unwrap();
+        fs::write(&disabled, "disabled owner data").unwrap();
+        let health = repair_instance_registry(&f.registry, &f.hook, None, &|_| {}).unwrap();
+        assert_eq!(health.iter().filter(|h| h.enabled && h.rules_installed).count(), 2);
+        assert!(health.iter().all(|h| h.trust_status == "unknown" && h.delivery_status == "unknown"));
+        assert_eq!(fs::read_to_string(&disabled).unwrap(), "disabled owner data");
+        let value: Value = serde_json::from_slice(&fs::read(&personal).unwrap()).unwrap();
+        assert_eq!(value["custom"], "keep");
+        assert_eq!(value["hooks"]["Stop"][0], json!({"matcher":"*", "other":"retain", "hooks":[foreign]}));
+        assert_eq!(value["hooks"]["SessionEnd"][0]["hooks"][0]["command"], hook_command(&f.hook.to_string_lossy(), "codex", "session-end"));
+        let before = fs::read(&personal).unwrap();
+        let timestamp = fs::metadata(&personal).unwrap().modified().unwrap();
+        repair_instance_registry(&f.registry, &f.hook, None, &|_| {}).unwrap();
+        assert_eq!(fs::read(&personal).unwrap(), before);
+        assert_eq!(fs::metadata(&personal).unwrap().modified().unwrap(), timestamp);
+    }
+
+    #[test]
+    fn unknown_and_disabled_targets_fail_before_any_write() {
+        let f = Fixture::new();
+        let disabled = f.registry.instances.iter().find(|i| !i.enabled).unwrap().id.clone();
+        for id in ["missing".to_string(), disabled] {
+            assert!(repair_instance_registry(&f.registry, &f.hook, Some(&[id]), &|_| {}).is_err());
+            assert!(!f.hook.exists());
+            assert!(!f.root.join("home/.codex/hooks.json").exists());
+        }
+    }
+
+    #[test]
+    fn malformed_account_file_is_preserved_and_reported() {
+        let f = Fixture::new();
+        let path = f.root.join("personal/hooks.json");
+        fs::write(&path, "[1,2,3]").unwrap();
+        let health = repair_instance_registry(&f.registry, &f.hook, None, &|_| {}).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "[1,2,3]");
+        let bad = health.iter().find(|h| h.label == "personal").unwrap();
+        assert!(!bad.rules_installed);
+        assert!(!bad.errors.is_empty());
+    }
+
+    #[test]
+    fn runtime_trust_is_based_on_exact_hooks_list_evidence_never_file_presence() {
+        let f = Fixture::new();
+        let mut health = instance_health_for_registry(&f.registry, &f.hook).remove(0);
+        let hooks: Vec<Value> = CODEX_EVENTS.iter().map(|(_, arg)| json!({
+            "sourcePath":health.hooks_path,"command":hook_command(&health.hook_bin,"codex",arg),
+            "enabled":true,"trustStatus":"trusted"
+        })).collect();
+        apply_runtime_hook_health(&mut health, &json!({"data":[{"hooks":hooks}]}));
+        assert_eq!(health.trust_status, "trusted");
+        assert_eq!(health.delivery_status, "unknown");
+        let mut modified = hooks.clone(); modified[0]["trustStatus"] = json!("modified");
+        apply_runtime_hook_health(&mut health, &json!({"data":[{"hooks":modified}]}));
+        assert_eq!(health.trust_status, "modified");
+        let foreign: Vec<Value> = hooks.into_iter().map(|mut hook| { hook["sourcePath"] = json!("/another-account/hooks.json"); hook }).collect();
+        apply_runtime_hook_health(&mut health, &json!({"data":[{"hooks":foreign}]}));
+        assert_eq!(health.trust_status, "unknown");
+    }
+
+    #[test]
+    fn duplicate_correct_hooks_are_healed_to_one() {
+        let mut value = json!({});
+        merge_hooks(&mut value, "/tmp/bin/jarvis-hook", "codex", &CODEX_EVENTS);
+        let duplicate = value["hooks"]["Stop"][0].clone();
+        value["hooks"]["Stop"].as_array_mut().unwrap().push(duplicate);
+        let (_, healed) = merge_hooks(&mut value, "/tmp/bin/jarvis-hook", "codex", &CODEX_EVENTS);
+        assert!(healed.iter().any(|event| event == "Stop"));
+        assert_eq!(value["hooks"]["Stop"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn foreign_commands_mentioning_jarvis_in_arguments_are_not_owned() {
+        assert!(!is_ours(&json!({"command":"foreign-notifier --watch '/tmp/bin/jarvis-hook'"})));
+        assert!(is_ours(&json!({"command":hook_command("/tmp/Jarvis user's/bin/jarvis-hook", "codex", "stop")})));
+        assert!(!is_ours(&json!({"command":"/tmp/bin/jarvis-hook-other codex stop"})));
+    }
+
+    #[test]
+    fn uninstall_preserves_mixed_foreign_groups_and_is_idempotent() {
+        let f = Fixture::new();
+        let path = f.root.join("personal/hooks.json");
+        let foreign = json!({"matcher":"*","hooks":[{"type":"command","command":"foreign-command"}]});
+        let mut mixed = foreign.clone();
+        mixed["hooks"].as_array_mut().unwrap().push(json!({"type":"command","command":"/tmp/bin/jarvis-hook codex stop"}));
+        fs::write(&path, json!({"other":true,"hooks":{"Stop":[mixed],"Future":[{"unknown":"preserve"}]}}).to_string()).unwrap();
+        uninstall_hooks_from(&path, &|_| {});
+        let expected = json!({"other":true,"hooks":{"Stop":[foreign],"Future":[{"unknown":"preserve"}]}});
+        assert_eq!(serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap(), expected);
+        let before = fs::metadata(&path).unwrap().modified().unwrap();
+        uninstall_hooks_from(&path, &|_| {});
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before);
+    }
+}
+
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs;
@@ -71,10 +196,12 @@ fn core_install_phases() -> &'static [&'static str] {
 }
 
 /// Событие Codex → аргумент шима. PermissionRequest→waiting, SubagentStart/Stop
-/// →доска. У Codex нет Notification/StopFailure/SessionEnd. (Дублируется с
+/// →доска. Current Codex also emits SessionEnd; omitting it left old dev hooks
+/// installed and live sessions orphaned. Notification/StopFailure are Claude-only.
+/// (Дублируется с
 /// backend::CODEX_EVENTS осознанно: install/mod.rs компилируется отдельным
 /// бинарём jarvis-setup без остального крейта.)
-const CODEX_EVENTS: [(&str, &str); 8] = [
+const CODEX_EVENTS: [(&str, &str); 9] = [
     ("SessionStart", "session-start"),
     ("UserPromptSubmit", "prompt"),
     ("PreToolUse", "pre-tool"),
@@ -83,6 +210,7 @@ const CODEX_EVENTS: [(&str, &str); 8] = [
     ("PermissionRequest", "permission"),
     ("SubagentStart", "subagent-start"),
     ("SubagentStop", "subagent-stop"),
+    ("SessionEnd", "session-end"),
 ];
 
 /* ================= публичные типы (прогресс/статус) ================= */
@@ -203,7 +331,7 @@ pub fn plan_install(ids: &[String], inst: &Installed) -> Vec<InstallTask> {
     let mut tasks = Vec::new();
     let needs_qwen =
         (want("qwen3-0.6b") && !inst.qwen_0_6b) || (want("qwen3-1.7b") && !inst.qwen_1_7b);
-    if needs_qwen && !inst.runtime {
+    if (needs_qwen || want("qwen3-runtime")) && !inst.runtime {
         tasks.push(InstallTask {
             id: "qwen3-runtime".into(),
             kind: "runtime",
@@ -523,29 +651,16 @@ fn tmux_conf_dst() -> PathBuf {
 fn settings_path() -> PathBuf {
     home().join(".claude/settings.json")
 }
-/// Codex: $CODEX_HOME или ~/.codex; файл регистрации хуков.
-fn codex_home() -> PathBuf {
-    match std::env::var("CODEX_HOME") {
-        Ok(d) if !d.is_empty() => PathBuf::from(d),
-        _ => home().join(".codex"),
-    }
-}
-fn codex_hooks_path() -> PathBuf {
-    codex_home().join("hooks.json")
-}
 fn jarvis_settings_path() -> PathBuf {
     jarvis_dir().join("settings.json")
 }
 
 /// Установлен ли `codex` в PATH (минуя наш шим).
 fn codex_found() -> bool {
-    Command::new("/bin/sh")
-        .args(["-c", "command -v codex"])
-        .env("PATH", augmented_path())
-        .stdout(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::agent_instances::load_registry(&jarvis_dir()).is_ok_and(|registry| {
+        registry.instances.iter().filter(|instance| instance.enabled)
+            .any(|instance| registry.launch_spec(Some(&instance.id)).is_ok())
+    })
 }
 
 /* ================= STT: Whisper + Qwen3-MLX (инкр. 9, Phase 8) ================= */
@@ -1454,11 +1569,19 @@ fn read_settings() -> Result<(bool, Value), String> {
 /// файл правится, только если что-то реально изменилось (без лишних бэкапов на
 /// каждом старте демона).
 fn install_hooks_into(path: &Path, label: &str, events: &[(&str, &str)], progress: &Progress) {
+    install_hooks_into_with(path, &hook_dst(), label, events, progress)
+}
+
+fn install_hooks_into_with(path: &Path, hook_bin: &Path, label: &str, events: &[(&str, &str)], progress: &Progress) {
     match read_hooks_file(path) {
         Ok((exists, mut json)) => {
+            if !json.is_object() || json.get("hooks").is_some_and(|value| !value.is_object()) {
+                progress(Step::warn("Хуки", format!("{}: неверная структура файла хуков — файл сохранён", path.display())));
+                return;
+            }
             let (added, healed) = merge_hooks(
                 &mut json,
-                &hook_dst().display().to_string(),
+                &hook_bin.display().to_string(),
                 label,
                 events,
             );
@@ -1472,7 +1595,11 @@ fn install_hooks_into(path: &Path, label: &str, events: &[(&str, &str)], progres
             if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            atomic_write(path, &(serde_json::to_string_pretty(&json).unwrap() + "\n"));
+            let mode = fs::metadata(path).map(|metadata| metadata.permissions().mode() & 0o777).unwrap_or(0o600);
+            if let Err(error) = atomic_write_mode(path, &(serde_json::to_string_pretty(&json).unwrap() + "\n"), mode) {
+                progress(Step::warn("Хуки", format!("{}: не удалось сохранить хуки: {error}", path.display())));
+                return;
+            }
             progress(Step::done(
                 "Хуки",
                 format!("{label}: {}", hooks_msg(&added, &healed)),
@@ -1491,6 +1618,10 @@ fn install_hooks_into(path: &Path, label: &str, events: &[(&str, &str)], progres
 ///
 /// Возвращает `(добавленные, исправленные)` события; обе пусты = менять нечего.
 /// `hook_bin` — путь шима на ТОЙ машине, где конфиг будет жить.
+fn hook_command(hook_bin: &str, label: &str, event: &str) -> String {
+    format!("{} {} {}", shell_quote(hook_bin), shell_quote(label), shell_quote(event))
+}
+
 fn merge_hooks(
     json: &mut Value,
     hook_bin: &str,
@@ -1506,7 +1637,7 @@ fn merge_hooks(
     let mut added = Vec::new();
     let mut healed = Vec::new();
     for (event, arg) in events {
-        let want = format!("{hook_bin} {label} {arg}");
+        let want = hook_command(hook_bin, label, arg);
         let hooks = json["hooks"].as_object_mut().unwrap();
         let arr = hooks.entry(*event).or_insert_with(|| json!([]));
         if !arr.is_array() {
@@ -1516,27 +1647,20 @@ fn merge_hooks(
 
         let has_correct = arr.iter().any(|g| group_has_cmd(g, &want));
         let stale_present = arr.iter().any(|g| group_has_stale_ours(g, &want));
-        if has_correct && !stale_present {
+        let our_count = arr.iter().filter_map(|group| group.get("hooks").and_then(Value::as_array))
+            .flat_map(|hooks| hooks.iter()).filter(|hook| is_ours(hook)).count();
+        if has_correct && !stale_present && our_count == 1 {
             continue; // уже верно — не трогаем (иначе бэкап+запись на каждом старте)
         }
 
         // Снимаем ВСЕ наши хуки (любой путь/метка), чужие — оставляем.
-        for group in arr.iter_mut() {
-            if let Some(gh) = group.get_mut("hooks").and_then(Value::as_array_mut) {
-                gh.retain(|h| !is_ours(h));
-            }
-        }
-        arr.retain(|g| {
-            g.get("hooks")
-                .and_then(Value::as_array)
-                .is_some_and(|h| !h.is_empty())
-        });
+        remove_ours_from_groups(arr);
 
         // Ставим единственный правильный.
         arr.push(json!({
             "hooks": [{ "type": "command", "command": want, "timeout": 5 }],
         }));
-        if stale_present {
+        if stale_present || our_count > 1 {
             healed.push((*event).to_string());
         } else {
             added.push((*event).to_string());
@@ -1564,7 +1688,6 @@ fn hooks_msg(added: &[String], healed: &[String]) -> String {
 fn uninstall_hooks_from(path: &Path, progress: &Progress) {
     match read_hooks_file(path) {
         Ok((true, mut json)) if json.get("hooks").and_then(Value::as_object).is_some() => {
-            backup(path);
             let mut removed = Vec::new();
             let hooks = json["hooks"].as_object_mut().unwrap();
             let events: Vec<String> = hooks.keys().cloned().collect();
@@ -1572,28 +1695,21 @@ fn uninstall_hooks_from(path: &Path, progress: &Progress) {
                 let Some(arr) = hooks.get_mut(&event).and_then(Value::as_array_mut) else {
                     continue;
                 };
-                let before = arr.len();
-                for group in arr.iter_mut() {
-                    if let Some(gh) = group.get_mut("hooks").and_then(Value::as_array_mut) {
-                        gh.retain(|h| !is_ours(h));
-                    }
-                }
-                arr.retain(|g| {
-                    g.get("hooks")
-                        .and_then(Value::as_array)
-                        .is_some_and(|h| !h.is_empty())
-                });
-                if arr.len() != before {
+                if remove_ours_from_groups(arr) {
                     removed.push(event.clone());
-                }
-                if arr.is_empty() {
-                    hooks.remove(&event);
+                    if arr.is_empty() { hooks.remove(&event); }
                 }
             }
+            if removed.is_empty() { return; }
             if hooks.is_empty() {
                 json.as_object_mut().unwrap().remove("hooks");
             }
-            atomic_write(path, &(serde_json::to_string_pretty(&json).unwrap() + "\n"));
+            backup(path);
+            let mode = fs::metadata(path).map(|metadata| metadata.permissions().mode() & 0o777).unwrap_or(0o600);
+            if let Err(error) = atomic_write_mode(path, &(serde_json::to_string_pretty(&json).unwrap() + "\n"), mode) {
+                progress(Step::warn("Хуки", format!("{}: не удалось снять хуки: {error}", path.display())));
+                return;
+            }
             if !removed.is_empty() {
                 progress(Step::done(
                     "Хуки",
@@ -1604,6 +1720,20 @@ fn uninstall_hooks_from(path: &Path, progress: &Progress) {
         Ok(_) => {} // файла/хуков нет — тихо
         Err(e) => progress(Step::warn("Хуки", e)),
     }
+}
+
+fn remove_ours_from_groups(groups: &mut Vec<Value>) -> bool {
+    let mut changed = false;
+    groups.retain_mut(|group| {
+        let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else { return true };
+        let before = hooks.len();
+        hooks.retain(|hook| !is_ours(hook));
+        if hooks.len() != before {
+            changed = true;
+            !hooks.is_empty()
+        } else { true }
+    });
+    changed
 }
 
 static ATOMIC_WRITE_NONCE: AtomicU64 = AtomicU64::new(0);
@@ -1655,7 +1785,26 @@ fn backup(file: &Path) -> Option<PathBuf> {
 fn is_ours(hook: &Value) -> bool {
     hook.get("command")
         .and_then(Value::as_str)
-        .is_some_and(|c| c.contains(MARKER))
+        .is_some_and(|command| hook_program(command).is_some_and(|program| program.ends_with(MARKER)
+            && (program == MARKER || program.ends_with(&format!("/{MARKER}")))))
+}
+
+/// Inspect the executable word only. A foreign notifier mentioning a Jarvis
+/// path in its arguments is still foreign and must survive repair/uninstall.
+fn hook_program(command: &str) -> Option<String> {
+    let mut program = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for character in command.trim_start().chars() {
+        if escaped { program.push(character); escaped = false; continue; }
+        if character == '\\' && quote != Some('\'') { escaped = true; continue; }
+        if let Some(open) = quote {
+            if character == open { quote = None; } else { program.push(character); }
+        } else if matches!(character, '\'' | '"') { quote = Some(character); }
+        else if character.is_whitespace() { break; }
+        else { program.push(character); }
+    }
+    if quote.is_some() || escaped || program.is_empty() { None } else { Some(program) }
 }
 
 fn group_has_ours(group: &Value) -> bool {
@@ -1695,15 +1844,117 @@ fn group_has_stale_ours(group: &Value, want: &str) -> bool {
 /// дрейф пути/метки — старый prod-путь ~/.jarvis или метку `claude` в codex-файле,
 /// из-за чего «хуки молчат». Источник правды для health-самопроверки на старте.
 fn hooks_all_correct(path: &Path, label: &str, events: &[(&str, &str)]) -> bool {
+    hooks_all_correct_for(path, &hook_dst(), label, events)
+}
+
+fn hooks_all_correct_for(path: &Path, hook_bin: &Path, label: &str, events: &[(&str, &str)]) -> bool {
     let Ok((true, json)) = read_hooks_file(path) else {
         return false;
     };
     events.iter().all(|(event, arg)| {
-        let want = format!("{} {label} {arg}", hook_dst().display());
+        let want = hook_command(&hook_bin.to_string_lossy(), label, arg);
         json.pointer(&format!("/hooks/{event}"))
             .and_then(Value::as_array)
-            .is_some_and(|arr| arr.iter().any(|g| group_has_cmd(g, &want)))
+            .is_some_and(|arr| {
+                let own: Vec<&Value> = arr.iter().filter_map(|group| group.get("hooks").and_then(Value::as_array))
+                    .flat_map(|hooks| hooks.iter()).filter(|hook| is_ours(hook)).collect();
+                own.len() == 1 && own[0].get("command").and_then(Value::as_str) == Some(&want)
+            })
     })
+}
+
+/// Registration, runtime trust, and delivery are separate facts. Files alone
+/// can establish only registration; hooks/list establishes trust, not delivery.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstanceHookHealth {
+    pub instance_id: String,
+    pub label: String,
+    pub home: String,
+    pub enabled: bool,
+    pub cli_available: bool,
+    pub hooks_path: String,
+    pub hook_bin: String,
+    pub rules_installed: bool,
+    pub trust_status: String,
+    pub delivery_status: String,
+    pub errors: Vec<String>,
+}
+
+pub fn instance_health() -> Result<Vec<InstanceHookHealth>, String> {
+    let registry = crate::agent_instances::load_registry(&jarvis_dir())?;
+    Ok(instance_health_for_registry(&registry, &hook_dst()))
+}
+
+fn instance_health_for_registry(registry: &crate::agent_instances::Registry, hook_bin: &Path) -> Vec<InstanceHookHealth> {
+    registry.instances.iter().map(|instance| {
+        let hooks_path = instance.canonical_home.join("hooks.json");
+        let mut errors = Vec::new();
+        if !instance.exists { errors.push("Каталог инстанса недоступен".into()); }
+        match read_hooks_file(&hooks_path) {
+            Err(error) => errors.push(error),
+            Ok((true, value)) if !value.is_object() || value.get("hooks").is_some_and(|value| !value.is_object()) => errors.push("Неверная структура файла хуков; файл сохранён".into()),
+            _ => {},
+        }
+        InstanceHookHealth {
+            instance_id: instance.id.clone(), label: instance.label.clone(), home: instance.canonical_home.display().to_string(),
+            enabled: instance.enabled, cli_available: registry.launch_spec(Some(&instance.id)).is_ok(),
+            hooks_path: hooks_path.display().to_string(), hook_bin: hook_bin.display().to_string(),
+            rules_installed: hooks_all_correct_for(&hooks_path, hook_bin, "codex", &CODEX_EVENTS),
+            trust_status: "unknown".into(), delivery_status: "unknown".into(), errors,
+        }
+    }).collect()
+}
+
+/// Consume an actual official app-server hooks/list result without reading or
+/// writing trust settings. Only this instance's exact Jarvis commands count.
+pub fn apply_runtime_hook_health(health: &mut InstanceHookHealth, response: &Value) {
+    let Some(entries) = response.get("data").and_then(Value::as_array) else { return };
+    let expected: std::collections::HashSet<String> = CODEX_EVENTS.iter().map(|(_, arg)| hook_command(&health.hook_bin, "codex", arg)).collect();
+    let mut found = std::collections::HashMap::new();
+    for entry in entries {
+        for hook in entry.get("hooks").and_then(Value::as_array).into_iter().flatten() {
+            if hook.get("sourcePath").and_then(Value::as_str) != Some(health.hooks_path.as_str()) { continue; }
+            let Some(command) = hook.get("command").and_then(Value::as_str).filter(|command| expected.contains(*command)) else { continue };
+            let trust = if hook.get("enabled").and_then(Value::as_bool) == Some(false) {
+                "disabled"
+            } else { hook.get("trustStatus").and_then(Value::as_str).unwrap_or("unknown") };
+            found.insert(command.to_string(), trust.to_string());
+        }
+    }
+    health.trust_status = if found.values().any(|status| status == "disabled") { "disabled" }
+        else if found.values().any(|status| status == "modified") { "modified" }
+        else if found.values().any(|status| status == "untrusted") { "untrusted" }
+        else if found.len() == expected.len() && found.values().all(|status| matches!(status.as_str(), "trusted" | "managed")) { "trusted" }
+        else { "unknown" }.into();
+}
+
+/// Targeted UI repair and automatic reconciliation share one registry. An
+/// explicit unknown/disabled target is rejected before any configuration write.
+pub fn repair_hooks_for_instances(instance_ids: Option<&[String]>, progress: &Progress) -> Result<Vec<InstanceHookHealth>, String> {
+    let registry = crate::agent_instances::load_registry(&jarvis_dir())?;
+    repair_instance_registry(&registry, &hook_dst(), instance_ids, progress)
+}
+
+fn repair_instance_registry(registry: &crate::agent_instances::Registry, hook_bin: &Path, instance_ids: Option<&[String]>, progress: &Progress) -> Result<Vec<InstanceHookHealth>, String> {
+    if let Some(ids) = instance_ids {
+        for id in ids { registry.resolve(Some(id))?; }
+    }
+    if fs::read_to_string(hook_bin).ok().as_deref() != Some(HOOK_SRC) {
+        atomic_write_mode(hook_bin, HOOK_SRC, 0o755).map_err(|error| format!("Не удалось обновить jarvis-hook: {error}"))?;
+    }
+    for instance in registry.instances.iter().filter(|instance| instance.enabled && instance_ids.map_or(true, |ids| ids.contains(&instance.id))) {
+        if !instance.exists {
+            progress(Step::warn("Хуки", format!("{}: каталог Codex недоступен", instance.label)));
+            continue;
+        }
+        install_hooks_into_with(&instance.canonical_home.join("hooks.json"), hook_bin, "codex", &CODEX_EVENTS, progress);
+    }
+    Ok(instance_health_for_registry(registry, hook_bin))
+}
+
+fn reconcile_codex_instances(progress: &Progress) {
+    if let Err(error) = repair_hooks_for_instances(None, progress) { progress(Step::warn("Хуки", error)); }
 }
 
 /// Health-снимок интеграции (read-only, без сети) — для самопроверки на старте
@@ -1744,7 +1995,8 @@ impl IntegrationHealth {
 
 /// Снять health-снимок интеграции. `codex_found()` дёргает `command -v` — несколько мс.
 pub fn integration_health() -> IntegrationHealth {
-    let codex_present = codex_found();
+    let instances = instance_health();
+    let codex_present = instances.as_ref().map(|instances| instances.iter().any(|instance| instance.enabled && (instance.cli_available || Path::new(&instance.home).is_dir()))).unwrap_or(true);
     IntegrationHealth {
         jarvis_dir: jarvis_dir().display().to_string(),
         hook_bin: hook_dst().exists(),
@@ -1752,8 +2004,7 @@ pub fn integration_health() -> IntegrationHealth {
         claude_present: claude_found(),
         claude_hooks_ok: hooks_all_correct(&settings_path(), "claude", &EVENTS),
         codex_present,
-        codex_hooks_ok: !codex_present
-            || hooks_all_correct(&codex_hooks_path(), "codex", &CODEX_EVENTS),
+        codex_hooks_ok: instances.is_ok_and(|instances| instances.iter().filter(|instance| instance.enabled && Path::new(&instance.home).is_dir()).all(|instance| instance.rules_installed)),
         claude_shim: shim_dst().exists(),
         codex_shim: codex_shim_dst().exists(),
     }
@@ -1766,9 +2017,7 @@ pub fn integration_health() -> IntegrationHealth {
 /// смены dev↔prod профиля, из-за которого codex дёргал несуществующий бинарь.
 pub fn reconcile_hooks(progress: &Progress) {
     install_hooks_into(&settings_path(), "claude", &EVENTS, progress);
-    if codex_found() {
-        install_hooks_into(&codex_hooks_path(), "codex", &CODEX_EVENTS, progress);
-    }
+    reconcile_codex_instances(progress);
 }
 
 /// Починить/обновить ТОЛЬКО интеграцию агентов: hook binary + хуки
@@ -1920,6 +2169,7 @@ pub fn installed_state() -> Installed {
 /// Запустить установку одной модели по id (маршрутизация на готовый загрузчик).
 /// Используется оркестратором `models_install`. Неизвестный id → Err.
 pub fn run_install_task(id: &str, progress: &Progress, proxy: Option<&str>) -> Result<(), String> {
+    model_install_support(id)?;
     match id {
         "qwen3-runtime" => install_stt_sidecar(progress, proxy),
         "whisper-turbo" => install_whisper(progress, proxy),
@@ -1928,6 +2178,87 @@ pub fn run_install_task(id: &str, progress: &Progress, proxy: Option<&str>) -> R
         "hey_jarvis" => install_wakeword(progress, proxy),
         "silero" => install_silero(progress, proxy),
         other => Err(format!("неизвестная модель: {other}")),
+    }
+}
+
+/// Reject unavailable models before creating environments or downloading data.
+/// Keep the pure plan_install function platform-independent for CLI planning.
+pub fn model_install_support(id: &str) -> Result<(), String> {
+    model_install_support_for(
+        id,
+        cfg!(all(target_os = "macos", target_arch = "aarch64")),
+        cfg!(feature = "whisper-native"),
+        cfg!(feature = "wakeword-ort"),
+    )
+}
+
+fn model_install_support_for(
+    id: &str,
+    apple_silicon: bool,
+    whisper: bool,
+    wake: bool,
+) -> Result<(), String> {
+    match id {
+        "qwen3-runtime" | "qwen3-0.6b" | "qwen3-1.7b" if !apple_silicon => {
+            Err("Qwen3-ASR MLX доступен только на Mac с Apple Silicon".into())
+        }
+        "whisper-turbo" if !whisper => Err(
+            "В этой сборке нет движка Whisper. Установите сборку с поддержкой whisper-native"
+                .into(),
+        ),
+        "hey_jarvis" if !wake => Err(
+            "В этой сборке нет голосовой активации. Установите сборку с поддержкой wakeword-ort"
+                .into(),
+        ),
+        "qwen3-runtime" | "qwen3-0.6b" | "qwen3-1.7b" | "whisper-turbo" | "hey_jarvis"
+        | "silero" => Ok(()),
+        _ => Err(format!("Неизвестная модель: {id}")),
+    }
+}
+
+pub fn plan_install_checked(
+    ids: &[String],
+    installed: &Installed,
+) -> Result<Vec<InstallTask>, String> {
+    for id in ids {
+        model_install_support(id)?;
+    }
+    Ok(plan_install(ids, installed))
+}
+
+#[cfg(test)]
+mod model_support_tests {
+    use super::*;
+    #[test]
+    fn unsupported_models_are_rejected_before_installation() {
+        assert!(model_install_support_for("qwen3-0.6b", false, true, true)
+            .unwrap_err()
+            .contains("Apple Silicon"));
+        assert!(
+            model_install_support_for("whisper-turbo", true, false, true)
+                .unwrap_err()
+                .contains("whisper-native")
+        );
+        assert!(model_install_support_for("hey_jarvis", true, true, false)
+            .unwrap_err()
+            .contains("wakeword-ort"));
+        assert!(model_install_support_for("unknown", true, true, true).is_err());
+        assert!(model_install_support_for("silero", false, false, false).is_ok());
+    }
+    #[test]
+    fn supported_models_and_explicit_qwen_runtime_are_plannable() {
+        for id in [
+            "qwen3-runtime",
+            "qwen3-0.6b",
+            "qwen3-1.7b",
+            "whisper-turbo",
+            "hey_jarvis",
+        ] {
+            assert!(model_install_support_for(id, true, true, true).is_ok());
+        }
+        let plan = plan_install(&["qwen3-runtime".into()], &Installed::default());
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].id, "qwen3-runtime");
     }
 }
 
@@ -2059,28 +2390,16 @@ pub fn status_report() -> String {
             "✗ не найден"
         }
     );
-    if codex_found() {
-        match read_hooks_file(&codex_hooks_path()) {
-            Ok((true, json)) => {
-                out += &format!("  hooks.json: {}\n", codex_hooks_path().display());
-                for (event, _) in CODEX_EVENTS {
-                    out += &format!("    {} {event}\n", mark(event_installed(&json, event)));
-                }
-            }
-            Ok((false, _)) => {
-                out += &format!(
-                    "  hooks.json: ✗ {} не существует\n",
-                    codex_hooks_path().display()
-                )
-            }
-            Err(e) => out += &format!("  hooks.json: ⚠ {e}\n"),
-        }
-        out += &format!(
-            "  {} шим codex ({})\n",
-            mark(codex_shim_dst().exists()),
-            codex_shim_dst().display()
-        );
+    match instance_health() {
+        Ok(instances) => for instance in instances {
+            out += &format!("  {} [{}] {}: правила={}, доверие={}, доставка={} ({})\n",
+                instance.label, instance.instance_id, if instance.enabled { "включён" } else { "отключён" },
+                yn(instance.rules_installed), instance.trust_status, instance.delivery_status, instance.hooks_path);
+            for error in instance.errors { out += &format!("    ⚠ {error}\n"); }
+        },
+        Err(error) => out += &format!("  ⚠ {error}\n"),
     }
+    out += &format!("  {} шим codex ({})\n", mark(codex_shim_dst().exists()), codex_shim_dst().display());
     out
 }
 
@@ -2127,9 +2446,7 @@ pub fn install_core(progress: &Progress) -> IntegrationHealth {
     // Claude — всегда (хуки ждут появления claude). Codex — только если установлен
     // (иначе незачем создавать ~/.codex/hooks.json для несуществующего CLI).
     install_hooks_into(&settings_path(), "claude", &EVENTS, progress);
-    if codex_found() {
-        install_hooks_into(&codex_hooks_path(), "codex", &CODEX_EVENTS, progress);
-    }
+    reconcile_codex_instances(progress);
 
     // --- Фаза «Транспорт» (шим claude + tmux.conf + PATH-блок) ---
     progress(Step::start("Транспорт"));
@@ -2241,7 +2558,12 @@ fn install_tmux_transport(progress: &Progress) {
 pub fn uninstall(progress: &Progress) {
     progress(Step::start("Хуки"));
     uninstall_hooks_from(&settings_path(), progress);
-    uninstall_hooks_from(&codex_hooks_path(), progress);
+    match crate::agent_instances::load_registry(&jarvis_dir()) {
+        Ok(registry) => for instance in registry.instances.iter().filter(|instance| instance.enabled) {
+            uninstall_hooks_from(&instance.canonical_home.join("hooks.json"), progress);
+        },
+        Err(error) => progress(Step::warn("Хуки", error)),
+    }
     progress(Step::done("Хуки", "записи Jarvis сняты (claude + codex)"));
 
     progress(Step::start("Транспорт"));
@@ -2834,7 +3156,7 @@ mod tests {
 
     #[test]
     fn codex_events_shape() {
-        assert_eq!(CODEX_EVENTS.len(), 8);
+        assert_eq!(CODEX_EVENTS.len(), 9);
         assert!(CODEX_EVENTS
             .iter()
             .any(|(e, a)| *e == "Stop" && *a == "stop"));
@@ -2842,7 +3164,8 @@ mod tests {
             .iter()
             .any(|(e, a)| *e == "PermissionRequest" && *a == "permission"));
         assert!(CODEX_EVENTS.iter().any(|(e, _)| *e == "SubagentStart"));
-        // у Codex нет Notification/StopFailure/SessionEnd
+        assert!(CODEX_EVENTS.iter().any(|(event, arg)| *event == "SessionEnd" && *arg == "session-end"));
+        // Official 0.153 app-server supports SessionEnd, but no Notification.
         assert!(!CODEX_EVENTS.iter().any(|(e, _)| *e == "Notification"));
     }
 
@@ -2866,10 +3189,7 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        assert!(
-            stop.contains(" codex stop"),
-            "метка codex в команде: {stop}"
-        );
+        assert_eq!(stop, hook_command(&hook_dst().to_string_lossy(), "codex", "stop"));
         assert!(
             v["hooks"]["PermissionRequest"].is_array(),
             "есть PermissionRequest"
@@ -2929,7 +3249,7 @@ mod tests {
         install_hooks_into(&path, "codex", &CODEX_EVENTS, &noop);
 
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let want = format!("{} codex pre-tool", hook_dst().display());
+        let want = hook_command(&hook_dst().to_string_lossy(), "codex", "pre-tool");
         let cmds = event_commands(&v, "PreToolUse");
         assert!(
             cmds.contains(&want),
@@ -2976,7 +3296,7 @@ mod tests {
             "чужой хук сохранён: {cmds:?}"
         );
         assert!(
-            cmds.contains(&format!("{} codex pre-tool", hook_dst().display())),
+            cmds.contains(&hook_command(&hook_dst().to_string_lossy(), "codex", "pre-tool")),
             "наш вылечен: {cmds:?}"
         );
         assert!(

@@ -1,0 +1,85 @@
+/* Settings use compact summaries and deliberately opened editing surfaces. */
+:is(#settings2, #machines2) .sidebar { width: 206px; }
+:is(#settings2, #machines2) .snav { padding: 2px 10px 18px; }
+:is(#settings2, #machines2) .snav .grp { font-size: 10px; font-weight: 600; color: var(--ink-faint); padding: 20px 10px 8px; }
+:is(#settings2, #machines2) .snav .grp:first-child { padding-top: 10px; }
+:is(#settings2, #machines2) .snav .item { gap: 9px; padding: 9px 10px; font-size: 12px; margin: 2px 0; cursor: pointer; }
+:is(#settings2, #machines2) .snav .item .ic { width: 24px; height: 24px; border-radius: 7px; }
+:is(#settings2, #machines2) .snav .ic.blue, :is(#settings2, #machines2) .snav .ic.teal { color: var(--info-text); background: var(--info-soft); }
+:is(#settings2, #machines2) .snav .ic.green { color: var(--success-text); background: var(--success-soft); }
+:is(#settings2, #machines2) .snav .ic.amber, :is(#settings2, #machines2) .snav .ic.orange { color: var(--warning-text); background: var(--warning-soft); }
+:is(#settings2, #machines2) .snav .ic.violet, :is(#settings2, #machines2) .snav .ic.purple { color: var(--violet-text); background: var(--violet-soft); }
+:is(#settings2, #machines2) .snav .ic.gray { color: var(--ink-mute); background: var(--fill-3); }
+:is(#settings2, #machines2) .ssearch { padding: 10px; margin: 14px 12px 6px; box-shadow: inset 0 0 0 1px var(--line); }
+:is(#settings2, #machines2) .ssearch input { font-size: 12px; }
+:is(#settings2, #machines2) .detail { padding: 30px clamp(20px, 4vw, 52px) 56px; }
+:is(#settings2, #machines2) .dpane { max-width: 920px; margin: 0 auto; }
+:is(#settings2, #machines2) .dtitle { margin-bottom: 28px; font-size: 25px; font-weight: 650; }
+:is(#settings2, #machines2) .dsection { margin: 24px 0 10px; color: var(--ink-2); font-size: 12px; font-weight: 600; }
+:is(#settings2, #machines2) .dgroup { margin-bottom: 24px; }
+:is(#settings2, #machines2) .drow { padding: 15px 0; gap: 24px; min-height: 58px; }
+:is(#settings2, #machines2) .drow .dt { font-size: 13px; font-weight: 550; line-height: 1.4; }
+:is(#settings2, #machines2) .drow .dd { font-size: 12px; line-height: 1.6; max-width: 55ch; overflow-wrap: anywhere; }
+:is(#settings2, #machines2) .drow .dctl { max-width: 56%; flex-wrap: wrap; justify-content: flex-end; }
+:is(#settings2, #machines2) .s2-intro { max-width: 65ch; line-height: 1.7; }
+:is(#settings2, #machines2) .s2-details { background: var(--fill-1); border-color: var(--line-strong); border-radius: 12px; }
+:is(#settings2, #machines2) .s2-details > summary { min-height: 44px; padding: 13px 15px; font-weight: 500; }
+:is(#settings2, #machines2) .s2-details[open] { background: var(--paper-2); }
+:is(#settings2, #machines2) .s2-details[open] > summary { margin-bottom: 12px; border-bottom: 1px solid var(--line); }
+:is(#settings2, #machines2) .btn { min-height: 34px; line-height: 1.3; padding: 8px 13px; border: 1px solid var(--line); border-radius: 9px; cursor: pointer; justify-content: center; white-space: normal; }
+:is(#settings2, #machines2) .btn.sm { min-height: 30px; padding: 6px 10px; }
+:is(#settings2, #machines2) .btn.primary { border-color: transparent; }
+:is(#settings2, #machines2) .btn:disabled, :is(#settings2, #machines2) .toggle:disabled { cursor: not-allowed; }
+:is(#settings2, #machines2) .s2-secret, :is(#settings2, #machines2) select.s2-secret { min-height: 38px; font: 12px/1.5 var(--font); padding: 9px 12px; background: var(--paper-2); box-shadow: inset 0 0 0 1px var(--line-strong); border-radius: 9px; }
+:is(#settings2, #machines2) .s2-secret:focus { box-shadow: inset 0 0 0 1.5px var(--accent), 0 0 0 3px var(--accent-soft); }
+:is(#settings2, #machines2) .s2-secret::placeholder { color: var(--ink-faint); }
+:is(#settings2, #machines2) select.s2-secret { cursor: pointer; padding-right: 26px; }
+/* WebKit's native select bezel ignores height/padding. Keep the OS picker,
+   but draw the closed control consistently with the other labeled fields. */
+:is(#settings2, #machines2) select { appearance: none; -webkit-appearance: none; min-height: 38px; padding-right: 32px !important; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='m3 4.5 3 3 3-3' fill='none' stroke='%238d9caf' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") !important; background-repeat: no-repeat !important; background-position: right 11px center !important; background-size: 12px !important; }
+:is(#settings2, #machines2) .toggle { cursor: pointer; }
+:is(#settings2, #machines2) .toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+:is(#settings2, #machines2) .cstrigger { min-height: 34px; border: 1px solid var(--line-strong); cursor: pointer; font-size: 12px; }
+:is(#settings2, #machines2) .segbtn { min-height: 28px; cursor: pointer; font-size: 12px; }
+:is(#settings2, #machines2) .segbtn.active { color: var(--accent-text); background: var(--accent-soft); box-shadow: none; }
+
+/* Every form has visible labels, breathing room, and one action row. */
+:is(#settings2, #machines2) .s2-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+:is(#settings2, #machines2) label.s2-field, :is(#settings2, #machines2) .s2-field { display: flex; flex-direction: column; gap: 7px; min-width: 0; font-size: 12px; color: var(--ink-2); }
+:is(#settings2, #machines2) .s2-field-label { font-size: 12px; font-weight: 550; }
+:is(#settings2, #machines2) .s2-field .s2-secret { max-width: none; width: 100%; }
+:is(#settings2, #machines2) .s2-hint { color: var(--ink-mute); font-size: 11px; line-height: 1.65; max-width: 65ch; }
+:is(#settings2, #machines2) .s2-form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 20px; }
+:is(#settings2, #machines2) .s2-custom-agents { margin-top: 36px; border-top: 1px solid var(--line); padding-top: 24px; }
+:is(#settings2, #machines2) .s2-agent-section-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+:is(#settings2, #machines2) .s2-agent-section-head .dsection { margin: 0; font-size: 14px; }
+:is(#settings2, #machines2) .s2-agent-list .drow { padding-block: 14px; }
+:is(#settings2, #machines2) .s2-agent-list .dd { font-size: 11px; }
+:is(#settings2, #machines2) .s2-agent-kind { color: var(--info-text); background: var(--info-soft); padding: 4px 7px; border-radius: 6px; font-size: 10px; white-space: nowrap; }
+:is(#settings2, #machines2) .s2-agent-form { padding: 20px; margin-top: 16px; border: 1px solid var(--accent-line); border-radius: 12px; background: var(--paper-2); }
+:is(#settings2, #machines2) .s2-agent-form .s2-details { margin-top: 20px; }
+:is(#settings2, #machines2) .s2-agent-form .s2-details .s2-form-grid { padding: 0 15px 15px; }
+:is(#settings2, #machines2) .s2agents-chips { gap: 8px; margin: 10px 0 20px; }
+:is(#settings2, #machines2) .s2-agent-status { font-size: 12px; line-height: 1.6; color: var(--ink-mute); }
+:is(#settings2, #machines2) .s2-agent-status:empty { display: none; }
+:is(#settings2, #machines2) .s2-agent-status.err { color: var(--danger); }
+:is(#settings2, #machines2) .s2-agent-status[data-kind='error'] { color: var(--danger); }
+:is(#settings2, #machines2) .s2-agent-status[data-kind='warning'] { color: var(--warning-text); }
+:is(#settings2, #machines2) .s2-agent-status[data-kind='success'] { color: var(--success-text); }
+:is(#settings2, #machines2) .paintown input { inset: 0; width: 100%; height: 100%; cursor: pointer; }
+@media (max-width: 920px) {
+  :is(#settings2, #machines2) .sidebar { width: 188px; }
+  :is(#settings2, #machines2) .detail { padding: 24px 22px 40px; }
+  :is(#settings2, #machines2) .drow { gap: 14px; flex-wrap: wrap; }
+  :is(#settings2, #machines2) .drow .dctl { max-width: 100%; }
+  :is(#settings2, #machines2) .drow .grow { flex-basis: 190px; }
+  :is(#settings2, #machines2) .drow .dd { max-width: 60ch; }
+}
+@media (max-width: 650px) {
+  :is(#settings2, #machines2) .sidebar { width: 150px; }
+  :is(#settings2, #machines2) .snav .item { font-size: 11px; padding-inline: 7px; gap: 6px; }
+  :is(#settings2, #machines2) .snav .item .ic { width: 20px; }
+  :is(#settings2, #machines2) .detail { padding: 22px 16px 40px; }
+  :is(#settings2, #machines2) .s2-form-grid { grid-template-columns: minmax(0, 1fr); }
+  :is(#settings2, #machines2) .s2-agent-section-head { flex-wrap: wrap; }
+}

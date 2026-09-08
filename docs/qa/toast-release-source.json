@@ -1,0 +1,23 @@
+{
+  "source": "Frozen local snapshot; concurrent project/analytics work excluded",
+  "sha256": {
+    "src-tauri/src/platform/macos.rs": "2b6b87d6d1f870782c4aa4fc14f0ad4b45069fec9203bf4af1c0bde621a842e7",
+    "src-tauri/src/platform/macos_toast.rs": "e351747bbbbfddff4e7e03ac0ed85218e0561ec64602714ae0bd5a2ea6226542",
+    "src-tauri/src/windows.rs": "ae04454541ee601bcc971eeb83026da62699d7a7ede2bd888b1bfa6770883d89",
+    "src-tauri/src/ipc.rs": "16f75bf739caa3997b3aa7385bfe17b3d5bc726f8a2d87a473d24e1f67552953",
+    "ui/toast.js": "90a4448d80abd738ae915f01d07749394fc6cb7a09dab0d2ccc0d2f6c913ba76",
+    "ui/toast.html": "3b65e225e57dfc52b1f41caa1facb38de52b6d28524e1791285d0d4c9131d040",
+    "ui/toast-motion.css": "7d00a1d170e302649026adf741f59c51e6690156e4414917547af745804ff5b8"
+  },
+  "validation": {
+    "uiTests": 182,
+    "nativeGeometryTests": 2,
+    "browserScenarios": 9,
+    "fullscreenSteps": 24,
+    "nativeWindowSamples": 441,
+    "confirmedPastes": 4,
+    "releaseSignature": "codesign --verify --deep --strict passed",
+    "releasePid": 1757,
+    "sourceBranch": "codex/jarvis-redesign"
+  }
+}

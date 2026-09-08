@@ -1,0 +1,6 @@
+--prepared:/Users/se.chernyshev/jarvis/src-tauri/target/release/bundle/macos/Jarvis.app/Contents/MacOS/jarvis-mcp
+--validated:/Users/se.chernyshev/jarvis/src-tauri/target/release/bundle/macos/Jarvis.app/Contents/MacOS/jarvis-mcp
+--prepared:/Users/se.chernyshev/jarvis/src-tauri/target/release/bundle/macos/Jarvis.app/Contents/MacOS/jarvis-setup
+--validated:/Users/se.chernyshev/jarvis/src-tauri/target/release/bundle/macos/Jarvis.app/Contents/MacOS/jarvis-setup
+src-tauri/target/release/bundle/macos/Jarvis.app: valid on disk
+src-tauri/target/release/bundle/macos/Jarvis.app: satisfies its Designated Requirement

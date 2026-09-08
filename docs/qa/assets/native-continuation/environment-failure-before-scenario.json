@@ -1,0 +1,10 @@
+{
+  "classification": "Environment / sandbox launch failure before any scenario evaluation; excluded from product and fixture results",
+  "ok": false,
+  "failure": "Native app exited without a report",
+  "outcome": {
+    "code": null,
+    "signal": "SIGABRT"
+  },
+  "diagnostic": "SIGABRT in AppKit/HIServices ___RegisterApplication_block_invoke during NSApplication initialization, before Tauri event loop. process.log was empty. Same immutable debug bundle passed after authorized WindowServer access outside the execution sandbox."
+}

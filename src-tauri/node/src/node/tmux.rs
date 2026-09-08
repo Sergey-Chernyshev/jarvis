@@ -10,6 +10,8 @@
 //! Текст всегда уходит элементом argv — никакой интерполяции в shell-строку.
 
 use serde_json::{json, Value};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -30,6 +32,66 @@ const SLASH_CONFIRM_WAIT: Duration = Duration::from_millis(700);
 const TMUX_TIMEOUT: Duration = Duration::from_secs(5);
 
 static BUFFER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+// The packaged tmux.conf is preferred. This small fallback is for a node
+// installed without that file, and is read only when a new server starts.
+// Keep the copy-mode/clipboard defaults in sync with bin/jarvis-tmux.conf.
+const FALLBACK_LAUNCH_CONFIG: &str = "\
+set -g status off\n\
+set -g mouse on\n\
+set -g history-limit 100000\n\
+set -s escape-time 0\n\
+set -g focus-events on\n\
+if-shell -F '#{m:2.[0-5]*,#{version}}' 'set -s set-clipboard off' 'set -s set-clipboard external'\n\
+if-shell -F '#{m:2.*,#{version}}' 'bind -T copy-mode MouseDragEnd1Pane send -X copy-selection; bind -T copy-mode-vi MouseDragEnd1Pane send -X copy-selection' 'bind -T copy-mode MouseDragEnd1Pane send -X copy-selection-no-clear; bind -T copy-mode-vi MouseDragEnd1Pane send -X copy-selection-no-clear'\n";
+
+struct LaunchConfig {
+    path: PathBuf,
+    temporary: bool,
+}
+
+impl LaunchConfig {
+    fn for_dir(dir: &Path) -> Result<Self, String> {
+        let path = dir.join("tmux.conf");
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_file() => return Ok(Self { path, temporary: false }),
+            Ok(_) => return Err(format!("tmux: {} — не файл", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("tmux: {}: {e}", path.display())),
+        }
+        // create_new + 0600 prevent another local user from replacing the
+        // startup config. Never write to the user's missing/established config.
+        let path = std::env::temp_dir().join(unique_buffer_name("config"));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path).map_err(|e| format!("tmux config: {e}"))?;
+        let config = Self { path, temporary: true };
+        file.write_all(FALLBACK_LAUNCH_CONFIG.as_bytes())
+            .map_err(|e| format!("tmux config: {e}"))?;
+        Ok(config)
+    }
+
+    fn as_str(&self) -> Result<&str, String> {
+        self.path.to_str().ok_or_else(|| "tmux: путь config не UTF-8".into())
+    }
+}
+
+impl Drop for LaunchConfig {
+    fn drop(&mut self) {
+        if self.temporary {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn launch_args<'a>(config: &'a str, session: &'a str, cwd: &'a str, command: &'a str) -> [&'a str; 14] {
+    ["-f", config, "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", session, "-c", cwd, "bash", "-lc", command]
+}
 
 /// Имя буфера уникально на процесс+время+счётчик: два одновременных ответа в
 /// разные паны не должны затирать буфер друг другу.
@@ -55,7 +117,9 @@ fn paste_buffer_args<'a>(buffer: &'a str, pane: &'a str) -> [&'a str; 7] {
 /// `tmux -L jarvis <args>`: stdout при успехе, текст ошибки при провале.
 pub async fn tmux_j(args: &[&str]) -> Result<String, String> {
     let mut cmd = tokio::process::Command::new("tmux");
-    cmd.arg("-L")
+    // SSH/systemd often use the C locale. Without -u, tmux replaces tabs and
+    // non-ASCII output with underscores, corrupting pane IDs and transcript roots.
+    cmd.arg("-u").arg("-L")
         .arg("jarvis")
         .args(args)
         .stdin(Stdio::null())
@@ -155,11 +219,11 @@ pub async fn launch(cwd: &str, cmd: &str, name: Option<&str>) -> Result<(String,
     // первом запуске в новом каталоге Claude сначала спрашивает, доверять ли
     // ему), и показать человеку происходящее было бы нечем.
     let wrapped = with_agent_path(cmd);
-    let pane = tmux_j(&[
-        "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", &session, "-c", cwd,
-        "bash", "-lc", &wrapped,
-    ])
-    .await?;
+    // -f is a startup option: an existing -L jarvis server keeps its options
+    // and bindings. Do not source-file/set-option on already running sessions.
+    let config = LaunchConfig::for_dir(&super::jarvis_dir())?;
+    let pane = tmux_j(&launch_args(config.as_str()?, &session, cwd, &wrapped)).await?;
+    drop(config);
     let pane = pane.trim().to_string();
 
     // Первый запуск в новом каталоге Claude встречает вопросом «доверяешь ли
@@ -191,6 +255,8 @@ pub async fn launch(cwd: &str, cmd: &str, name: Option<&str>) -> Result<(String,
 ///
 /// Дописываем в НАЧАЛО: шим Jarvis должен оставаться первым, если он есть, но
 /// настоящий бинарь обязан находиться за ним.
+pub fn sh_quote(value: &str) -> String { format!("'{}'", value.replace('\'', "'\\''")) }
+
 pub fn with_agent_path(cmd: &str) -> String {
     format!(
         "export PATH=\"$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:\
@@ -253,11 +319,13 @@ fn session_name(cwd: &str, name: Option<&str>) -> String {
         .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
         .collect();
     let safe = safe.trim_matches('-');
+    static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    format!("{}-{stamp}", if safe.is_empty() { "project" } else { safe })
+        .as_millis();
+    let sequence = SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{stamp}-{}-{sequence}", if safe.is_empty() { "project" } else { safe }, std::process::id())
 }
 
 /// Пульт: слэш-команда с аргументом (`/model sonnet`, `/effort high`).
@@ -419,6 +487,10 @@ mod tests {
         // получиться другое имя, иначе она просто не создастся
         assert!(session_name("/srv/x", Some("явное имя")).starts_with("явное-имя-"));
         assert!(session_name("/", None).starts_with("project-"));
+        let names: std::collections::HashSet<_> = (0..100)
+            .map(|_| session_name("/srv/same-project", Some("same-name")))
+            .collect();
+        assert_eq!(names.len(), 100, "rapid launches must not share a tmux session");
     }
 
     #[test]
@@ -438,5 +510,59 @@ mod tests {
         assert!(out.contains("$HOME/.local/bin"), "нативный установщик Claude Code кладёт сюда");
         assert!(out.contains(":$PATH\""), "прежний PATH обязан сохраниться");
         assert!(out.ends_with("claude --dangerously-skip-permissions"));
+    }
+
+    #[test]
+    fn launch_config_prefers_installed_file_and_does_not_rewrite_it() {
+        let dir = std::env::temp_dir().join(unique_buffer_name("custom-config"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tmux.conf");
+        let custom = "set -g mouse off\nset -g history-limit 4242\n";
+        std::fs::write(&path, custom).unwrap();
+        {
+            let config = LaunchConfig::for_dir(&dir).unwrap();
+            assert_eq!(config.path, path);
+            assert!(!config.temporary);
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), custom);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn missing_launch_config_is_private_temporary_and_removed() {
+        let absent_dir = std::env::temp_dir().join(unique_buffer_name("absent-config"));
+        let path;
+        {
+            let config = LaunchConfig::for_dir(&absent_dir).unwrap();
+            assert!(config.temporary);
+            path = config.path.clone();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), FALLBACK_LAUNCH_CONFIG);
+            assert!(!absent_dir.exists(), "fallback must not create/replace user configuration");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            }
+        }
+        assert!(!path.exists(), "temporary config must be removed after launch/error");
+    }
+
+    #[test]
+    fn launch_config_does_not_hide_invalid_installed_config() {
+        let dir = std::env::temp_dir().join(unique_buffer_name("invalid-config"));
+        std::fs::create_dir_all(dir.join("tmux.conf")).unwrap();
+        assert!(LaunchConfig::for_dir(&dir).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn launch_passes_startup_config_and_paths_as_separate_arguments() {
+        let config = "/tmp/user's Jarvis/tmux.conf";
+        let cwd = "/tmp/project's files";
+        let command = "printf '%s' 'user input'; exec bash";
+        let args = launch_args(config, "session", cwd, command);
+        assert_eq!(&args[..3], &["-f", config, "new-session"]);
+        assert_eq!(&args[9..], &["-c", cwd, "bash", "-lc", command]);
+        assert!(!args.contains(&"source-file"), "existing server options must survive a new launch");
     }
 }

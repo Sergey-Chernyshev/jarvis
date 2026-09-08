@@ -21,8 +21,10 @@
 #   - неинтерактивная подкоманда (claude: -p/--print, auth; codex: exec/login/…)
 #   - взведён предохранитель от рекурсии (JARVIS_SHIM)
 
-JARVIS_DIR="${JARVIS_DIR:-$HOME/.jarvis}"
 SHIM_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+SHIM_PARENT=$(CDPATH='' cd -- "$SHIM_DIR/.." && pwd)
+JARVIS_DIR="${JARVIS_DIR:-$SHIM_PARENT}"
+export JARVIS_DIR
 BIN_NAME=$(basename -- "$0")
 
 # Сетевые переменные, которые шим синхронизирует с текущим терминалом.
@@ -36,6 +38,18 @@ case "${JARVIS_PROXY:-}" in off|0|no|none) unset $NET_VARS ;; esac
 # --- резолв настоящего бинаря: ищем в PATH без каталога шимов ---
 CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SHIM_DIR" | paste -sd: -)
 REAL=$(PATH="$CLEAN_PATH" command -v "$BIN_NAME" 2>/dev/null)
+if [ "$BIN_NAME" = codex ] && [ -n "${JARVIS_REAL_CODEX:-}" ]; then
+  if [ ! -f "$JARVIS_REAL_CODEX" ] || [ ! -x "$JARVIS_REAL_CODEX" ] || [ "$JARVIS_REAL_CODEX" = "$SHIM_DIR/codex" ]; then
+    echo "jarvis-shim: выбранный Codex CLI недоступен" >&2
+    exit 127
+  fi
+  REAL=$JARVIS_REAL_CODEX
+fi
+if [ -z "$REAL" ] && [ "$BIN_NAME" = codex ]; then
+  for candidate in /Applications/ChatGPT.app/Contents/Resources/codex /Applications/Codex.app/Contents/Resources/codex; do
+    if [ -x "$candidate" ] && [ -f "$candidate" ]; then REAL="$candidate"; break; fi
+  done
+fi
 if [ -z "$REAL" ]; then
   echo "jarvis-shim: настоящий бинарь $BIN_NAME не найден в PATH" >&2
   exit 127
@@ -53,7 +67,7 @@ case "$BIN_NAME" in
     # resume/fork НЕ здесь: они поднимают интерактивный TUI и должны оборачиваться
     # в tmux (иначе resumeCmd из tmux_needed не вернёт сессию под управление).
     case "${1:-}" in
-      exec|e|login|logout|mcp|mcp-server|app-server|completion|doctor|apply|review|cloud|features|update|sandbox|help|-h|--help|--version) wrap=0 ;;
+      exec|e|login|logout|mcp|mcp-server|app-server|completion|doctor|apply|review|cloud|features|update|sandbox|queue|archive|unarchive|delete|migrate-rollouts|debug|remote-control|app|help|-h|--help|--version) wrap=0 ;;
     esac
     ;;
   *)
@@ -78,7 +92,6 @@ fi
 # -f с несуществующим файлом не валит tmux, но молча сбрасывает на дефолты
 # (видна status-строка, колесо → стрелки). Подключаем конфиг только если он есть.
 CONF="$JARVIS_DIR/tmux.conf"
-[ -f "$CONF" ] && CONF_OPT="-f $CONF" || CONF_OPT=''
 NAME="$(basename -- "$PWD" | tr -c 'A-Za-z0-9_-' '-' | cut -c1-32)$$"
 
 # tmux склеивает несколько аргументов shell-command через пробел и отдаёт
@@ -101,5 +114,15 @@ CC=''
 
 # exec: когда агент (а с ним tmux-сессия) завершится, клиент отвалится
 # и терминал вернётся в обычный шелл
-# shellcheck disable=SC2086  # $CC и $CONF_OPT должны расщепляться (могут быть пустыми)
-exec tmux $CC -L jarvis $CONF_OPT new-session -s "$NAME" "$CMD"
+# Account roots are scoped to this session, even when the shared tmux server
+# predates a config update or another account starts concurrently. These are
+# paths/identity hints, never credentials. Preserve spaces in the config path.
+set -- -L jarvis
+[ -n "$CC" ] && set -- "$CC" "$@"
+[ -f "$CONF" ] && set -- "$@" -f "$CONF"
+exec tmux "$@" new-session -s "$NAME" \
+  -e "CODEX_HOME=${CODEX_HOME:-$HOME/.codex}" \
+  -e "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-$HOME/.claude}" \
+  -e "JARVIS_PROVIDER_INSTANCE_ID=${JARVIS_PROVIDER_INSTANCE_ID:-}" \
+  -e "JARVIS_DIR=$JARVIS_DIR" \
+  -e "JARVIS_SOCK=${JARVIS_SOCK:-$JARVIS_DIR/run.sock}" "$CMD"

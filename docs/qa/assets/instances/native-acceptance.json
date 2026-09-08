@@ -1,0 +1,90 @@
+{
+  "ok": true,
+  "steps": [
+    {
+      "name": "Discover real Personal and Work profiles separately",
+      "ok": true,
+      "elapsedMs": 108
+    },
+    {
+      "name": "Production importer finds this actual large Desktop chat",
+      "ok": true,
+      "elapsedMs": 18953
+    },
+    {
+      "name": "Real chat is visible in the native chat list with its profile",
+      "ok": true,
+      "elapsedMs": 249
+    },
+    {
+      "name": "Profile settings render in WKWebView and respond",
+      "ok": true,
+      "elapsedMs": 520
+    }
+  ],
+  "failure": null,
+  "errors": [],
+  "evidence": {
+    "profiles": [
+      {
+        "id": "codex-v1-97dd919f2905aa1e",
+        "label": "codex-personal",
+        "home": "/Users/se.chernyshev/work/sup/codex-dual-account/personal/codex-home",
+        "enabled": true
+      },
+      {
+        "id": "codex-v1-d5dece0e7fce50a5",
+        "label": "codex-work",
+        "home": "/Users/se.chernyshev/.codex",
+        "enabled": true
+      }
+    ],
+    "currentChat": {
+      "id": "codex:codex-v1-97dd919f2905aa1e:01a06e5a-e84b-7d72-98d7-f33e6ee938d2",
+      "providerSessionId": "01a06e5a-e84b-7d72-98d7-f33e6ee938d2",
+      "instanceId": "codex-v1-97dd919f2905aa1e",
+      "label": "codex-personal",
+      "status": "working",
+      "controlMode": "external",
+      "passes": 11,
+      "elapsedMs": 18952
+    },
+    "screenshots": [
+      {
+        "name": "native-profiles",
+        "label": "main",
+        "path": "/private/var/folders/sz/1yzw2zzs64x5kcr0c9hqhnr40000gq/T/jarvis-native-smoke-BzFdrm/native-profiles.png"
+      }
+    ]
+  },
+  "elapsedMs": 19831,
+  "native": {
+    "pid": 19863,
+    "profile": "/private/var/folders/sz/1yzw2zzs64x5kcr0c9hqhnr40000gq/T/jarvis-native-smoke-BzFdrm",
+    "visible": true,
+    "focused": false,
+    "outerPosition": {
+      "x": 608,
+      "y": 218
+    },
+    "innerSize": {
+      "width": 2240,
+      "height": 1560
+    },
+    "scaleFactor": 2.0,
+    "windowLabels": [
+      "main",
+      "toast"
+    ],
+    "excluded": [
+      "hook reconciliation",
+      "sidecar processes",
+      "voice warmup",
+      "remotes",
+      "global hotkeys",
+      "background timers",
+      "updater",
+      "live audio capture"
+    ]
+  }
+}

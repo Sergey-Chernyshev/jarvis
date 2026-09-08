@@ -12,6 +12,21 @@ use serde_json::Value;
 
 pub mod assistant;
 
+/// Explicit selection must remain usable when another installed CLI cannot
+/// authenticate. Auto only chooses by installation; errors remain visible.
+pub(crate) fn select_provider(requested: &str, claude: bool, codex: bool) -> Result<&'static str, String> {
+    match requested {
+        "claude" if claude => Ok("claude"),
+        "codex" if codex => Ok("codex"),
+        "claude" => Err("Claude CLI не найден".into()),
+        "codex" => Err("Codex CLI не найден".into()),
+        "auto" | "" if claude => Ok("claude"),
+        "auto" | "" if codex => Ok("codex"),
+        "auto" | "" => Err("Нет ни Claude CLI, ни Codex CLI".into()),
+        _ => Err("Неизвестный провайдер агента".into()),
+    }
+}
+
 // ── Структуры событий ──────────────────────────────────────────────────────
 
 /// Событие потока `--output-format stream-json` от `claude`.
@@ -26,6 +41,8 @@ pub enum AgentEvent {
     ToolUse { name: String, input: Value },
     /// Финальный результат сессии.
     Done { result: String, session_id: String },
+    /// Терминальная ошибка: UI обязан отпустить busy и показать причину.
+    Failed { message: String, session_id: String },
     /// Неизвестный / неинтересный тип события — игнорируется.
     Other,
 }
@@ -125,11 +142,76 @@ pub fn parse_stream_line(line: &str) -> Vec<AgentEvent> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            vec![AgentEvent::Done { result, session_id }]
+            let subtype = v.get("subtype").and_then(Value::as_str).unwrap_or("");
+            if v.get("is_error").and_then(Value::as_bool) == Some(true) || subtype.starts_with("error") {
+                let errors = v.get("errors").and_then(Value::as_array)
+                    .map(|errors| errors.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n"))
+                    .filter(|s| !s.is_empty());
+                let message = errors.unwrap_or_else(|| if result.is_empty() {
+                    "Claude завершил ход с ошибкой".to_string()
+                } else { result });
+                vec![AgentEvent::Failed { message, session_id }]
+            } else {
+                vec![AgentEvent::Done { result, session_id }]
+            }
         }
 
         _ => vec![],
     }
+}
+
+/// Одна CLI-попытка имеет ровно один терминальный исход. Идентичность
+/// берём из init и переносим в финал (Codex turn.completed не несёт id).
+#[derive(Default)]
+pub(crate) struct StreamLifecycle {
+    session_id: String,
+    terminal: bool,
+}
+
+impl StreamLifecycle {
+    pub(crate) fn new(resume: Option<&str>) -> Self {
+        Self { session_id: resume.unwrap_or_default().to_string(), terminal: false }
+    }
+
+    pub(crate) fn accept(&mut self, mut event: AgentEvent) -> Option<AgentEvent> {
+        if self.terminal || matches!(event, AgentEvent::Other) { return None; }
+        match &mut event {
+            AgentEvent::Init { session_id, .. } => {
+                if !session_id.is_empty() { self.session_id = session_id.clone(); }
+            }
+            AgentEvent::Done { session_id, .. } | AgentEvent::Failed { session_id, .. } => {
+                if session_id.is_empty() { *session_id = self.session_id.clone(); }
+                self.terminal = true;
+            }
+            _ => {}
+        }
+        Some(event)
+    }
+
+    pub(crate) fn fail(&mut self, message: impl Into<String>) -> Option<AgentEvent> {
+        self.accept(AgentEvent::Failed { message: message.into(), session_id: String::new() })
+    }
+}
+
+pub(crate) async fn finish_cli_stream(
+    app: &tauri::AppHandle,
+    child: &mut tokio::process::Child,
+    state: &mut StreamLifecycle,
+    provider: &str,
+    read_error: Option<String>,
+) {
+    // stdout EOF сам по себе не означает успешный turn. Дожидаемся exit,
+    // при зависшем процессе закрываем его, не оставляя интерфейс «думает».
+    let message = match tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await {
+        Ok(Ok(status)) if !status.success() => format!("{provider} завершился с кодом {status}"),
+        Ok(Err(error)) => format!("Не удалось дождаться {provider}: {error}"),
+        Err(_) => {
+            let _ = child.kill().await;
+            format!("{provider} закрыл поток до завершения ответа")
+        }
+        _ => format!("{provider} не прислал результат. Можно повторить запрос."),
+    };
+    if let Some(event) = state.fail(read_error.unwrap_or(message)) { emit_event(app, &event); }
 }
 
 // ── Построение аргументов для claude CLI ──────────────────────────────────
@@ -259,7 +341,7 @@ impl ClaudeCliHost {
     /// Этот метод тонкий: запускает `claude`, читает stdout построчно, делегирует
     /// тяжёлую логику в `parse_stream_line` / `inv_tools_ok` / `drive_stream`.
     ///
-    /// На INV-TOOLS: kill процесса + emit AgentEvent::Other (ошибка уже залогирована).
+    /// На INV-TOOLS: kill процесса + Failed, чтобы UI завершил ожидание.
     pub async fn run(
         &self,
         message: &str,
@@ -270,14 +352,14 @@ impl ClaudeCliHost {
         use tokio::process::Command;
 
         let Some(bin) = crate::claude_bin::resolve_claude_bin() else {
-            crate::log::line("[agent] claude не найден");
+            emit_event(&self.app, &AgentEvent::Failed { message: "Claude CLI не найден".into(), session_id: resume.unwrap_or_default().into() });
             return;
         };
 
         let args = build_args(&self.mcp_config, AGENT_SYSTEM_PROMPT, tools, message, resume);
 
-        let mut child = match Command::new(&bin)
-            .args(&args)
+        let mut command = Command::new(&bin);
+        command.args(&args)
             .current_dir(std::env::temp_dir())
             .env("JARVIS_IGNORE", "1")
             .env("DISABLE_NON_ESSENTIAL_MODEL_CALLS", "1")
@@ -287,12 +369,13 @@ impl ClaudeCliHost {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-        {
+            .kill_on_drop(true);
+        crate::claude_bin::apply_claude_auth(&mut command);
+        let mut child = match command.spawn() {
             Ok(c) => c,
             Err(e) => {
                 crate::log::line(&format!("[agent] spawn claude: {e}"));
+                emit_event(&self.app, &AgentEvent::Failed { message: format!("Не удалось запустить Claude: {e}"), session_id: resume.unwrap_or_default().into() });
                 return;
             }
         };
@@ -301,14 +384,20 @@ impl ClaudeCliHost {
             Some(s) => s,
             None => {
                 crate::log::line("[agent] нет stdout от claude");
+                emit_event(&self.app, &AgentEvent::Failed { message: "Claude не открыл поток ответа".into(), session_id: resume.unwrap_or_default().into() });
                 return;
             }
         };
 
         let mut reader = BufReader::new(stdout).lines();
         let app = self.app.clone();
-
-        while let Ok(Some(line)) = reader.next_line().await {
+        let mut state = StreamLifecycle::new(resume);
+        let read_error = loop {
+            let line = match reader.next_line().await {
+                Ok(Some(line)) => line,
+                Ok(None) => break None,
+                Err(error) => break Some(format!("Поток Claude оборвался: {error}")),
+            };
             let parsed = parse_stream_line(&line);
             for ev in parsed {
                 // INV-TOOLS: проверяем первое Init-событие
@@ -317,12 +406,14 @@ impl ClaudeCliHost {
                         crate::log::line(&format!("[agent] {msg}"));
                         // Убиваем процесс (kill_on_drop = true; явный kill для надёжности)
                         let _ = child.kill().await;
+                        if let Some(event) = state.fail(msg) { emit_event(&app, &event); }
                         return;
                     }
                 }
-                emit_event(&app, &ev);
+                if let Some(event) = state.accept(ev) { emit_event(&app, &event); }
             }
-        }
+        };
+        finish_cli_stream(&app, &mut child, &mut state, "Claude", read_error).await;
     }
 }
 
@@ -343,6 +434,16 @@ fn emit_event(app: &tauri::AppHandle, ev: &AgentEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_codex_remains_selectable_when_claude_is_installed() {
+        assert_eq!(select_provider("codex", true, true).unwrap(), "codex");
+        assert_eq!(select_provider("auto", true, true).unwrap(), "claude");
+        assert_eq!(select_provider("auto", false, true).unwrap(), "codex");
+        assert!(select_provider("claude", false, true).is_err());
+        assert!(select_provider("codex", true, false).is_err());
+        assert!(select_provider("unknown", true, true).is_err());
+    }
     use serde_json::json;
 
     // ── build_args ────────────────────────────────────────────────────────
@@ -462,6 +563,39 @@ mod tests {
             }
             other => panic!("ожидали Done, получили {:?}", other),
         }
+    }
+
+    #[test]
+    fn failed_claude_result_is_not_success() {
+        let events = parse_stream_line(r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["Authentication required"],"session_id":"s2"}"#);
+        assert_eq!(events, vec![AgentEvent::Failed { message: "Authentication required".into(), session_id: "s2".into() }]);
+    }
+
+    #[test]
+    fn real_claude_auth_failure_with_success_subtype_is_still_terminal_failure() {
+        // Claude 2.1.258 actually emits subtype=success with is_error=true.
+        let events = parse_stream_line(r#"{"type":"result","subtype":"success","is_error":true,"result":"Failed to authenticate: OAuth session expired and could not be refreshed","session_id":"qa-auth-expired"}"#);
+        assert!(matches!(&events[0], AgentEvent::Failed { message, session_id }
+            if message.contains("OAuth session expired") && session_id == "qa-auth-expired"));
+    }
+
+    #[test]
+    fn cli_lifecycle_carries_resume_id_and_emits_one_terminal_event() {
+        let mut state = StreamLifecycle::new(Some("old"));
+        state.accept(AgentEvent::Init { tools: vec![], model: String::new(), session_id: "current".into() });
+        assert_eq!(state.accept(AgentEvent::Done { result: String::new(), session_id: String::new() }),
+            Some(AgentEvent::Done { result: String::new(), session_id: "current".into() }));
+        assert_eq!(state.fail("EOF"), None, "EOF после финала не создаёт ошибку");
+        assert_eq!(state.accept(AgentEvent::Delta { text: "late".into() }), None);
+    }
+
+    #[test]
+    fn cli_lifecycle_eof_is_a_failure_even_without_init() {
+        let mut state = StreamLifecycle::new(Some("resume-me"));
+        assert_eq!(state.fail("Процесс оборвался"), Some(AgentEvent::Failed {
+            message: "Процесс оборвался".into(), session_id: "resume-me".into(),
+        }));
+        assert_eq!(state.fail("Повтор"), None);
     }
 
     #[test]

@@ -1,0 +1,65 @@
+{
+  "ok": true,
+  "steps": [
+    {
+      "name": "A dedicated native editor exposes an actual AX field",
+      "ok": true,
+      "elapsedMs": 696
+    },
+    {
+      "name": "A different field in the same app refuses a stale paste target",
+      "ok": true,
+      "elapsedMs": 52
+    },
+    {
+      "name": "Production CGEvent pastes and AX confirms text in the original field",
+      "ok": true,
+      "elapsedMs": 195
+    },
+    {
+      "name": "Repeated insertion is distinguished from text already present",
+      "ok": true,
+      "elapsedMs": 136
+    }
+  ],
+  "errors": [],
+  "failure": null,
+  "elapsedMs": 1127,
+  "runtime": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+    "url": "tauri://localhost",
+    "viewport": {
+      "width": 1120,
+      "height": 780,
+      "dpr": 2
+    }
+  },
+  "evidence": {
+    "capture": {
+      "available": true,
+      "trusted": true,
+      "ownsForeground": true,
+      "operation": "capture",
+      "provenance": "production AXUIElementCopyAttributeValue; scratch app only"
+    },
+    "staleField": {
+      "copied": true,
+      "pasteSent": false,
+      "confirmed": false,
+      "error": "Поле, вкладка или окно ввода изменилось. Текст скопирован — нажми ⌘V в нужном поле."
+    },
+    "actualInsertion": {
+      "copied": true,
+      "pasteSent": true,
+      "confirmed": true,
+      "error": null
+    },
+    "repeatInsertion": {
+      "copied": true,
+      "pasteSent": true,
+      "confirmed": true,
+      "error": null
+    }
+  },
+  "scope": "Production AX and CGEvent insert_text into a separate AppKit child with two synthetic fields. Clipboard formats retained only in helper memory and restored only when no intervening copy occurred. No microphone."
+}

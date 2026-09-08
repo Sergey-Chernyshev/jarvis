@@ -1,0 +1,17 @@
+{
+  "checks": [
+    "designed provider popup mirrors selected state and reveals source-specific profile",
+    "profile catalogs update, model search works, incompatible selections reset",
+    "unsupported permission stays disabled and keyboard navigation skips it",
+    "Escape closes only popup and restores focus; Tab and outside click close without losing draft",
+    "typeahead switches machine and async profile list updates; offline machine cannot be selected",
+    "settings failure rolls back trigger and unlocks it; successful rerender keeps one working control",
+    "project form replacement retains select focus and popup Escape preserves its form",
+    "required analytics select keeps form validation and focuses the visible trigger",
+    "dark/900: model and machine popups fit viewport with no horizontal overflow",
+    "light/900: model and machine popups fit viewport with no horizontal overflow",
+    "dark/650: model and machine popups fit viewport with no horizontal overflow",
+    "light/650: model and machine popups fit viewport with no horizontal overflow"
+  ],
+  "errors": []
+}

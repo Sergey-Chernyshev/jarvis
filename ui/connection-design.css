@@ -1,0 +1,183 @@
+/* A host inventory and one inspector, inspired by the spatial hierarchy of
+   desktop SSH clients. Shared form controls also serve the Machines module. */
+:is(#settings2, #machines2) #s2-pane-remotes { max-width: 1320px; }
+:is(#settings2, #machines2) .connection-page-head { display: flex; justify-content: space-between; align-items: center; gap: 24px; margin-bottom: 24px; }
+:is(#settings2, #machines2) .connection-page-head .dtitle { font-size: 27px; margin: 0 0 5px; line-height: 1.2; letter-spacing: -.65px; }
+:is(#settings2, #machines2) .connection-page-head p { color: var(--ink-mute); font-size: 12px; line-height: 1.5; }
+:is(#settings2, #machines2) .connections-pane { --connection-accent: var(--info-text); --connection-soft: var(--info-soft); --connection-primary: #719ffa; --connection-on-primary: #101e38; }
+:root[data-theme='light'] :is(#settings2, #machines2) .connections-pane { --connection-primary: #3265ce; --connection-on-primary: #fff; }
+:is(#settings2, #machines2) .connections-pane .btn { display: inline-flex; align-items: center; gap: 7px; border-radius: 9px; min-height: 34px; font-weight: 500; }
+:is(#settings2, #machines2) .connections-pane .btn.primary { background: var(--connection-primary); color: var(--connection-on-primary); border-color: transparent; }
+:is(#settings2, #machines2) .connections-pane .btn.primary:hover { filter: brightness(1.06); }
+:is(#settings2, #machines2) .connections-pane .btn .ph { --icon-size: 15px; }
+:is(#settings2, #machines2) .connection-workspace { display: grid; grid-template-columns: minmax(250px, 1fr) minmax(310px, 365px); min-height: 565px; border: 1px solid var(--line); border-radius: 17px; overflow: clip; background: var(--fill-1); }
+:is(#settings2, #machines2) .connection-workspace[hidden], :is(#settings2, #machines2) .connection-editor[hidden], :is(#settings2, #machines2) .connection-overview[hidden], :is(#settings2, #machines2) .connection-maintenance[hidden] { display: none; }
+:is(#settings2, #machines2) .connection-inventory { padding: 22px; min-width: 0; }
+:is(#settings2, #machines2) .connection-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 17px; }
+:is(#settings2, #machines2) .connection-toolbar > .btn { border-color: transparent; background: transparent; color: var(--ink-mute); padding-inline: 4px; font-size: 11px; }
+:is(#settings2, #machines2) .connection-toolbar > .btn.primary { background: var(--connection-primary); color: var(--connection-on-primary); padding-inline: 12px; }
+:is(#settings2, #machines2) .connection-search { display: flex; align-items: center; gap: 9px; min-width: 0; flex: 1; padding: 9px 11px; background: var(--paper-2); border: 1px solid var(--line-strong); border-radius: 9px; color: var(--ink-mute); }
+:is(#settings2, #machines2) .connection-search:focus-within { border-color: var(--connection-accent); box-shadow: 0 0 0 3px var(--connection-soft); }
+:is(#settings2, #machines2) .connection-search .ph { --icon-size: 16px; }
+:is(#settings2, #machines2) .connection-search input { min-width: 0; width: 100%; background: transparent; color: var(--ink); border: 0; outline: 0; font: 400 12px/1.4 var(--font); padding: 0; }
+:is(#settings2, #machines2) .connection-search input::placeholder { color: var(--ink-mute); }
+:is(#settings2, #machines2) .connection-filters { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 19px; }
+:is(#settings2, #machines2) .connection-filters .btn { min-height: 27px; background: transparent; border-color: transparent; color: var(--ink-mute); font-size: 11px; padding: 5px 8px; gap: 7px; }
+:is(#settings2, #machines2) .connection-filters .btn span { opacity: .7; font-size: 10px; font-variant-numeric: tabular-nums; }
+:is(#settings2, #machines2) .connection-filters .btn[aria-pressed='true'] { color: var(--connection-accent); background: var(--connection-soft); }
+:is(#settings2, #machines2) .connection-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); align-content: start; gap: 12px; }
+:is(#settings2, #machines2) .connection-card { display: flex; flex-direction: column; align-items: stretch; text-align: left; min-width: 0; padding: 15px; border: 1px solid var(--line-strong); background: var(--paper-2); color: var(--ink); border-radius: 12px; cursor: pointer; font-family: var(--font); transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease; }
+:is(#settings2, #machines2) .connection-card:hover { background: var(--fill-3); border-color: var(--ink-faint); }
+:is(#settings2, #machines2) .connection-card[aria-pressed='true'] { border-color: var(--connection-accent); background: color-mix(in srgb, var(--connection-accent) 6%, var(--paper-2)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--connection-accent) 22%, transparent); }
+:is(#settings2, #machines2) .connection-card:focus-visible { outline: 2px solid var(--connection-accent); outline-offset: 3px; }
+:is(#settings2, #machines2) .connection-card-top { display: flex; align-items: center; justify-content: space-between; gap: 7px; margin-bottom: 14px; }
+:is(#settings2, #machines2) .connection-avatar { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 11px; background: var(--connection-soft); color: var(--connection-accent); flex: none; }
+:is(#settings2, #machines2) .connection-avatar .ph { --icon-size: 21px; }
+:is(#settings2, #machines2) .connection-avatar[data-kind='teleport'] { background: var(--violet-soft); color: var(--violet-text); }
+:is(#settings2, #machines2) .connection-avatar[data-kind='local'] { background: var(--warning-soft); color: var(--warning-text); }
+:is(#settings2, #machines2) .connection-avatar.large { width: 43px; height: 43px; border-radius: 12px; }
+:is(#settings2, #machines2) .connection-avatar.large .ph { --icon-size: 25px; }
+:is(#settings2, #machines2) .connection-card > strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; line-height: 1.5; }
+:is(#settings2, #machines2) .connection-card-address { font-size: 11px; color: var(--ink-mute); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+:is(#settings2, #machines2) .connection-card-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 18px; color: var(--ink-faint); font-size: 10px; }
+:is(#settings2, #machines2) .connection-card-footer .ph { --icon-size: 14px; }
+:is(#settings2, #machines2) .connection-card[aria-pressed='true'] .connection-card-footer { color: var(--connection-accent); }
+:is(#settings2, #machines2) .connection-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; font-weight: 500; line-height: 1.4; color: var(--ink-mute); white-space: nowrap; }
+:is(#settings2, #machines2) .connection-badge::before { content: ''; height: 5px; width: 5px; border-radius: 50%; background: currentColor; flex: none; }
+:is(#settings2, #machines2) .connection-badge[data-state='connected'], :is(#settings2, #machines2) .connection-badge[data-state='running'] { color: var(--success-text); }
+:is(#settings2, #machines2) .connection-badge[data-state='error'], :is(#settings2, #machines2) .connection-badge[data-state='unknown'], :is(#settings2, #machines2) .connection-badge[data-state='missing'] { color: var(--warning-text); }
+:is(#settings2, #machines2) .connection-detail { border-left: 1px solid var(--line); background: var(--paper-2); padding: 26px 24px; min-width: 0; }
+:is(#settings2, #machines2) .connection-host { min-width: 0; animation: connection-detail-in 160ms ease-out; }
+:is(#settings2, #machines2) .connection-host-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 23px; }
+:is(#settings2, #machines2) .connection-host-head > div { flex: 1; min-width: 0; }
+:is(#settings2, #machines2) .connection-host-head h2 { font-size: 18px; font-weight: 600; line-height: 1.35; letter-spacing: -.35px; overflow-wrap: anywhere; }
+:is(#settings2, #machines2) .connection-host-head p { font-size: 11px; color: var(--ink-mute); margin-top: 5px; }
+:is(#settings2, #machines2) .connection-host-meta { display: flex; flex-wrap: wrap; gap: 11px; align-items: center; color: var(--ink-mute); font-size: 11px; margin-top: 6px; }
+:is(#settings2, #machines2) .connection-primary-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 22px; }
+:is(#settings2, #machines2) .connection-primary-actions > .btn.primary { flex: 1; }
+:is(#settings2, #machines2) .connection-detail-tabs { display: flex; gap: 16px; border-bottom: 1px solid var(--line); margin-bottom: 24px; }
+:is(#settings2, #machines2) .connection-detail-tabs .btn { padding: 6px 0 10px; min-height: 32px; color: var(--ink-mute); background: transparent; border: 0; border-bottom: 2px solid transparent; border-radius: 0; font-size: 12px; }
+:is(#settings2, #machines2) .connection-detail-tabs .btn[aria-pressed='true'] { color: var(--ink); border-bottom-color: var(--connection-accent); }
+:is(#settings2, #machines2) .connection-section-label { color: var(--ink-mute); font-size: 11px; font-weight: 500; margin: 0 0 12px; }
+:is(#settings2, #machines2) .connection-facts { display: flex; flex-direction: column; gap: 14px; margin-bottom: 28px; }
+:is(#settings2, #machines2) .connection-facts > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+:is(#settings2, #machines2) .connection-facts dt { color: var(--ink-mute); font-size: 10px; }
+:is(#settings2, #machines2) .connection-facts dd { color: var(--ink); font: 400 12px/1.5 var(--font); overflow-wrap: anywhere; user-select: text; }
+:is(#settings2, #machines2) .connection-profiles { display: flex; flex-direction: column; gap: 8px; }
+:is(#settings2, #machines2) .connection-profile { display: flex; align-items: center; gap: 9px; padding: 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--fill-1); }
+:is(#settings2, #machines2) .connection-profile > div { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+:is(#settings2, #machines2) .connection-profile strong { color: var(--ink); font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
+:is(#settings2, #machines2) .connection-profile > div > span { font-size: 10px; color: var(--ink-mute); }
+:is(#settings2, #machines2) .connection-profile-icon { color: var(--warning-text); padding: 6px; background: var(--warning-soft); border-radius: 7px; }
+:is(#settings2, #machines2) .connection-profile-icon[data-kind='codex'] { color: var(--success-text); background: var(--success-soft); }
+:is(#settings2, #machines2) .connection-profile-icon .ph { --icon-size: 17px; }
+:is(#settings2, #machines2) .connection-setting-action { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding: 18px 0; border-top: 1px solid var(--line); }
+:is(#settings2, #machines2) .connection-setting-action strong { font-size: 12px; font-weight: 500; }
+:is(#settings2, #machines2) .connection-setting-action p, :is(#settings2, #machines2) .connection-remove p, :is(#settings2, #machines2) .connection-muted { color: var(--ink-mute); font-size: 11px; line-height: 1.6; margin-top: 4px; }
+:is(#settings2, #machines2) .connection-remove { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
+:is(#settings2, #machines2) .connection-remove .btn { margin-top: 12px; color: var(--danger); border-color: color-mix(in srgb, var(--danger) 30%, transparent); background: var(--danger-soft); }
+:is(#settings2, #machines2) .connection-alert { padding: 11px 12px; font-size: 11px; line-height: 1.6; border-radius: 9px; background: var(--warning-soft); color: var(--warning-text); margin-bottom: 16px; overflow-wrap: anywhere; white-space: pre-line; }
+:is(#settings2, #machines2) .connection-alert[hidden] { display: none; }
+:is(#settings2, #machines2) .connection-empty-list { grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; padding: 38px 20px; color: var(--ink-mute); }
+:is(#settings2, #machines2) .connection-empty-list > .ph { --icon-size: 27px; color: var(--ink-faint); }
+:is(#settings2, #machines2) .connection-empty-list strong { color: var(--ink-2); font-size: 13px; font-weight: 500; }
+:is(#settings2, #machines2) .connection-empty-list p { max-width: 32ch; font-size: 11px; line-height: 1.6; }
+:is(#settings2, #machines2) .connection-empty-detail { display: flex; flex-direction: column; align-items: flex-start; gap: 18px; padding-top: 20px; }
+:is(#settings2, #machines2) .connection-empty-detail h2 { font-size: 19px; font-weight: 600; }
+:is(#settings2, #machines2) .connection-empty-detail p { color: var(--ink-mute); font-size: 12px; line-height: 1.7; }
+:is(#settings2, #machines2) .connection-inventory-notices { margin-top: 22px; }
+:is(#settings2, #machines2) .connection-local-note { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; border-top: 1px solid var(--line); padding-top: 18px; color: var(--ink-mute); }
+:is(#settings2, #machines2) .connection-local-note > div { flex: 1; min-width: 120px; }
+:is(#settings2, #machines2) .connection-local-note strong { font-size: 11px; color: var(--ink-2); font-weight: 500; }
+:is(#settings2, #machines2) .connection-local-note p { font-size: 10px; line-height: 1.6; margin-top: 3px; }
+:is(#settings2, #machines2) .connection-install-resume { display: flex; align-items: center; gap: 12px; margin: 12px 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; color: var(--connection-accent); font-size: 11px; }
+:is(#settings2, #machines2) .connection-install-resume > span { flex: 1; min-width: 0; }
+:is(#settings2, #machines2) .connection-preferences { border-top: 1px solid var(--line); margin-top: 24px; padding-top: 12px; }
+:is(#settings2, #machines2) .connection-preferences > .s2-details { border: 0; background: transparent; font-size: 11px; }
+:is(#settings2, #machines2) .connection-preferences > .s2-details > summary { min-height: 30px; padding: 8px 0; color: var(--ink-mute); font-size: 10px; }
+:is(#settings2, #machines2) .connection-detail .s2-vm-area { margin: 0; }
+:is(#settings2, #machines2) .connection-detail .s2-vm-list > .drow { gap: 12px; flex-direction: column; }
+:is(#settings2, #machines2) .connection-detail .s2-vm-list > .drow > .grow > .dt { display: none; }
+:is(#settings2, #machines2) .connection-detail .s2-vm-area .dctl { max-width: 100%; width: 100%; justify-content: flex-start; }
+:is(#settings2, #machines2) .connection-detail .s2-vm-area .grow { flex-basis: auto; }
+:is(#settings2, #machines2) .connection-detail .s2-vm-details { margin-top: 16px; }
+:is(#settings2, #machines2) .connection-detail .s2-vm-details > summary { font-size: 11px; }
+:is(#settings2, #machines2) .connection-detail .s2-vm-mount { font-size: 11px; overflow-wrap: anywhere; }
+:is(#settings2, #machines2) .connection-detail .s2-vm-mount code { font-size: 10px; }
+
+/* A dedicated editor keeps preparation and error recovery out of inventory. */
+:is(#settings2, #machines2) .connection-editor { max-width: 720px; margin: 0 auto; padding: 25px 30px; border: 1px solid var(--line-strong); border-radius: 17px; background: var(--paper-2); animation: connection-detail-in 180ms ease-out; }
+:is(#settings2, #machines2) .connection-editor-head { display: flex; justify-content: space-between; gap: 20px; margin-bottom: 25px; }
+:is(#settings2, #machines2) .connection-editor-head h2 { font-size: 19px; font-weight: 600; letter-spacing: -.3px; }
+:is(#settings2, #machines2) .connection-editor-head p { font-size: 11px; color: var(--ink-mute); margin-top: 6px; line-height: 1.5; }
+:is(#settings2, #machines2) .connection-editor-head .btn { align-self: flex-start; background: transparent; }
+:is(#settings2, #machines2) .connection-editor .s2rsteps { margin-bottom: 25px; padding-bottom: 18px; gap: 18px; border-bottom: 1px solid var(--line); }
+:is(#settings2, #machines2) .connection-editor .s2rsteps li { font-size: 10px; color: var(--ink-mute); gap: 7px; flex: none; }
+:is(#settings2, #machines2) .connection-editor .s2rsteps li > span { width: 20px; height: 20px; border-radius: 6px; background: var(--fill-3); font-size: 10px; }
+:is(#settings2, #machines2) .connection-editor .s2rsteps li.current { color: var(--connection-accent); }
+:is(#settings2, #machines2) .connection-editor .s2rsteps li.current > span { background: var(--connection-soft); }
+:is(#settings2, #machines2) .connection-editor .s2rtransport { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 23px; }
+:is(#settings2, #machines2) .connection-editor .s2rtransport .btn { min-height: 44px; justify-content: flex-start; padding: 12px 15px; border: 1px solid var(--line-strong); background: var(--fill-1); color: var(--ink-2); font-size: 12px; }
+:is(#settings2, #machines2) .connection-editor .s2rtransport .btn.selected { border-color: var(--connection-accent); background: var(--connection-soft); color: var(--connection-accent); }
+:is(#settings2, #machines2) .connection-editor .s2rtransport .btn .ph { --icon-size: 19px; }
+:is(#settings2, #machines2) .connection-editor .drow { padding: 0; gap: 16px; min-height: 0; border: 0; margin-bottom: 22px; flex-wrap: wrap; }
+:is(#settings2, #machines2) .connection-editor .drow > .grow { flex-basis: 100%; }
+:is(#settings2, #machines2) .connection-editor .drow .dctl { max-width: 100%; }
+:is(#settings2, #machines2) .connection-editor .s2rfield { margin-top: 16px; }
+:is(#settings2, #machines2) .connection-editor .s2rfield .s2-secret { min-height: 42px; padding: 10px 13px; background: var(--fill-1); font-family: var(--font); font-size: 13px; }
+:is(#settings2, #machines2) .connection-editor .s2rfield .jselect { width: 100%; }
+:is(#settings2, #machines2) .connection-editor .s2rfield .jselect-trigger { min-height: 40px; }
+:is(#settings2, #machines2) .connection-editor .s2raccess-line { gap: 12px; margin-top: 20px; }
+:is(#settings2, #machines2) .connection-editor .s2raccess-grid { gap: 16px; }
+:is(#settings2, #machines2) .connection-editor .s2raccess-state { font-size: 11px; line-height: 1.6; border-radius: 9px; padding: 10px 12px; margin-block: 16px; }
+:is(#settings2, #machines2) .connection-editor .s2raccess-state.on { color: var(--success-text); background: var(--success-soft); }
+:is(#settings2, #machines2) .connection-editor .s2rmore { border-top: 1px solid var(--line); padding-top: 15px; }
+:is(#settings2, #machines2) .connection-editor .s2rlink { font-size: 11px; color: var(--ink-mute); }
+:is(#settings2, #machines2) .connection-editor .s2-details { border: 0; background: var(--fill-1); margin-top: 18px; }
+:is(#settings2, #machines2) .connection-editor .s2-details > summary { font-size: 11px; padding: 12px; }
+:is(#settings2, #machines2) .connection-editor .s2radvanced { padding: 0 14px 16px; }
+:is(#settings2, #machines2) .connection-editor .s2rconnection-summary { margin: 0 0 22px; }
+:is(#settings2, #machines2) .connection-editor .s2rconnection-summary .drow { padding: 0 14px; }
+@keyframes connection-detail-in { from { opacity: .5; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+@media (min-width: 1600px) { :is(#settings2, #machines2) .connection-workspace { grid-template-columns: minmax(400px, 1fr) 385px; } :is(#settings2, #machines2) .connection-grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); } }
+@media (max-width: 1040px) { :is(#settings2, #machines2) .connection-workspace { grid-template-columns: minmax(205px, 1fr) minmax(255px, 310px); } :is(#settings2, #machines2) .connection-inventory { padding: 16px; } :is(#settings2, #machines2) .connection-detail { padding: 21px 18px; } :is(#settings2, #machines2) .connection-toolbar > .btn { font-size: 0; gap: 0; } }
+@media (max-width: 800px) {
+  :is(#settings2, #machines2) .connection-workspace { grid-template-columns: 1fr; }
+  :is(#settings2, #machines2) .connection-detail { border-left: 0; border-top: 1px solid var(--line); }
+  :is(#settings2, #machines2) .connection-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+  :is(#settings2, #machines2) .connection-page-head { gap: 10px; align-items: flex-start; }
+  :is(#settings2, #machines2) .connection-page-head .dtitle { font-size: 23px; }
+  :is(#settings2, #machines2) .connection-page-head .btn { font-size: 11px; max-width: 132px; }
+  :is(#settings2, #machines2) .connection-editor { padding: 20px; }
+  :is(#settings2, #machines2) .connection-editor .s2rsteps { gap: 10px; flex-wrap: wrap; }
+}
+@media (prefers-reduced-motion: reduce) { :is(#settings2, #machines2) .connection-host, :is(#settings2, #machines2) .connection-editor { animation: none; } :is(#settings2, #machines2) .connection-card { transition: none; } }
+
+/* Machines occupies the module canvas directly, without a settings sidebar,
+   constrained article column, or another window-shaped frame. */
+#machines { height: 100%; min-height: 0; overflow: hidden; }
+#machines2 { height: 100%; width: 100%; color: var(--ink); font-family: var(--s2-font); }
+#machines2 > .machines-content { display: flex; flex-direction: column; height: 100%; padding: 0; overflow: hidden; }
+#machines2 #s2-pane-remotes { display: flex; flex-direction: column; flex: 1; min-height: 0; width: 100%; max-width: none; margin: 0; }
+#machines2 .connection-page-head { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+#machines2 .connection-workspace { flex: 1; min-height: 0; border: 0; border-radius: 0; grid-template-columns: minmax(280px, 1fr) clamp(310px, 30%, 400px); }
+#machines2 .connection-inventory { overflow: auto; padding: 24px; }
+#machines2 .connection-detail { overflow: auto; padding: 28px 24px; }
+#machines2 .connection-toolbar { gap: 10px; }
+#machines2 .connection-toolbar > .btn { flex: none; font-size: 11px; gap: 7px; }
+#machines2 .connection-search { min-height: 38px; }
+#machines2 .connection-editor { width: 100%; max-width: 800px; margin: 0 auto; padding: 28px 32px; border: 0; border-radius: 0; background: transparent; overflow: auto; }
+#machines2 .skrow { margin: 24px; }
+@media (max-width: 1040px) {
+  #machines2 .connection-inventory { padding: 18px; }
+  #machines2 .connection-detail { padding: 24px 18px; }
+  #machines2 .connection-toolbar { flex-wrap: wrap; }
+  #machines2 .connection-search { flex-basis: 100%; }
+  #machines2 .connection-toolbar > .btn.primary { margin-left: auto; }
+}
+@media (max-width: 800px) {
+  #machines2 .connection-workspace { display: block; overflow: auto; }
+  #machines2 .connection-workspace[hidden] { display: none; }
+  #machines2 .connection-inventory, #machines2 .connection-detail { overflow: visible; }
+  #machines2 .connection-editor { padding: 24px 20px; }
+}

@@ -8,7 +8,7 @@
  * без утечек слушателей и без дублей стилей.
  *
  * ВАЖНО: ничего не импортирует, чистый ванильный JS под WKWebView.
- * Иконки собираются через DOM (createElementNS) — без innerHTML, без XSS.
+ * Иконки берутся из локального Phosphor через DOM — без innerHTML, без XSS.
  * ========================================================================== */
 (function () {
   'use strict';
@@ -18,6 +18,12 @@
   let docClickBound = false;  // глобальный «клик мимо» для закрытия селектов
   let currentRoot = null;     // активный rootEl (для live-перерисовок)
   let activePane = 'general'; // выбранная вкладка сайдбара
+  let lastSettingsPane = 'general';
+  const openMachines = () => window.dispatchEvent(new window.Event('jarvis:open-machines'));
+  window.jarvisOpenSettingsPane = pane => {
+    if (pane === 'remotes') { openMachines(); return; }
+    if (Object.prototype.hasOwnProperty.call(RENDERERS, pane)) activePane = lastSettingsPane = pane;
+  };
   const renderingPane = {};   // pane → идёт ли сейчас рендер (анти-гонка)
   const renderPending = {};   // pane → запрошен ли повторный рендер во время текущего
   // Состояние загрузок моделей. `activeDownload` — id модели, что качается СЕЙЧАС
@@ -27,6 +33,16 @@
   const dlState = {};
   // Мультивыбор моделей для «Скачать выбранное» (чекбоксы в строках, id → выбран).
   const selectedModels = new Set();
+  const machineDetails = new Map();
+
+  function settingsDetails(id, title, children, initiallyOpen = false) {
+    const box = el('details.s2-details', { id });
+    box.open = machineDetails.has(id) ? machineDetails.get(id) : initiallyOpen;
+    box.appendChild(el('summary', { text: title }));
+    for (const child of children) box.appendChild(child);
+    box.addEventListener('toggle', () => machineDetails.set(id, box.open));
+    return box;
+  }
 
   // ── IPC-обёртка: никогда не бросает наружу, возвращает fallback ──────────
   async function safe(fn, fallback) {
@@ -38,10 +54,52 @@
       return fallback;
     }
   }
-  // вызвать IPC-action (без ожидания результата), проглотив ошибку
+  let cancelShortcutRecording = null;
+  let controlId = 0;
+  async function required(fn) {
+    if (!window.jarvis) throw new Error('Нет связи с приложением. Повторите попытку.');
+    const result = await fn();
+    if (result?.ok === false) throw new Error(result.error || 'Изменение отклонено приложением.');
+    return result;
+  }
+  const paneErrors = new Map();
+  function paintSettingsError() {
+    if (!currentRoot) return;
+    let note = currentRoot.querySelector('#settings-save-error');
+    const message = paneErrors.get(activePane);
+    if (!message) { note?.remove(); return; }
+    if (!note) { note = el('div#settings-save-error.meeting-status.error', { role: 'alert' }); currentRoot.querySelector('.detail')?.prepend(note); }
+    note.textContent = message;
+  }
+  function showSettingsError(error, pane = activePane, control) {
+    const label = control?.closest('.drow')?.querySelector('.dt')?.textContent || NAV.find(n => n.pane === pane)?.label || 'Настройка';
+    paneErrors.set(pane, label + ' — не удалось применить: ' + (error?.message || String(error)));
+    paintSettingsError();
+  }
+  function clearSettingsError(pane) {
+    paneErrors.delete(pane); paintSettingsError();
+  }
+  window.addEventListener('jarvis:appearance-error', event => {
+    showSettingsError(event.detail, 'look');
+    if (activePane === 'look') reRenderPane('look');
+  });
   function fire(fn) {
-    try { if (window.jarvis && typeof fn === 'function') return fn(); } catch (e) {}
-    return undefined;
+    const pane = activePane;
+    return required(fn).then(result => {
+      clearSettingsError(pane);
+      return result;
+    }).catch(error => { showSettingsError(error, pane); reRenderPane(pane); });
+  }
+  async function action(control, fn) {
+    if (control.getAttribute('aria-busy') === 'true') return false;
+    const pane = activePane;
+    control.setAttribute('aria-busy', 'true');
+    try {
+      await required(fn);
+      clearSettingsError(pane);
+      return true;
+    } catch (error) { showSettingsError(error, pane, control); return false; }
+    finally { control.removeAttribute('aria-busy'); }
   }
 
   // ── Утилита формата размера на диске (порт fmtBytes из renderer.js) ──────
@@ -69,155 +127,9 @@
     return KEY_FALLBACK[n] || n;
   }
 
-  /* ========================================================================
-   * Инлайновые lucide-style иконки (24×24, stroke=currentColor). Данные —
-   * настоящий lucide-path, чтобы штрих совпал с остальным приложением.
-   * Хранятся как массивы примитивов и собираются через createElementNS —
-   * никакого innerHTML (офлайн + безопасно).
-   * ====================================================================== */
-  const SVG_NS = 'http://www.w3.org/2000/svg';
-  // каждый элемент: [tag, {атрибуты}]
-  const ICONS = {
-    // lucide: triangle-alert — плашка ошибки скачивания модели
-    'alert-triangle': [
-      ['path', { d: 'm21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3' }],
-      ['path', { d: 'M12 9v4' }],
-      ['path', { d: 'M12 17h.01' }],
-    ],
-    // lucide: palette — раздел «Вид» (тема и краска)
-    'palette': [
-      ['circle', { cx: 13.5, cy: 6.5, r: 0.5, fill: 'currentColor' }],
-      ['circle', { cx: 17.5, cy: 10.5, r: 0.5, fill: 'currentColor' }],
-      ['circle', { cx: 8.5, cy: 7.5, r: 0.5, fill: 'currentColor' }],
-      ['circle', { cx: 6.5, cy: 12.5, r: 0.5, fill: 'currentColor' }],
-      ['path', { d: 'M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z' }],
-    ],
-    'settings': [
-      ['circle', { cx: 12, cy: 12, r: 3 }],
-      ['path', { d: 'M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z' }],
-    ],
-    'mic': [
-      ['path', { d: 'M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z' }],
-      ['path', { d: 'M19 10v2a7 7 0 0 1-14 0v-2' }],
-      ['line', { x1: 12, x2: 12, y1: 19, y2: 22 }],
-    ],
-    'volume-2': [
-      ['polygon', { points: '11 5 6 9 2 9 2 15 6 15 11 19 11 5' }],
-      ['path', { d: 'M15.54 8.46a5 5 0 0 1 0 7.07' }],
-      ['path', { d: 'M19.07 4.93a10 10 0 0 1 0 14.14' }],
-    ],
-    'bell': [
-      ['path', { d: 'M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9' }],
-      ['path', { d: 'M10.3 21a1.94 1.94 0 0 0 3.4 0' }],
-    ],
-    'coffee': [
-      ['path', { d: 'M10 2v2' }],
-      ['path', { d: 'M14 2v2' }],
-      ['path', { d: 'M16 8a1 1 0 0 1 1 1v8a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1h14a4 4 0 1 1 0 8h-1' }],
-      ['path', { d: 'M6 2v2' }],
-    ],
-    'keyboard': [
-      ['path', { d: 'M10 8h.01' }],
-      ['path', { d: 'M12 12h.01' }],
-      ['path', { d: 'M14 8h.01' }],
-      ['path', { d: 'M16 12h.01' }],
-      ['path', { d: 'M18 8h.01' }],
-      ['path', { d: 'M6 8h.01' }],
-      ['path', { d: 'M7 16h10' }],
-      ['path', { d: 'M8 12h.01' }],
-      ['rect', { width: 20, height: 16, x: 2, y: 4, rx: 2 }],
-    ],
-    'cable': [
-      ['path', { d: 'M17 21v-2a1 1 0 0 1-1-1v-1a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1a1 1 0 0 1-1 1' }],
-      ['path', { d: 'M19 15V6.5a1 1 0 0 0-7 0v11a1 1 0 0 1-7 0V9' }],
-      ['path', { d: 'M21 21v-2h-4' }],
-      ['path', { d: 'M3 5h4V3' }],
-      ['path', { d: 'M7 5a1 1 0 0 1 1 1v1a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a1 1 0 0 1 1-1V3' }],
-    ],
-    // lucide: server — раздел «Удалённые» (узлы на других машинах)
-    'server': [
-      ['rect', { width: 20, height: 8, x: 2, y: 2, rx: 2, ry: 2 }],
-      ['rect', { width: 20, height: 8, x: 2, y: 14, rx: 2, ry: 2 }],
-      ['line', { x1: 6, x2: 6.01, y1: 6, y2: 6 }],
-      ['line', { x1: 6, x2: 6.01, y1: 18, y2: 18 }],
-    ],
-    'info': [
-      ['circle', { cx: 12, cy: 12, r: 10 }],
-      ['path', { d: 'M12 16v-4' }],
-      ['path', { d: 'M12 8h.01' }],
-    ],
-    'cpu': [
-      ['rect', { width: 16, height: 16, x: 4, y: 4, rx: 2 }],
-      ['rect', { width: 6, height: 6, x: 9, y: 9, rx: 1 }],
-      ['path', { d: 'M15 2v2' }],
-      ['path', { d: 'M15 20v2' }],
-      ['path', { d: 'M2 15h2' }],
-      ['path', { d: 'M2 9h2' }],
-      ['path', { d: 'M20 15h2' }],
-      ['path', { d: 'M20 9h2' }],
-      ['path', { d: 'M9 2v2' }],
-      ['path', { d: 'M9 20v2' }],
-    ],
-    'terminal': [
-      ['path', { d: 'm7 11 2-2-2-2' }],
-      ['path', { d: 'M11 13h4' }],
-      ['rect', { width: 18, height: 18, x: 3, y: 3, rx: 2 }],
-    ],
-    'chevron-down': [['path', { d: 'm6 9 6 6 6-6' }]],
-    'chevron-left': [['path', { d: 'm15 18-6-6 6-6' }]],
-    'chevron-right': [['path', { d: 'm9 18 6-6-6-6' }]],
-    'rotate-ccw': [
-      ['path', { d: 'M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8' }],
-      ['path', { d: 'M3 3v5h5' }],
-    ],
-    'search': [
-      ['circle', { cx: 11, cy: 11, r: 8 }],
-      ['path', { d: 'm21 21-4.3-4.3' }],
-    ],
-    'loader-circle': [['path', { d: 'M21 12a9 9 0 1 1-6.219-8.56' }]],
-    'check': [['path', { d: 'M20 6 9 17l-5-5' }]],
-    'download': [
-      ['path', { d: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4' }],
-      ['polyline', { points: '7 10 12 15 17 10' }],
-      ['line', { x1: 12, x2: 12, y1: 15, y2: 3 }],
-    ],
-    // lucide: triangle-alert — предупреждения (чего не хватает на машине, ошибки)
-    'alert-triangle': [
-      ['path', { d: 'm21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3' }],
-      ['path', { d: 'M12 9v4' }],
-      ['path', { d: 'M12 17h.01' }],
-    ],
-    // lucide: key — публичный ssh-ключ этой машины (мастер удалённых узлов)
-    'key': [
-      ['path', { d: 'm15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4' }],
-      ['path', { d: 'm21 2-9.6 9.6' }],
-      ['circle', { cx: 7.5, cy: 15.5, r: 5.5 }],
-    ],
-    'trash-2': [
-      ['path', { d: 'M3 6h18' }],
-      ['path', { d: 'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2' }],
-      ['line', { x1: 10, x2: 10, y1: 11, y2: 17 }],
-      ['line', { x1: 14, x2: 14, y1: 11, y2: 17 }],
-    ],
-  };
-  // вернуть DOM-узел <svg> для иконки (стиль lucide, наследует currentColor)
+  // Shared, locally bundled Phosphor icons; each label remains real text.
   function icon(name) {
-    const svg = document.createElementNS(SVG_NS, 'svg');
-    svg.setAttribute('class', 'lucide');
-    svg.setAttribute('width', '24');
-    svg.setAttribute('height', '24');
-    svg.setAttribute('viewBox', '0 0 24 24');
-    svg.setAttribute('fill', 'none');
-    svg.setAttribute('stroke', 'currentColor');
-    svg.setAttribute('stroke-width', '2');
-    svg.setAttribute('stroke-linecap', 'round');
-    svg.setAttribute('stroke-linejoin', 'round');
-    for (const [tag, attrs] of (ICONS[name] || [])) {
-      const node = document.createElementNS(SVG_NS, tag);
-      for (const k in attrs) node.setAttribute(k, String(attrs[k]));
-      svg.appendChild(node);
-    }
-    return svg;
+    return window.jarvisIcons.create(name);
   }
   // обёртка <span> с иконкой внутри (для inline-вставки)
   function iconSpan(name, cls) {
@@ -271,14 +183,18 @@
   }
   // строка детали: заголовок dt + пояснение dd + контрол(ы) справа
   function drow(title, desc, ctlNodes, opts) {
+    const labelId = 's2-control-' + (++controlId);
     const grow = el('div.grow', null, [
-      el('div.dt', { text: title }),
+      el('div.dt', { text: title, id: labelId }),
       desc ? el('div.dd', { text: desc }) : null,
     ]);
     const dctl = el('div.dctl' + ((opts && opts.ctlClass) ? '.' + opts.ctlClass : ''));
     if (opts && opts.ctlStyle) dctl.style.cssText = opts.ctlStyle;
     const arr = Array.isArray(ctlNodes) ? ctlNodes : [ctlNodes];
     for (const c of arr) if (c) dctl.appendChild(c);
+    for (const control of dctl.querySelectorAll('input, select, .cstrigger, .seg')) {
+      if (!control.getAttribute('aria-label')) control.setAttribute('aria-labelledby', labelId);
+    }
     const leading = opts && opts.dot ? el('span.dot' + (opts.dot === true ? '' : '.' + opts.dot), { style: 'margin-top:5px' }) : null;
     return el('div.drow', null, [leading, grow, dctl]);
   }
@@ -287,13 +203,28 @@
     const t = el('input.toggle', { type: 'checkbox' });
     t.checked = !!checked;
     if (disabled) t.disabled = true;
-    t.addEventListener('change', () => { try { onChange(t.checked); } catch (e) {} });
+    let saved = t.checked;
+    t.addEventListener('change', async () => {
+      const next = t.checked;
+      t.disabled = true;
+      if (await action(t, () => onChange(next))) saved = next;
+      t.checked = saved;
+      t.disabled = !!disabled;
+    });
     return t;
   }
   // кнопка (.btn / .btn.sm / .btn.primary / .btn.danger)
   function button(label, onClick, extra) {
     const b = el('button.btn' + (extra ? '.' + extra.split(' ').join('.') : ''), { text: label });
-    b.addEventListener('click', () => { try { onClick(b); } catch (e) {} });
+    b.type = 'button';
+    b.addEventListener('click', async () => {
+      if (b.getAttribute('aria-busy') === 'true') return;
+      const contents = [...b.childNodes].map(n => n.cloneNode(true));
+      const disabled = b.disabled;
+      if (!await action(b, () => onClick(b))) {
+        b.replaceChildren(...contents); b.disabled = disabled;
+      }
+    });
     return b;
   }
 
@@ -320,67 +251,111 @@
    * options: [{value, label}], value — текущее, onPick(value) → IPC.
    * Возвращает {node, setBusy(label|false)}. */
   function customSelect(options, value, onPick) {
-    const cur = options.find((o) => o.value === value) || options[0] || { value: '', label: '—' };
-    const valSpan = el('span.cval', { text: cur ? cur.label : '—' });
+    // Keep an unknown saved device/model visible until the user changes it.
+    const choices = [...options];
+    if (value && !choices.some(o => o.value === value)) choices.unshift({ value, label: String(value) });
+    let selected = choices.find(o => o.value === value) || choices[0] || { value: '', label: '—' };
+    const valSpan = el('span.cval', { text: selected.label });
     const spin = el('span.spin', null, icon('loader-circle'));
     const chev = el('span.chev', null, icon('chevron-down'));
-    const trigger = el('button.cstrigger', null, [valSpan, spin, chev]);
-    const menu = el('div.cmenu');
+    const id = 's2-select-' + (++controlId);
+    const trigger = el('button.cstrigger', { type: 'button', 'aria-haspopup': 'listbox', 'aria-expanded': 'false', 'aria-controls': id }, [valSpan, spin, chev]);
+    const menu = el('div.cmenu', { id, role: 'listbox', 'aria-label': 'Варианты' });
     const root = el('div.cselect', null, [trigger, menu]);
-
-    for (const o of options) {
-      const ck = el('span.ck', null, icon('check'));
-      const opt = el('div.copt' + (o.value === cur.value ? '.selected' : ''), { 'data-value': o.value }, [
-        document.createTextNode(o.label), ck,
-      ]);
-      opt.addEventListener('click', (e) => {
+    let focused = Math.max(0, choices.indexOf(selected));
+    const close = (restore = false) => {
+      root.classList.remove('open'); trigger.setAttribute('aria-expanded', 'false');
+      if (restore) trigger.focus();
+    };
+    root.dismissSelect = close;
+    const focusOption = i => {
+      focused = Math.max(0, Math.min(choices.length - 1, i));
+      const option = menu.children[focused];
+      if (option) { option.focus(); option.scrollIntoView?.({ block: 'nearest' }); }
+    };
+    const open = () => {
+      if (root.classList.contains('busy')) return;
+      closeAllSelects(root); root.classList.add('open'); trigger.setAttribute('aria-expanded', 'true');
+      focusOption(Math.max(0, choices.indexOf(selected)));
+    };
+    const busy = on => { root.classList.toggle('busy', !!on); trigger.disabled = !!on; if (on) close(); };
+    const paint = () => {
+      valSpan.textContent = selected.label;
+      for (const opt of menu.children) {
+        const current = opt.getAttribute('data-value') === String(selected.value);
+        opt.classList.toggle('selected', current); opt.setAttribute('aria-selected', String(current));
+      }
+    };
+    choices.forEach(o => {
+      const opt = el('button.copt', { type: 'button', role: 'option', tabindex: '-1', 'data-value': o.value }, [document.createTextNode(o.label), el('span.ck', null, icon('check'))]);
+      opt.addEventListener('click', async e => {
         e.stopPropagation();
-        for (const x of menu.querySelectorAll('.copt')) x.classList.remove('selected');
-        opt.classList.add('selected');
-        valSpan.textContent = o.label;
-        root.classList.remove('open');
-        try { onPick(o.value); } catch (err) {}
+        if (root.classList.contains('busy')) return;
+        close(true);
+        if (o.value === selected.value) return;
+        busy(true);
+        if (await action(root, () => onPick(o.value))) selected = o;
+        busy(false); paint(); trigger.focus();
       });
       menu.appendChild(opt);
-    }
-
-    trigger.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (root.classList.contains('busy')) return;
-      const wasOpen = root.classList.contains('open');
-      closeAllSelects(root);
-      root.classList.toggle('open', !wasOpen);
     });
-
-    return {
-      node: root,
-      setBusy(busy) {
-        if (busy) { root.classList.add('busy'); root.classList.remove('open'); }
-        else root.classList.remove('busy');
-      },
-    };
+    paint();
+    trigger.addEventListener('click', e => { e.stopPropagation(); root.classList.contains('open') ? close() : open(); });
+    root.addEventListener('keydown', e => {
+      if (e.isComposing || e.altKey || e.ctrlKey || e.metaKey) return;
+      if (e.key === 'Escape' && root.classList.contains('open')) { e.preventDefault(); e.stopPropagation(); close(true); return; }
+      if (e.key === 'Tab') { close(); return; }
+      if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) {
+        e.preventDefault(); e.stopPropagation();
+        if (!root.classList.contains('open')) { open(); return; }
+        focusOption(e.key === 'Home' ? 0 : e.key === 'End' ? choices.length - 1 : focused + (e.key === 'ArrowDown' ? 1 : -1));
+      }
+    });
+    return { node: root, setBusy: busy };
   }
-  // закрыть все открытые селекты, кроме keep
-  function closeAllSelects(keep) {
-    if (!currentRoot) return;
+  function closeAllSelects(keep, restore = false) {
+    if (!currentRoot) return false;
+    let closed = false;
     for (const s of currentRoot.querySelectorAll('.cselect.open')) {
-      if (s !== keep) s.classList.remove('open');
+      if (s !== keep) { s.dismissSelect?.(restore); closed = true; }
     }
+    return closed;
   }
+  window.jarvisModuleBack = window.jarvisModuleBack || {};
+  window.jarvisModuleBack.settings = () => {
+    if (cancelShortcutRecording) { cancelShortcutRecording(); return true; }
+    if (closeAllSelects(null, true)) return true;
+    const search = currentRoot?.querySelector('#settingsSearch');
+    if (search?.value) { search.value = ''; search.dispatchEvent(new Event('input', { bubbles: true })); search.focus(); return true; }
+    return false;
+  };
+  window.jarvisModuleBack.machines = () => {
+    if (closeAllSelects(null, true)) return true;
+    if (remoteEditorOpen()) { closeMachineEditor?.(); return true; }
+    const search = currentRoot?.querySelector('.connection-search input');
+    if (search?.value) { search.value = ''; search.dispatchEvent(new window.Event('input', { bubbles: true })); search.focus(); return true; }
+    return false;
+  };
 
-  /* ── Сегментированный контрол: [{value,label}], onPick(value) ────────────*/
   function segmented(options, value, onPick) {
-    const seg = el('div.seg');
-    for (const o of options) {
-      const b = el('button.segbtn' + (o.value === value ? '.active' : ''), { text: o.label });
-      b.addEventListener('click', () => {
-        for (const x of seg.querySelectorAll('.segbtn')) x.classList.remove('active');
-        b.classList.add('active');
-        try { onPick(o.value); } catch (e) {}
+    const seg = el('div.seg', { role: 'group' });
+    let selected = value;
+    const paint = () => [...seg.children].forEach((b, i) => {
+      const active = options[i].value === selected;
+      b.classList.toggle('active', active); b.setAttribute('aria-pressed', String(active));
+    });
+    options.forEach(o => {
+      const b = el('button.segbtn', { type: 'button', text: o.label });
+      b.addEventListener('click', async () => {
+        if (o.value === selected || seg.getAttribute('aria-busy') === 'true') return;
+        for (const child of seg.children) child.disabled = true;
+        if (await action(seg, () => onPick(o.value))) selected = o.value;
+        for (const child of seg.children) child.disabled = false;
+        paint();
       });
       seg.appendChild(b);
-    }
-    return seg;
+    });
+    paint(); return seg;
   }
 
   /* ── Строка хоткея с инлайн-рекордером (Raycast-style) ────────────────────
@@ -404,7 +379,7 @@
     const errBox = el('div.hkerr');
     errBox.style.display = 'none';
     left.appendChild(errBox);
-    const cap = el('div.hkey.rec', { title: 'Кликни и нажми сочетание' });
+    const cap = el('button.hkey.rec', { type: 'button', title: 'Кликни и нажми сочетание', 'aria-label': b.label + ': изменить сочетание' });
     const rb = el('button.hkreset', { title: 'Сбросить' }, icon('rotate-ccw'));
     const ctl = el('div.dctl.hk', null, [cap, rb]);
     row.appendChild(left);
@@ -424,7 +399,7 @@
         for (const k of hotkeyKeys(acc)) cap.appendChild(el('kbd', { text: k }));
       }
     };
-    const note = (txt) => { cap.replaceChildren(el('span.ph', { text: txt })); };
+    const note = (txt) => { cap.replaceChildren(el('span.shortcut-note', { text: txt })); };
     const done = () => { paint(); if (opts && opts.after) opts.after(); };
 
     const showConflict = (conf, next) => {
@@ -455,6 +430,8 @@
     function stopRec() {
       if (!recording) return;
       recording = false;
+      window.jarvisShortcutRecording = false;
+      if (cancelShortcutRecording === stopRec) cancelShortcutRecording = null;
       clearTimeout(recTimer);
       if (onKey) { document.removeEventListener('keydown', onKey, true); onKey = null; }
       document.removeEventListener('click', onAway, true);
@@ -464,7 +441,10 @@
     function onAway(e) { if (!cap.contains(e.target)) stopRec(); }
     function startRec() {
       if (recording) return;
+      cancelShortcutRecording?.();
       recording = true;
+      window.jarvisShortcutRecording = true;
+      cancelShortcutRecording = stopRec;
       clearErr();
       fire(() => window.jarvis.hotkeysSuspend(true));
       cap.classList.add('recording');
@@ -484,11 +464,7 @@
           note(`Нужен модификатор (${MODS_HINT}) или F-клавиша`); return;
         }
         const next = mods.concat(isSel ? '{n}' : key).join('+');
-        recording = false;
-        clearTimeout(recTimer);
-        document.removeEventListener('keydown', onKey, true); onKey = null;
-        document.removeEventListener('click', onAway, true);
-        fire(() => window.jarvis.hotkeysSuspend(false));
+        stopRec();
         applyAccel(next);
       };
       document.addEventListener('keydown', onKey, true);
@@ -542,15 +518,15 @@
 
   /* ── Кнопка удаления модели с двойным подтверждением «Точно?» ────────────*/
   function makeDeleteButton(id, after) {
-    const del = el('button.btn.sm.danger');
+    const del = el('button.btn.sm.danger', { type: 'button', 'aria-label': 'Удалить модель ' + id });
     const setIcon = () => { del.replaceChildren(icon('trash-2')); };
     setIcon();
     let armed = false;
     del.addEventListener('click', async () => {
       if (!armed) { armed = true; del.replaceChildren(document.createTextNode('Точно?')); setTimeout(() => { armed = false; setIcon(); }, 3000); return; }
       del.disabled = true; del.replaceChildren(document.createTextNode('…'));
-      await safe(() => window.jarvis.modelDelete(id), null);
-      if (after) after();
+      if (await action(del, () => window.jarvis.modelDelete(id))) { if (after) after(); }
+      else { armed = false; del.disabled = false; setIcon(); }
     });
     return del;
   }
@@ -604,6 +580,23 @@
 #settings2 .dtitle { font-size:22px; font-weight:700; letter-spacing:-.03em; color:var(--ink); margin:2px 0 18px; }
 /* заголовок секции — строчными и тихо, как в макете 14f */
 #settings2 .dsection { font-size:12.5px; color:var(--ink-mute); font-weight:500; margin:8px 0 8px; }
+#settings2 .s2-intro { color:var(--ink-mute); font-size:12px; line-height:1.65; margin:-5px 0 22px; }
+#settings2 .s2-details { border:1px solid var(--line); border-radius:10px; margin:10px 0 18px; min-width:0; }
+#settings2 .s2-details > summary { padding:12px 14px; color:var(--ink-2); font-size:12px; font-weight:500; cursor:pointer; }
+#settings2 .s2-details > summary:focus-visible { outline:2px solid var(--accent); outline-offset:-3px; }
+#settings2 .s2-details > .dgroup { margin:0; padding:0 14px; border:0; border-radius:0; }
+#settings2 .s2-details > .s2-intro { margin:0; padding:0 14px 14px; }
+#settings2 .s2-machine-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:20px 0 8px; }
+#settings2 .s2-machine-head .dsection { margin:0; }
+#settings2 .s2-machine-actions { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:6px; }
+#settings2 .s2-vm-list .drow { align-items:flex-start; }
+#settings2 .s2-vm-meta { margin-top:6px; color:var(--ink-faint); font-size:11px; line-height:1.5; overflow-wrap:anywhere; }
+#settings2 .s2-vm-details { margin:10px 0 0; border:0; border-top:1px solid var(--line); border-radius:0; }
+#settings2 .s2-vm-details > summary { padding:10px 0 0; font-size:11px; color:var(--ink-mute); }
+#settings2 .s2-vm-details code { font-size:11px; overflow-wrap:anywhere; user-select:text; }
+#settings2 .s2-vm-mount { padding-top:8px; color:var(--ink-mute); font-size:11px; line-height:1.5; overflow-wrap:anywhere; }
+#settings2 .s2-vm-mount strong { color:var(--ink-2); font-weight:500; }
+#settings2 .s2-vm-advanced { display:flex; gap:7px; flex-wrap:wrap; padding-top:12px; }
 /* группа — не карточка, а полоса строк с волосяными стыками */
 #settings2 .dgroup { background:transparent; border:0; border-radius:0; margin-bottom:24px; }
 #settings2 .drow { display:flex; align-items:center; gap:20px; min-height:var(--h-srow); padding:11px 0; }
@@ -676,7 +669,7 @@
 #settings2 .btn.primary:hover { background:var(--accent); filter:brightness(1.06); }
 #settings2 .btn.danger { color:var(--danger); background:var(--danger-soft); }
 #settings2 .btn.danger:hover { background:var(--danger-soft); filter:brightness(.97); }
-#settings2 .btn.danger svg.lucide { width:14px; height:14px; }
+#settings2 .btn.danger .ph { --icon-size:14px; width:14px; height:14px; }
 #settings2 .btn.sm { padding:6px 11px; font-size:12px; }
 
 /* ── Progress ────────────────────────────────────────────────────────── */
@@ -693,16 +686,16 @@
 #settings2 .hkey.rec { background:var(--accent-soft); cursor:default; }
 #settings2 .hkey.rec:hover { filter:brightness(.97); }
 #settings2 .hkey.rec kbd { color:var(--accent-text); }
-#settings2 .hkey .ph { font:500 12.5px/1 var(--s2-font); color:var(--accent-text); }
+#settings2 .hkey .shortcut-note { font:500 12.5px/1 var(--s2-font); color:var(--accent-text); }
 #settings2 .hkey.recording { background:var(--accent); animation:s2hkpulse 1.2s ease-in-out infinite; }
-#settings2 .hkey.recording kbd, #settings2 .hkey.recording .ph { color:var(--on-accent); }
+#settings2 .hkey.recording kbd, #settings2 .hkey.recording .shortcut-note { color:var(--on-accent); }
 @keyframes s2hkpulse { 0%,100% { box-shadow:0 0 0 3px var(--accent-soft); } 50% { box-shadow:0 0 0 6px var(--accent-soft); } }
 #settings2 .hkey.none { box-shadow:inset 0 0 0 1.5px var(--line-strong); background:transparent; }
 #settings2 .hknone { font:400 12.5px/1 var(--s2-font); color:var(--ink-faint); font-style:italic; }
 #settings2 .hkreset { width:32px; height:32px; border-radius:8px; display:grid; place-items:center; background:transparent; border:0; color:var(--ink-faint); cursor:default; visibility:hidden; }
 #settings2 .drow:hover .hkreset { visibility:visible; }
 #settings2 .hkreset:hover { color:var(--ink); background:var(--fill-2); }
-#settings2 .hkreset svg.lucide { width:15px; height:15px; }
+#settings2 .hkreset .ph { --icon-size:15px; width:15px; height:15px; }
 #settings2 .drow.conflict { background:var(--danger-soft); }
 #settings2 .drow.conflict .hkey { box-shadow:inset 0 0 0 1.5px var(--danger); }
 #settings2 .hkerr { display:flex; align-items:center; gap:6px; margin-top:7px; font-size:12px; color:var(--danger); flex-wrap:wrap; }
@@ -717,24 +710,24 @@
 #settings2 .cselect.open .cstrigger .chev { transform:rotate(180deg); }
 #settings2 .cmenu { position:absolute; top:calc(100% + 5px); right:0; min-width:100%; z-index:60; background:var(--paper); border:0; border-radius:var(--r-card); padding:5px; box-shadow:var(--shadow-pop); display:none; }
 #settings2 .cselect.open .cmenu { display:block; animation: s2fade .12s ease; }
-#settings2 .copt { display:flex; align-items:center; gap:9px; padding:9px 11px; border-radius:7px; font-size:13.5px; color:var(--ink-2); cursor:default; white-space:nowrap; }
-#settings2 .copt:hover { background:var(--accent-soft); color:var(--ink); }
+#settings2 .copt { appearance:none; border:0; background:transparent; width:100%; text-align:left; font-family:inherit; display:flex; align-items:center; gap:9px; padding:9px 11px; border-radius:7px; font-size:13.5px; color:var(--ink-2); cursor:default; white-space:nowrap; }
+#settings2 .copt:hover, #settings2 .copt:focus-visible { background:var(--accent-soft); color:var(--ink); }
 #settings2 .copt .ck { margin-left:auto; color:var(--accent-text); opacity:0; display:inline-flex; }
-#settings2 .copt .ck svg.lucide { width:13px; height:13px; }
+#settings2 .copt .ck .ph { --icon-size:13px; width:13px; height:13px; }
 #settings2 .copt.selected { color:var(--ink); font-weight:500; }
 #settings2 .copt.selected .ck { opacity:1; }
 /* загрузка модели: спиннер в триггере вместо шеврона + подпись loadcap */
 #settings2 .cselect .spin { display:none; }
 #settings2 .cselect.busy .spin { display:inline-flex; }
 #settings2 .cselect.busy .chev { display:none; }
-#settings2 .spin svg.lucide { width:14px; height:14px; color:var(--accent-text); animation: s2spin .8s linear infinite; }
+#settings2 .spin .ph { --icon-size:14px; width:14px; height:14px; color:var(--accent-text); animation: s2spin .8s linear infinite; }
 @keyframes s2spin { to { transform:rotate(360deg); } }
 #settings2 .loadcap { font-size:12px; color:var(--ink-mute); }
 
 /* ── ошибка загрузки модели (инлайн) ─────────────────────────────────── */
 #settings2 .s2err { display:flex; align-items:center; gap:6px; margin-top:6px; font-size:12px;
   color:var(--danger); max-width:340px; line-height:1.4; }
-#settings2 .s2err .s2err-ic svg.lucide { width:13px; height:13px; }
+#settings2 .s2err .s2err-ic .ph { --icon-size:13px; width:13px; height:13px; }
 #settings2 .s2err-txt { word-break:break-word; }
 
 /* ── выбор краски: три точки, выбранная в кольце (14f «вид») ─────────── */
@@ -745,10 +738,10 @@
 #settings2 .paintown input { position:absolute; inset:-4px; opacity:0; cursor:default; padding:0; border:0; }
 
 /* ── lucide общая геометрия ──────────────────────────────────────────── */
-#settings2 svg.lucide { width:15px; height:15px; stroke-width:2; vertical-align:middle; flex:none; }
-#settings2 .snav .item .ic svg.lucide { width:14px; height:14px; }
-#settings2 .ssearch .si svg.lucide { width:15px; height:15px; }
-#settings2 .dnav button svg.lucide { width:15px; height:15px; }
+#settings2 .ph { --icon-size:15px; width:15px; height:15px; stroke-width:2; vertical-align:middle; flex:none; }
+#settings2 .snav .item .ic .ph { --icon-size:14px; width:14px; height:14px; }
+#settings2 .ssearch .si .ph { --icon-size:15px; width:15px; height:15px; }
+#settings2 .dnav button .ph { --icon-size:15px; width:15px; height:15px; }
 #settings2 .range { -webkit-appearance:none; appearance:none; height:4px; border-radius:999px; background:var(--surface-2); outline:0; width:140px; }
 #settings2 .range::-webkit-slider-thumb { -webkit-appearance:none; width:16px; height:16px; border-radius:50%; background:var(--accent); cursor:default; box-shadow:var(--shadow-raised); }
 
@@ -774,7 +767,7 @@
   border-radius:var(--r-card); background:var(--surface); margin:0 0 22px; }
 #settings2 .s2note-ic { width:30px; height:30px; border-radius:9px; flex:none; display:grid; place-items:center;
   background:var(--accent-soft); color:var(--accent-text); }
-#settings2 .s2note-ic svg.lucide { width:16px; height:16px; }
+#settings2 .s2note-ic .ph { --icon-size:16px; width:16px; height:16px; }
 #settings2 .s2note-t { font-size:13.5px; font-weight:500; color:var(--ink); margin-bottom:6px; }
 #settings2 .s2note-p { font-size:12.5px; line-height:1.55; color:var(--ink-mute); max-width:520px; }
 #settings2 .s2note-p + .s2note-p { margin-top:7px; }
@@ -792,6 +785,30 @@
 #settings2 .s2rpass { margin-top:12px; padding-top:12px; border-top:1px solid var(--line); }
 #settings2 .s2rpass .s2rbtns { align-items:center; }
 #settings2 .s2rpass input.s2-secret { flex:1 1 220px; min-width:0; }
+#settings2 .s2rsteps { display:flex; flex-wrap:wrap; gap:8px 15px; list-style:none; padding:4px 0 16px; margin:0; border-bottom:1px solid var(--line); }
+#settings2 .s2rsteps li { display:flex; align-items:center; gap:6px; font-size:10px; color:var(--ink-faint); line-height:1.4; }
+#settings2 .s2rsteps li > span { display:grid; place-items:center; width:19px; height:19px; border:1px solid var(--line); border-radius:6px; font-size:10px; }
+#settings2 .s2rsteps li.current { color:var(--info-text,var(--accent-text)); }
+#settings2 .s2rsteps li.current > span { background:var(--info-soft,var(--accent-soft)); border-color:transparent; }
+#settings2 .s2rsteps li.done { color:var(--success-text,var(--accent-text)); }
+#settings2 .s2rtransport { display:flex; gap:7px; margin-bottom:13px; }
+#settings2 .s2rtransport .selected { color:var(--info-text,var(--accent-text)); background:var(--info-soft,var(--accent-soft)); border-color:transparent; }
+#settings2 .s2rfield { display:flex; flex:1; flex-direction:column; gap:7px; margin:14px 0 0; min-width:0; color:var(--ink-2); font-size:11px; }
+#settings2 .s2rfield > .s2-secret { width:100%; max-width:none; min-width:0; }
+#settings2 .s2rselect { width:100%; max-width:100%; font:inherit; color:var(--ink); border:0; padding-right:25px; }
+#settings2 .s2raccess-line { display:flex; align-items:flex-end; gap:10px; flex-wrap:wrap; margin-top:14px; }
+#settings2 .s2raccess-line .s2rfield { margin-top:0; min-width:160px; }
+#settings2 .s2raccess-line > .dd { flex:1 1 180px; padding-bottom:5px; font-size:11px; }
+#settings2 .s2raccess-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+#settings2 .s2raccess-state { color:var(--ink-mute); font-size:11px; line-height:1.6; margin-top:12px; overflow-wrap:anywhere; }
+#settings2 .s2raccess-state.on { color:var(--success-text,var(--accent-text)); }
+#settings2 .s2raccess-state.warn { color:var(--warning-text,var(--warn)); }
+#settings2 .s2raccess-state.error { color:var(--danger); }
+#settings2 .s2radvanced { padding:0 14px 14px; }
+#settings2 .s2radvanced > .dd { margin-top:12px; }
+#settings2 .s2rconnection-summary > .drow { padding:0 14px 14px; }
+#settings2 .s2rconnection-summary .s2rchange { float:right; margin-left:12px; color:var(--info-text,var(--accent-text)); font-size:11px; }
+@media(max-width:650px) { #settings2 .s2raccess-grid { grid-template-columns:minmax(0,1fr); } #settings2 .s2rsteps { gap:8px 12px; } }
 
 /* ── Форма в строке настройки: поля в ряд, на узкой панели переносятся ─── */
 #settings2 .s2form { display:flex; flex-wrap:wrap; gap:8px; margin-top:11px; }
@@ -818,13 +835,13 @@
 #settings2 .s2rnode { display:flex; align-items:flex-start; gap:9px; margin-top:12px; padding-top:11px;
   border-top:1px solid var(--line); font-size:12.5px; line-height:1.5; color:var(--ink-mute); }
 #settings2 .s2rnode + .s2rnode { border-top:0; padding-top:0; margin-top:7px; }
-#settings2 .s2rnode svg.lucide { margin-top:2px; color:var(--ink-faint); }
-#settings2 .s2rnode.warn svg.lucide { color:var(--warn); }
+#settings2 .s2rnode .ph { margin-top:2px; color:var(--ink-faint); }
+#settings2 .s2rnode.warn .ph { color:var(--warn); }
 /* живой лог установки: фаза + сообщение, состояние — формой точки и цветом */
 #settings2 .s2rlog { margin-top:11px; max-height:200px; overflow-y:auto; display:flex; flex-direction:column; gap:6px; }
 #settings2 .s2rln { display:flex; align-items:flex-start; gap:9px; font-size:12.5px; line-height:1.45; color:var(--ink-mute); }
 #settings2 .s2rln .dot { margin-top:5px; }
-#settings2 .s2rln .ph { flex:none; width:82px; color:var(--ink-2); font-weight:500; }
+#settings2 .s2rln .install-phase { flex:none; width:82px; color:var(--ink-2); font-weight:500; }
 #settings2 .s2rln .msg { flex:1; min-width:0; overflow-wrap:anywhere; }
 #settings2 .s2rln.done .msg { color:var(--ink-2); }
 #settings2 .s2rln.warn .dot { background:var(--warn); }
@@ -837,30 +854,67 @@
 `;
     const style = document.createElement('style');
     style.id = 'settings2-style';
-    style.textContent = css;
-    document.head.appendChild(style);
+    // Form controls are shared by Settings and the standalone Machines module.
+    style.textContent = css.replaceAll('#settings2', ':is(#settings2, #machines2)');
+    const workspaceStyle = document.querySelector('link[href="./workspace.css"]');
+    if (workspaceStyle) document.head.insertBefore(style, workspaceStyle);
+    else document.head.appendChild(style);
   }
 
   /* ========================================================================
    * Список вкладок сайдбара.
    * ====================================================================== */
   const NAV = [
-    { pane: 'general', label: 'Основное', icon: 'settings', ic: 'gray' },
+    { pane: 'general', label: 'Основное', icon: 'settings', ic: 'gray', group: 'Приложение' },
     { pane: 'look', label: 'Вид', icon: 'palette', ic: 'green' },
-    { pane: 'remotes', label: 'Удалённые', icon: 'server', ic: 'teal' },
-    { pane: 'agents', label: 'Агенты', icon: 'terminal', ic: 'violet' },
-    { pane: 'stt', label: 'Голосовой ввод', icon: 'mic', ic: 'blue' },
+    { pane: 'keys', label: 'Горячие клавиши', icon: 'keyboard', ic: 'violet' },
+    { pane: 'notify', label: 'Уведомления', icon: 'bell', ic: 'amber' },
+    { pane: 'agents', label: 'Агенты', icon: 'terminal', ic: 'violet', group: 'Агенты и подключения' },
+    { pane: 'launch', label: 'Локальный запуск', icon: 'terminal', ic: 'green' },
+    { pane: 'integration', label: 'Интеграция', icon: 'cable', ic: 'teal' },
+    { pane: 'stt', label: 'Голосовой ввод', icon: 'mic', ic: 'blue', group: 'Голос' },
     { pane: 'voice', label: 'Голос', icon: 'volume-2', ic: 'green' },
     { pane: 'wake', label: 'Пробуждение', icon: 'mic', ic: 'blue' },
-    { pane: 'notify', label: 'Уведомления', icon: 'bell', ic: 'amber' },
-    { pane: 'awake', label: 'Бодрость', icon: 'coffee', ic: 'orange' },
-    { pane: 'keys', label: 'Горячие клавиши', icon: 'keyboard', ic: 'violet' },
-    { pane: 'launch', label: 'Запуск', icon: 'terminal', ic: 'green' },
-    { sep: true },
+    { pane: 'awake', label: 'Бодрость', icon: 'coffee', ic: 'orange', group: 'Система' },
     { pane: 'service', label: 'Под капотом', icon: 'cpu', ic: 'purple' },
-    { pane: 'integration', label: 'Интеграция', icon: 'cable', ic: 'teal' },
     { pane: 'about', label: 'О программе', icon: 'info', ic: 'gray' },
   ];
+
+  // Search works before a pane has loaded: it must not open devices or make
+  // service requests merely to discover a setting. Rendered rows enrich this
+  // index with their current labels and descriptions (including custom agents).
+  const SEARCH_ROWS = {
+    general: [['Показать Jarvis', 'панель сочетание'], ['Позиция панели', 'центр угол'], ['Запускать при старте', 'автозапуск вход систему'], ['Режим логов', 'диагностика ошибки логи metrics']],
+    look: [['Режим', 'окно оверлей'], ['Тема', 'светлая тёмная системная фон'], ['Краска', 'акцент цвет'], ['Внизу панели', 'лимит расход'], ['Плотность', 'размер строк'], ['Скругление', 'углы'], ['Масштаб', 'размер шрифт'], ['Сбросить настройку вида', 'сброс']],
+    stt: [['Движок распознавания', 'диктовка stt whisper qwen модель'], ['Микрофон', 'устройство ввод звук'], ['Шумодав (VAD) · альфа', 'шум голос тишина'], ['Модели', 'скачать whisper qwen']],
+    voice: [['Диктор', 'tts silero голос'], ['Скорость', 'темп речь'], ['Проверить голос', 'тест озвучка'], ['Без звука', 'заглушить'], ['Пауза чужого звука', 'музыка видео'], ['Только через Bluetooth', 'гарнитура наушники']],
+    wake: [['Состояние микрофона', 'доступ разрешение'], ['Активация по фразе', 'hey jarvis wake'], ['Заглушить микрофон', 'выключить'], ['Порог срабатывания', 'чувствительность'], ['Модели openWakeWord', 'скачать']],
+    notify: [['Текущая ветка', 'git'], ['Модель', 'claude codex'], ['Уровень усилия', 'reasoning effort'], ['Время', 'дата'], ['Когда агент закончил', 'завершение'], ['Когда ждёт тебя', 'вопрос ответ'], ['Продолжать после лимита', 'автоматически'], ['Позиция', 'карточки уведомления тост'], ['Автоскрытие', 'таймер длительность']],
+    awake: [['Не спать', 'сон питание'], ['Держать, пока работают агенты', 'автоматически'], ['Не гасить заодно и экран', 'дисплей'], ['Работать с закрытой крышкой', 'ноутбук']],
+    keys: [['Горячие клавиши', 'сочетания клавиатура хоткей shortcut диктовка панель']],
+    launch: [['Терминал', 'tmux iterm kitty локальный запуск'], ['Шаблон команды', 'custom'], ['Команда прокси', 'proxy https сеть'], ['Разрешения без настроек задачи', 'опасный режим разрешения sandbox yolo legacy']],
+    service: [['Бэкенд служебного LLM', 'claude codex модель'], ['Проверить ответ', 'тест'], ['Egress-прокси', 'proxy https сеть'], ['Подключить аккаунт', 'авторизация claude api ключ токен'], ['Модель Codex', 'gpt'], ['Глубина рассуждений', 'reasoning effort'], ['Codex-SDK сайдкар', 'установить python']],
+    integration: [['Тихий режим', 'звук уведомления'], ['Переустановить интеграцию', 'claude codex cli хуки события подключение mcp'], ['Удалить интеграцию', 'отключить']],
+    remotes: [['SSH-подключения', 'удалённые ssh сервер vps машина добавить подключение ключ пароль'], ['Виртуальные машины', 'agent-vm avm vm linux lima tart запустить остановить'], ['Docker', 'образ контейнер container docker изоляция'], ['Отдельная ветка', 'worktree git проект изоляция']],
+    agents: [['Агенты', 'cli claude codex qwen opencode добавить']],
+    about: [['Версия', 'обновление'], ['Лицензии', 'компоненты']],
+  };
+  const searchIndex = Object.entries(SEARCH_ROWS).filter(([pane]) => pane !== 'remotes').flatMap(([pane, rows]) => rows.map(([label, words]) => ({ pane, label, words })));
+  let pendingSettingFocus = null;
+  function focusSearchTarget(pane) {
+    if (!pendingSettingFocus || pendingSettingFocus.pane !== pane || pane !== activePane) return;
+    const label = pendingSettingFocus.label.toLocaleLowerCase();
+    const node = currentRoot?.querySelector('#s2-pane-' + pane);
+    if (!node || renderingPane[pane]) return;
+    const title = [...node.querySelectorAll('.dt, .dsection, .dtitle')].find(n => n.textContent.toLocaleLowerCase() === label);
+    const target = title?.closest('.drow') || title || node;
+    for (let parent = target.parentElement; parent && parent !== node; parent = parent.parentElement) {
+      if (parent.tagName === 'DETAILS') parent.open = true;
+    }
+    target.setAttribute('tabindex', '-1'); target.focus({ preventScroll: true });
+    target.scrollIntoView?.({ block: 'center' });
+    pendingSettingFocus = null;
+  }
 
   /* ========================================================================
    * ОТРИСОВКА ОТДЕЛЬНЫХ ПАНЕЛЕЙ. Каждая async, грузит из IPC, заполняет
@@ -871,7 +925,7 @@
   async function renderGeneral(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Основное' }));
     const _sk = skelGroup(4); pane.appendChild(_sk);
-    const s = await safe(() => window.jarvis.getSettings(), {});
+    const s = await required(() => window.jarvis.getSettings());
     _sk.remove();
     const group = el('div.dgroup');
 
@@ -884,12 +938,12 @@
     group.appendChild(drow('Позиция панели', 'Где появляется панель на экране.',
       segmented([{ value: 'center', label: 'Центр' }, { value: 'corner', label: 'Угол' }],
         s.position || 'center',
-        (v) => fire(() => window.jarvis.setSettings({ position: v })))));
+        (v) => required(() => window.jarvis.setSettings({ position: v })))));
 
     // автозапуск (перечитываем реальное состояние — система может отказать)
     group.appendChild(drow('Запускать при старте', 'Автозапуск при входе в систему.',
       toggle(s.openAtLogin, async (on) => {
-        await safe(() => window.jarvis.setSettings({ openAtLogin: on }), null);
+        await required(() => window.jarvis.setSettings({ openAtLogin: on }));
         reRenderPane('general'); // отразить то, что реально записалось в систему
       })));
 
@@ -897,7 +951,7 @@
     group.appendChild(drow('Режим логов',
       'Тайминги пайплайна, RAM/CPU и события (доставка ответов, уведомления, лимиты) → ~/.jarvis/metrics.jsonl и jarvis.log. ' +
       'Без конф. данных: текст промптов/ответов, тело уведомлений и транскрипты не пишутся — только типы событий, счётчики и усечённые id сессий. Файлы локальные, никуда не отправляются.',
-      toggle(!!s.diagnostics, (on) => fire(() => window.jarvis.setSettings({ diagnostics: on })))));
+      toggle(!!s.diagnostics, (on) => required(() => window.jarvis.setSettings({ diagnostics: on })))));
 
     pane.appendChild(group);
   }
@@ -906,13 +960,13 @@
   async function renderStt(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Голосовой ввод' }));
     const _sk = skelGroup(3); pane.appendChild(_sk);
-    const v = await safe(() => window.jarvis.sttGet(), null);
+    const v = await required(() => window.jarvis.sttGet());
     _sk.remove();
     const group = el('div.dgroup');
+    pane.appendChild(group);
 
     if (!v) {
       group.appendChild(drow('STT недоступен', 'Данные распознавания речи недоступны.', []));
-      pane.appendChild(group);
       return;
     }
 
@@ -927,12 +981,8 @@
         sel.setBusy(true);
         cap.textContent = 'переключаю модель…';
         cap.style.display = '';
-        const r = await safe(() => window.jarvis.sttSetEngine(engine), null);
-        sel.setBusy(false);
-        cap.style.display = 'none';
-        // r.restart === true → нужна перезагрузка; в текущем коде stt_set_engine
-        // делает горячую смену (restart:false), но ошибку (ok:false) показываем.
-        reRenderPane('stt');
+        try { await required(() => window.jarvis.sttSetEngine(engine)); reRenderPane('stt'); }
+        finally { sel.setBusy(false); cap.style.display = 'none'; }
       });
     const engCtl = el('div.dctl', { style: 'flex-direction:column;align-items:flex-end;gap:6px' }, [sel.node, cap]);
     const engRow = el('div.drow', null, [
@@ -943,18 +993,24 @@
       engCtl,
     ]);
     group.appendChild(engRow);
+    sel.node.querySelector('.cstrigger').setAttribute('aria-label', 'Движок распознавания');
 
     // устройство ввода (микрофон) — селектор + горячее применение (без перезапуска)
-    const dev = await safe(() => window.jarvis.sttInputDevices(), { devices: [], current: null });
+    const deviceRow = drow('Микрофон', 'Получаю список устройств…', []);
+    group.appendChild(deviceRow);
+    const dev = await safe(() => window.jarvis.sttInputDevices(), {
+      devices: [], current: null, error: 'Не удалось получить список микрофонов. Попробуйте открыть раздел ещё раз.',
+    });
+    const deviceNames = [...new Set([...(dev.devices || []), ...(dev.current ? [dev.current] : [])])];
     const devOpts = [{ value: '', label: 'Системный по умолчанию' }]
-      .concat((dev.devices || []).map((n) => ({ value: n, label: n })));
+      .concat(deviceNames.map((n) => ({ value: n, label: n })));
     const devSel = customSelect(devOpts, dev.current || '', async (name) => {
       if (devSel.setBusy) devSel.setBusy(true);
-      await safe(() => window.jarvis.sttSetInputDevice(name || null), null);
+      await required(() => window.jarvis.sttSetInputDevice(name || null));
       if (devSel.setBusy) devSel.setBusy(false);
     });
-    group.appendChild(drow('Микрофон',
-      'С какого устройства писать речь. Выбери встроенный микрофон, если гарнитура шумит.',
+    deviceRow.replaceWith(drow('Микрофон',
+      dev.error || 'С какого устройства писать речь. Выбери встроенный микрофон, если гарнитура шумит.',
       devSel.node));
 
     // клавиша диктовки — общий рекордер (пресеты убраны: запись работает)
@@ -965,11 +1021,10 @@
     // шумодав (VAD-гейт): пропускать диктовку, если речи не слышно. АЛЬФА.
     group.appendChild(drow('Шумодав (VAD) · альфа',
       'Пропускает диктовку, если речи не слышно (фон/тишина). Пока нестабилен и может портить распознавание — по умолчанию выключен. Включайте на свой риск.',
-      toggle(!!v.noiseGate, (on) => fire(() => window.jarvis.sttSetNoiseGate(on)))));
+      toggle(!!v.noiseGate, (on) => required(() => window.jarvis.sttSetNoiseGate(on)))));
 
     // тест микрофона
     group.appendChild(renderMicTestRow());
-    pane.appendChild(group);
 
     // ── Модели на диске (порт renderModelManager + downloadActionFor) ──
     pane.appendChild(el('div.dsection', { text: 'Модели на диске' }));
@@ -996,9 +1051,13 @@
     group.textContent = '';
     // инвентарь моделей грузится дольше всего — пока показываем скелетоны
     for (let i = 0; i < 4; i++) group.appendChild(skelRow());
-    const r = await safe(() => window.jarvis.modelsGet(), { models: [] });
+    const r = await required(() => window.jarvis.modelsGet());
     group.textContent = '';
     const models = (r && r.models) || [];
+    if (r.error) {
+      group.appendChild(drow('Не удалось загрузить модели', r.error, []));
+      return;
+    }
     if (!models.length) {
       group.appendChild(drow('Нет моделей', 'Инвентарь моделей пуст.', []));
       return;
@@ -1029,14 +1088,16 @@
       const ids = idsInGroup.filter((id) => selectedModels.has(id));
       if (!ids.length) return;
       b.disabled = true; b.replaceChildren(document.createTextNode('Качаю…'));
-      await safe(() => window.jarvis.modelsInstall(ids), null);
+      if (!await action(b, () => window.jarvis.modelsInstall(ids))) {
+        b.disabled = false; b.textContent = 'Скачать выбранное';
+      }
     });
     return b;
   }
 
   // выбор download-action по id (порт downloadActionFor из renderer.js)
   function downloadActionFor(m) {
-    if (m.present) return null;
+    if (m.present || m.available === false) return null;
     switch (m.id) {
       case 'whisper-turbo': return { label: 'Скачать (~574 МБ)', run: () => window.jarvis.sttInstallWhisper() };
       case 'qwen3-0.6b': return { label: 'Скачать (~1 ГБ)', run: () => window.jarvis.sttInstallQwen('qwen3-0.6b') };
@@ -1066,6 +1127,7 @@
     grow.appendChild(titleRow);
     // Статус: явный успех «✓ размер» (видно, что скачалось) либо «не скачана».
     grow.appendChild(el('div.dd', { text: m.present ? '✓ установлена · ' + fmtBytes(m.bytes) : 'не скачана' }));
+    if (m.available === false) grow.appendChild(el('div.dd', { text: m.unavailableReason || 'Недоступно в этой сборке.' }));
     // Ошибка прошлой попытки — прямо в строке (вместо тихого сброса), с подсказкой про retry.
     if (dlState[m.id] && dlState[m.id].error) grow.appendChild(dlErrorNote(dlState[m.id].error));
 
@@ -1080,9 +1142,11 @@
         delete dlState[m.id];             // сбросить прежнюю ошибку
         btn.disabled = true; btn.replaceChildren(document.createTextNode('Качаю…'));
         // единый путь: оркестратор шлёт прогресс/финал по id модели
-        await safe(() => window.jarvis.modelsInstall([m.id]), null);
+        if (!await action(btn, () => window.jarvis.modelsInstall([m.id]))) {
+          btn.disabled = false; btn.textContent = 'Повторить';
+        }
       });
-      const cb = el('input', { type: 'checkbox', style: 'margin-right:6px;vertical-align:middle' });
+      const cb = el('input', { type: 'checkbox', 'aria-label': 'Выбрать модель ' + m.label, style: 'margin-right:6px;vertical-align:middle' });
       cb.checked = selectedModels.has(m.id);
       cb.addEventListener('change', () => {
         if (cb.checked) selectedModels.add(m.id); else selectedModels.delete(m.id);
@@ -1094,11 +1158,10 @@
     }
 
     const ctl = el('div.dctl');
-    if (m.kind === 'stt' && !m.active) {
+    if (m.kind === 'stt' && m.present && m.available !== false && !m.active) {
       ctl.appendChild(button('Сделать активной', async (b) => {
         b.disabled = true; b.textContent = 'Включаю…';
-        const res = await safe(() => window.jarvis.sttSetEngine(m.id), null);
-        if (res && res.ok === false) { b.disabled = false; b.textContent = 'Сделать активной'; return; }
+        await required(() => window.jarvis.sttSetEngine(m.id));
         reRenderPane('stt');
       }, 'sm'));
     }
@@ -1113,7 +1176,7 @@
   async function renderVoice(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Голос' }));
     const _sk = skelGroup(3); pane.appendChild(_sk);
-    const v = await safe(() => window.jarvis.voiceGet(), null);
+    const v = await required(() => window.jarvis.voiceGet());
     _sk.remove();
     const group = el('div.dgroup');
     if (!v) {
@@ -1127,7 +1190,7 @@
     // диктор — кастомный селект (набор спикеров есть у silero)
     if (speakers.length) {
       const sel = customSelect(speakers, v.speaker, async (sp) => {
-        await safe(() => window.jarvis.voiceSetSpeaker(sp), null);
+        await required(() => window.jarvis.voiceSetSpeaker(sp));
       });
       group.appendChild(drow('Диктор', 'Голос синтеза · движок ' + (v.engine || 'Silero') + ', локально.', sel.node));
     }
@@ -1136,23 +1199,23 @@
     const RATE_LABELS = { slow: 'медленно', medium: 'норма', fast: 'быстро', 'x-fast': 'очень' };
     const rates = (v.rates || ['slow', 'medium', 'fast', 'x-fast']).map((r) => ({ value: r, label: RATE_LABELS[r] || r }));
     group.appendChild(drow('Скорость', 'Темп речи.',
-      segmented(rates, v.rate, (r) => fire(() => window.jarvis.voiceSetRate(r)))));
+      segmented(rates, v.rate, (r) => required(() => window.jarvis.voiceSetRate(r)))));
 
     // тест
     group.appendChild(drow('Проверить голос', 'Сказать короткий образец вслух.',
-      button('Тест', () => fire(() => window.jarvis.voiceTest()), 'sm')));
+      button('Тест', () => required(() => window.jarvis.voiceTest()), 'sm')));
 
     // без звука
     group.appendChild(drow('Без звука', 'Временно заглушить озвучку.',
-      toggle(v.mute, (on) => fire(() => window.jarvis.voiceSetMute(on)))));
+      toggle(v.mute, (on) => required(() => window.jarvis.voiceSetMute(on)))));
 
     // пауза чужого звука (duck)
     group.appendChild(drow('Пауза чужого звука', 'Приглушать музыку/видео на время реплики, как Siri.',
-      toggle(v.duck !== false, (on) => fire(() => window.jarvis.voiceSetDuck(on)))));
+      toggle(v.duck !== false, (on) => required(() => window.jarvis.voiceSetDuck(on)))));
 
     // озвучка только при Bluetooth-гарнитуре
     group.appendChild(drow('Только через Bluetooth', 'Озвучивать, лишь когда подключена Bluetooth-гарнитура.',
-      toggle(v.bluetoothOnly !== false, (on) => fire(() => window.jarvis.voiceSetBluetoothOnly(on)))));
+      toggle(v.bluetoothOnly !== false, (on) => required(() => window.jarvis.voiceSetBluetoothOnly(on)))));
 
     pane.appendChild(group);
   }
@@ -1161,7 +1224,7 @@
   async function renderWake(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Пробуждение' }));
     const _sk = skelGroup(4); pane.appendChild(_sk);
-    const v = await safe(() => window.jarvis.wakeGet(), null);
+    const v = await required(() => window.jarvis.wakeGet());
     _sk.remove();
     const group = el('div.dgroup');
     if (!v) {
@@ -1169,17 +1232,24 @@
       pane.appendChild(group);
       return;
     }
+    const audioLabels = { 'permission-pending': 'Ожидаем разрешения на микрофон', starting: 'Подключаем микрофон…',
+      denied: 'Нет доступа к микрофону', 'no-device': 'Микрофон не найден', listening: 'Микрофон подключён', muted: 'Микрофон заглушён', idle: 'Микрофон не используется' };
+    const audioState = v.muted ? 'muted' : v.audio_state || (v.listening ? 'listening' : 'idle');
+    const hint = audioState === 'permission-pending' ? 'Ответьте на системный запрос macOS, затем повторите включение.'
+      : audioState === 'denied' ? 'Системные настройки → Конфиденциальность → Микрофон → Jarvis.'
+      : 'Актуальное состояние захвата звука.';
+    group.appendChild(drow('Состояние микрофона', hint, el('span.sval', { text: audioLabels[audioState] || audioState, role: 'status' })));
 
     // вкл/выкл активацию по фразе
     group.appendChild(drow('Активация по фразе',
       v.model_present
         ? 'Скажи «Hey Jarvis», чтобы разбудить ассистента. Работает офлайн.'
         : 'Сначала скачайте модель openWakeWord ниже, чтобы включить.',
-      toggle(!!v.enabled, async (on) => { await safe(() => window.jarvis.wakeSetEnabled(on), null); reRenderPane('wake'); }, !v.model_present)));
+      toggle(!!v.enabled, async (on) => { await required(() => window.jarvis.wakeSetEnabled(on)); reRenderPane('wake'); }, !v.model_present)));
 
     // заглушить микрофон (mute у источника)
     group.appendChild(drow('Заглушить микрофон', 'Полностью отключить микрофон у источника.',
-      toggle(!!v.muted, async (on) => { await safe(() => window.jarvis.audioSetMute(on), null); reRenderPane('wake'); })));
+      toggle(!!v.muted, async (on) => { await required(() => window.jarvis.audioSetMute(on)); reRenderPane('wake'); })));
 
     // порог срабатывания — слайдер (input → подпись; change → IPC)
     const thVal = el('span.dd', { text: Number(v.threshold != null ? v.threshold : 0.5).toFixed(2), style: 'margin-top:0;margin-right:8px;font-family:var(--s2-mono)' });
@@ -1199,7 +1269,7 @@
       wctl.appendChild(button(werr ? 'Повторить' : 'Скачать (~3.5 МБ)', async (b) => {
         activeDownload = 'hey_jarvis'; delete dlState['hey_jarvis'];
         b.disabled = true; b.textContent = 'Скачиваю…';
-        await safe(() => window.jarvis.wakeInstallModels(), null);
+        await required(() => window.jarvis.wakeInstallModels());
       }, 'sm'));
       if (werr) wctl.appendChild(dlErrorNote(werr));
       group.appendChild(drow('Модели openWakeWord', 'Нужно скачать модели (~3.5 МБ), чтобы детектор заработал.',
@@ -1213,7 +1283,7 @@
   async function renderNotify(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Уведомления' }));
     const _sk = skelGroup(3); pane.appendChild(_sk);
-    const s = await safe(() => window.jarvis.getSettings(), {});
+    const s = await required(() => window.jarvis.getSettings());
     _sk.remove();
     // notify-блок шлём целиком при изменении (бэкенд мержит верхний уровень —
     // полный объект, чтобы не затереть соседние поля).
@@ -1246,10 +1316,10 @@
     };
     pane.appendChild(el('div.npvbox', null, [el('span.tag', { text: 'превью' }), pvCard]));
 
-    const saveContent = (k, on) => {
-      content[k] = on;
-      renderPreview();
-      fire(() => window.jarvis.setSettings({ notify: Object.assign({}, nf, { content: Object.assign({}, content) }) }));
+    const saveContent = async (k, on) => {
+      const next = Object.assign({}, content, { [k]: on });
+      await required(() => window.jarvis.setSettings({ notify: Object.assign({}, nf, { content: next }) }));
+      content[k] = on; renderPreview();
     };
     renderPreview();
 
@@ -1268,22 +1338,22 @@
     pane.appendChild(el('div.dsection', { text: 'Уведомлять о' }));
     const eg = el('div.dgroup');
     eg.appendChild(drow('Когда агент закончил', 'Уведомлять о завершении ответа.',
-      toggle(s.notifyDone, (on) => fire(() => window.jarvis.setSettings({ notifyDone: on })))));
+      toggle(s.notifyDone, (on) => required(() => window.jarvis.setSettings({ notifyDone: on })))));
     eg.appendChild(drow('Когда ждёт тебя', 'Уведомлять, когда агенту нужен ответ.',
-      toggle(s.notifyWaiting, (on) => fire(() => window.jarvis.setSettings({ notifyWaiting: on })))));
+      toggle(s.notifyWaiting, (on) => required(() => window.jarvis.setSettings({ notifyWaiting: on })))));
     eg.appendChild(drow('Продолжать после лимита', 'Авто-«продолжай» при сбросе лимита.',
-      toggle(s.autoResume !== false, (on) => fire(() => window.jarvis.setSettings({ autoResume: on })))));
+      toggle(s.autoResume !== false, (on) => required(() => window.jarvis.setSettings({ autoResume: on })))));
     pane.appendChild(eg);
 
     pane.appendChild(el('div.dsection', { text: 'Вид и поведение' }));
     const vg = el('div.dgroup');
     vg.appendChild(drow('Позиция', 'где появляются карточки',
       segmented([{ value: 'center', label: 'Центр' }, { value: 'corner', label: 'Угол' }],
-        s.position || 'center', (v) => fire(() => window.jarvis.setSettings({ position: v })))));
+        s.position || 'center', (v) => required(() => window.jarvis.setSettings({ position: v })))));
     const ttlNow = (typeof nf.ttlSec === 'number') ? nf.ttlSec : 8;
     vg.appendChild(drow('Автоскрытие', 'через сколько прятать карточку (после озвучки, если она есть)',
       segmented([{ value: 5, label: '5с' }, { value: 8, label: '8с' }, { value: 0, label: 'Не прятать' }],
-        ttlNow, (v) => fire(() => window.jarvis.setSettings({ notify: Object.assign({}, nf, { ttlSec: Number(v) }) })))));
+        ttlNow, (v) => required(() => window.jarvis.setSettings({ notify: Object.assign({}, nf, { ttlSec: Number(v) }) })))));
     pane.appendChild(vg);
   }
 
@@ -1291,7 +1361,7 @@
   async function renderAwake(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Бодрость' }));
     const _sk = skelGroup(3); pane.appendChild(_sk);
-    const plugins = await safe(() => window.jarvis.getPlugins(), []);
+    const plugins = await required(() => window.jarvis.getPlugins());
     _sk.remove();
     const byId = (id) => (Array.isArray(plugins) ? plugins.find((p) => p && p.id === id) : null);
     const ka = byId('keep-awake');
@@ -1323,7 +1393,7 @@
       { value: '4h', label: '4ч' },
       { value: 'inf', label: '∞' },
     ];
-    const runSeg = (id) => {
+    const runSeg = async (id) => {
       const map = {
         off: () => window.jarvis.pluginCmd('keep-awake', 'stop'),
         '15m': () => window.jarvis.pluginCmd('keep-awake', 'start-timer', { minutes: 15 }),
@@ -1331,7 +1401,7 @@
         '4h': () => window.jarvis.pluginCmd('keep-awake', 'start-timer', { minutes: 240 }),
         inf: () => window.jarvis.pluginCmd('keep-awake', 'start-manual'),
       };
-      fire(map[id]);
+      await required(map[id]);
       setTimeout(() => reRenderPane('awake'), 300);
     };
     group.appendChild(drow('Не спать', 'Не давать маку засыпать, пока работают агенты.',
@@ -1339,9 +1409,9 @@
 
     // держать, пока работают агенты + не гасить экран
     group.appendChild(drow('Держать, пока работают агенты', 'Авто-включение при активных сессиях.',
-      toggle(!!st.autoEnabled, (on) => fire(() => window.jarvis.pluginCmd('keep-awake', 'set', { auto: on })))));
+      toggle(!!st.autoEnabled, (on) => required(() => window.jarvis.pluginCmd('keep-awake', 'set', { auto: on })))));
     group.appendChild(drow('Не гасить заодно и экран', 'Дисплей тоже остаётся активным.',
-      toggle(!!st.keepDisplayOn, (on) => fire(() => window.jarvis.pluginCmd('keep-awake', 'set', { keepDisplayOn: on })))));
+      toggle(!!st.keepDisplayOn, (on) => required(() => window.jarvis.pluginCmd('keep-awake', 'set', { keepDisplayOn: on })))));
 
     // крышка (clamshell) — Спать / Не спать
     const cs = byId('clamshell');
@@ -1352,10 +1422,10 @@
           armed ? 'keep' : 'sleep',
           async (val) => {
             if (val === 'keep') {
-              if (cs && cs.enabled === false) await safe(() => window.jarvis.pluginCmd('clamshell', '_enable', { on: true }), null);
-              fire(() => window.jarvis.pluginCmd('clamshell', 'arm'));
+              if (cs && cs.enabled === false) await required(() => window.jarvis.pluginCmd('clamshell', '_enable', { on: true }));
+              await required(() => window.jarvis.pluginCmd('clamshell', 'arm'));
             } else {
-              fire(() => window.jarvis.pluginCmd('clamshell', 'disarm'));
+              await required(() => window.jarvis.pluginCmd('clamshell', 'disarm'));
             }
             setTimeout(() => reRenderPane('awake'), 300);
           })));
@@ -1419,7 +1489,7 @@
   async function renderIntegration(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Интеграция' }));
     const _sk = skelGroup(3); pane.appendChild(_sk);
-    const info = await safe(() => window.jarvis.integrationGet(), null);
+    const info = await required(() => window.jarvis.integrationGet());
     _sk.remove();
     if (!info) {
       pane.appendChild(el('div.dgroup', null, [drow('Данные недоступны', 'Не удалось получить статус интеграции.', [])]));
@@ -1453,21 +1523,23 @@
     pane.appendChild(el('div.dsection', { text: 'Разработчик' }));
     const devGroup = el('div.dgroup');
     devGroup.appendChild(drow('Тихий режим', `Копить статистику без тостов, голоса и показа панели · ${window.jarvisKeys.k('J', { alt: true })}.`,
-      toggle(!!info.quiet, (on) => fire(() => window.jarvis.quietSet(on)))));
+      toggle(!!info.quiet, (on) => required(() => window.jarvis.quietSet(on)))));
     pane.appendChild(devGroup);
 
     // управление и диск
     pane.appendChild(el('div.dsection', { text: 'Управление и диск' }));
     const manGroup = el('div.dgroup');
     manGroup.appendChild(drow('Переустановить интеграцию', 'Обновить хуки, шим и транспорт.',
-      button(integrated ? 'Переустановить' : 'Настроить', () => fire(() => window.jarvis.onboardingOpen()), 'sm')));
+      button(integrated ? 'Переустановить' : 'Настроить', () => required(() => window.jarvis.onboardingOpen()), 'sm')));
     if (integrated) {
       const rm = el('button.btn.sm.danger', { text: 'Удалить' });
       let armed = false;
       rm.addEventListener('click', async () => {
         if (!armed) { armed = true; rm.textContent = 'Точно удалить?'; setTimeout(() => { armed = false; rm.textContent = 'Удалить'; }, 3000); return; }
         rm.disabled = true; rm.textContent = 'Удаляю…';
-        await safe(() => window.jarvis.integrationRemove(), null);
+        if (!await action(rm, () => window.jarvis.integrationRemove())) {
+          armed = false; rm.disabled = false; rm.textContent = 'Удалить'; return;
+        }
         reRenderPane('integration');
       });
       manGroup.appendChild(drow('Удалить интеграцию', 'Отключить Jarvis от Claude Code (чужие хуки сохранятся).', rm));
@@ -1539,7 +1611,7 @@
     const wrap = el('div.dgroup');
     wrap.appendChild(skelRow());
     pane.appendChild(wrap);
-    const a = await safe(() => window.jarvis.claudeAuthGet(), null);
+    const a = await required(() => window.jarvis.claudeAuthGet());
     wrap.textContent = '';
     if (!a) {
       wrap.appendChild(drow('Недоступно', 'Не удалось получить статус аккаунта.', []));
@@ -1553,7 +1625,7 @@
       wrap.appendChild(drow('Управление', 'Отключить и вернуться к собственному логину claude.',
         button('Отключить', async (b) => {
           b.disabled = true; b.textContent = 'Отключаю…';
-          await safe(() => window.jarvis.claudeAuthDisconnect(), null);
+          await required(() => window.jarvis.claudeAuthDisconnect());
           reRenderPane('service');
         }, 'sm danger')));
       return;
@@ -1604,7 +1676,7 @@
   async function renderService(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Под капотом' }));
     const _sk = skelGroup(3); pane.appendChild(_sk);
-    const v = await safe(() => window.jarvis.serviceGet(), null);
+    const v = await required(() => window.jarvis.serviceGet());
     _sk.remove();
     const group = el('div.dgroup');
     if (!v) {
@@ -1624,7 +1696,7 @@
       'Что Jarvis использует под капотом для саммари чатов, заголовков, диктовки и голос-плана. ' +
         'Авто: Claude (haiku) → Codex. Фолбэк всегда включён, чтобы саммари не пропадали.',
       segmented(backends, v.backend || 'auto', async (b) => {
-        await safe(() => window.jarvis.serviceSetBackend(b), null);
+        await required(() => window.jarvis.serviceSetBackend(b));
         reRenderPane('service');
       }),
     ));
@@ -1714,14 +1786,14 @@
       ? v.codexModels
       : [{ value: '', label: 'По умолчанию' }];
     const msel = customSelect(models, v.codexModel || '', async (m) => {
-      await safe(() => window.jarvis.serviceSetModel(m), null);
+      await required(() => window.jarvis.serviceSetModel(m));
     });
     cg.appendChild(drow('Модель Codex',
       'Для служебных вызовов через Codex. Список — из codex (включая gpt-5.3-codex-spark). «По умолчанию» — модель из codex config.', msel.node));
 
     const efforts = (v.efforts || ['low', 'medium', 'high']).map((e) => ({ value: e, label: e }));
     const esel = customSelect(efforts, v.codexEffort || 'low', async (e) => {
-      await safe(() => window.jarvis.serviceSetEffort(e), null);
+      await required(() => window.jarvis.serviceSetEffort(e));
     });
     cg.appendChild(drow('Глубина рассуждений',
       'Меньше = быстрее и дешевле. Для саммари хватает low/minimal.', esel.node));
@@ -1736,7 +1808,9 @@
       btn.addEventListener('click', async () => {
         btn.disabled = true;
         btn.replaceChildren(document.createTextNode('Ставлю…'));
-        await safe(() => window.jarvis.codexInstallSidecar(), null);
+        if (!await action(btn, () => window.jarvis.codexInstallSidecar())) {
+          btn.disabled = false; btn.textContent = 'Повторить';
+        }
         // финал прилетит codex_install_done → перерисует панель
       });
       wrap.appendChild(btn);
@@ -1756,9 +1830,10 @@
   // «опасный режим». Флэт-ключи settings (launchTerminal/launchCustomCmd/launchProxyCmd/
   // launchDangerous) пишутся через generic setSettings (поверхностный merge).
   async function renderLaunch(pane) {
-    pane.appendChild(el('div.dtitle', { text: 'Запуск' }));
+    pane.appendChild(el('div.dtitle', { text: 'Локальный запуск' }));
+    pane.appendChild(el('p.s2-intro', { text: 'Как открывать агента на этом компьютере. Машину, рабочую папку и разрешения конкретной задачи выбирай в проектах или новом чате.' }));
     const _sk = skelGroup(3); pane.appendChild(_sk);
-    const s = await safe(() => window.jarvis.getSettings(), {});
+    const s = await required(() => window.jarvis.getSettings());
     _sk.remove();
     const term = s.launchTerminal || 'terminal-app';
     const group = el('div.dgroup');
@@ -1789,11 +1864,11 @@
       [...TERMINALS, { value: 'custom', label: 'Кастомная команда' }],
       term,
       async (v) => {
-        await safe(() => window.jarvis.setSettings({ launchTerminal: v }), null);
+        await required(() => window.jarvis.setSettings({ launchTerminal: v }));
         reRenderPane('launch'); // показать/скрыть поле шаблона
       });
     group.appendChild(drow('Терминал',
-      'Где открывать сессию. «Кастомная команда» — любой эмулятор через шаблон с {cmd}.', termSel.node));
+      'Приложение для локальных сессий и кнопки «Открыть терминал». Для другого эмулятора выбери свою команду.', termSel.node));
 
     // шаблон кастомной команды — только для custom
     if (term === 'custom') {
@@ -1806,7 +1881,7 @@
       const tmplSave = button('Сохранить', async (b) => {
         const val = (tmplInput.value || '').trim();
         b.disabled = true; b.textContent = 'Сохраняю…';
-        await safe(() => window.jarvis.setSettings({ launchCustomCmd: val }), null);
+        await required(() => window.jarvis.setSettings({ launchCustomCmd: val }));
         b.disabled = false; b.textContent = 'Сохранить';
         tmplCap.style.display = ''; tmplCap.textContent = 'сохранено ✓';
       }, 'sm primary');
@@ -1821,6 +1896,9 @@
       ]));
     }
 
+    pane.appendChild(group);
+    const advanced = el('div.dgroup');
+
     // команда прокси — выполняется ПЕРЕД запуском агента
     const proxyInput = el('input.s2-secret', {
       type: 'text', placeholder: 'export HTTPS_PROXY=http://…',
@@ -1830,27 +1908,27 @@
     const proxySave = button('Сохранить', async (b) => {
       const val = (proxyInput.value || '').trim();
       b.disabled = true; b.textContent = 'Сохраняю…';
-      await safe(() => window.jarvis.setSettings({ launchProxyCmd: val }), null);
+      await required(() => window.jarvis.setSettings({ launchProxyCmd: val }));
       b.disabled = false; b.textContent = 'Сохранить';
       proxyCap.style.display = ''; proxyCap.textContent = val ? 'сохранено ✓' : 'очищено';
     }, 'sm primary');
     proxyInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') proxySave.click(); });
-    group.appendChild(el('div.drow', null, [
+    advanced.appendChild(el('div.drow', null, [
       el('div.grow', null, [
         el('div.dt', { text: 'Команда прокси' }),
-        el('div.dd', { text: 'Выполняется в терминале ПЕРЕД запуском агента (напр. export HTTPS_PROXY=…). Пусто — без прокси. Это не egress-прокси из «Под капотом».' }),
+        el('div.dd', { text: 'Переменные окружения перед локальным запуском агента, например export HTTPS_PROXY=… . Сеть служебного LLM настраивается отдельно в «Под капотом».' }),
         proxyInput, proxyCap,
       ]),
       el('div.dctl', null, [proxySave]),
     ]));
 
-    // опасный режим — один глобальный тумблер на claude и codex
-    group.appendChild(drow('Опасный режим',
-      'Claude — --dangerously-skip-permissions, Codex — YOLO (--dangerously-bypass-approvals-and-sandbox). '
-      + 'Один тумблер на обоих агентов, глобально.',
-      toggle(!!s.launchDangerous, (on) => fire(() => window.jarvis.setSettings({ launchDangerous: on })))));
-
-    pane.appendChild(group);
+    // Compatibility fallback only: the explicit mode from project/chat wins.
+    const fallback = customSelect([
+      { value: 'ask', label: 'С подтверждением' }, { value: 'yolo', label: 'Полный доступ' },
+    ], s.launchDangerous ? 'yolo' : 'ask', mode => required(() => window.jarvis.setSettings({ launchDangerous: mode === 'yolo' })));
+    advanced.appendChild(drow('Разрешения без настроек задачи',
+      'Для старых способов запуска, которые не передают свой режим. Выбор разрешений в новом чате или проекте всегда важнее этой настройки.', fallback.node));
+    pane.appendChild(settingsDetails('s2-launch-advanced', 'Дополнительные настройки запуска', [advanced]));
   }
 
   /* 1b. Вид (look) — тема, краска и что показывать внизу панели.
@@ -1859,23 +1937,21 @@
   async function renderLook(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Вид' }));
     const _sk = skelGroup(3); pane.appendChild(_sk);
-    const s = await safe(() => window.jarvis.getSettings(), {});
+    const s = await required(() => window.jarvis.getSettings());
     _sk.remove();
 
     const cur = (window.jarvisTheme && window.jarvisTheme.get()) || { theme: 'light', paint: 'clover', mode: 'overlay' };
     const group = el('div.dgroup');
 
     // режим окна: накладка ⌘J поверх всего или обычное окно со списком слева (14h)
-    group.appendChild(drow('Режим',
-      `Накладка — панель поверх всего по ${window.jarvisKeys.k('J')}, прячется по клику мимо. `
-      + 'Окно — обычное окно: список слева, диалог справа, своё место в панели задач '
-      + '(появится со следующего запуска).',
+    group.appendChild(drow('При запуске',
+      `Быстрый доступ также открывается по ${window.jarvisKeys.k('J')}.`,
       segmented(
-        [{ value: 'overlay', label: 'накладка' }, { value: 'window', label: 'окно' }],
+        [{ value: 'overlay', label: 'быстрый доступ' }, { value: 'window', label: 'рабочее окно' }],
         cur.mode || 'overlay',
         (v) => { window.jarvisTheme && window.jarvisTheme.set({ mode: v }); })));
 
-    group.appendChild(drow('Тема', 'Светлая — как в макете; системная следует за настройкой macOS.',
+    group.appendChild(drow('Тема', null,
       segmented(
         [{ value: 'light', label: 'светлая' }, { value: 'dark', label: 'тёмная' }, { value: 'auto', label: 'системная' }],
         cur.theme,
@@ -1905,7 +1981,7 @@
     // системный пикер, а не заводит лишний шаг «сначала выбери, потом настрой»
     const own = el('label.paintdot.paintown' + (cur.paint === 'custom' ? '.active' : ''),
       { title: 'Своя краска' });
-    const ownInput = el('input', { type: 'color' });
+    const ownInput = el('input', { type: 'color', 'aria-label': 'Свой цвет акцента' });
     ownInput.value = cur.accent || '#0B6B44';
     own.style.background = ownInput.value;
     own.style.color = ownInput.value;
@@ -1919,14 +1995,14 @@
     own.appendChild(ownInput);
     paints.appendChild(own);
 
-    group.appendChild(drow('Краска', 'Один акцент на действии и на том, кто ждёт. Последняя точка — своя: тон выбираешь сам, остальное выводится из него.', paints));
+    group.appendChild(drow('Краска', 'Цвет основных действий. Последний образец — свой цвет.', paints));
 
     group.appendChild(drow('Внизу панели', 'Полоска лимита подписки с окном до сброса — или расход за день.',
       segmented(
         [{ value: 'limit', label: 'лимит' }, { value: 'spend', label: 'расход' }],
         s.footerBottom === 'spend' ? 'spend' : 'limit',
-        (v) => {
-          fire(() => window.jarvis.setSettings({ footerBottom: v }));
+        async (v) => {
+          await required(() => window.jarvis.setSettings({ footerBottom: v }));
           window.dispatchEvent(new CustomEvent('jarvis:footer-bottom', { detail: v }));
         })));
 
@@ -1935,16 +2011,16 @@
     /* ── Настройка вида: плотность, скругление, масштаб ──────────────────
      * Всё это переопределяет токены дизайн-системы, поэтому меняется живьём
      * и одинаково во всех окнах. */
-    pane.appendChild(el('div.dsection', { text: 'настройка' }));
+    pane.appendChild(el('div.dsection', { text: 'Размер и форма' }));
     const tune = el('div.dgroup');
 
-    tune.appendChild(drow('Плотность', 'Высота строк и воздух вокруг них.',
+    tune.appendChild(drow('Плотность', null,
       segmented(
         [{ value: 'compact', label: 'плотно' }, { value: 'normal', label: 'обычно' }, { value: 'roomy', label: 'просторно' }],
         cur.density || 'normal',
         (v) => { window.jarvisTheme && window.jarvisTheme.set({ density: v }); })));
 
-    tune.appendChild(drow('Скругление', 'Углы карточек, кнопок и строк.',
+    tune.appendChild(drow('Скругление', null,
       segmented(
         [{ value: 'sharp', label: 'острое' }, { value: 'normal', label: 'обычное' }, { value: 'soft', label: 'мягкое' }],
         cur.radius || 'normal',
@@ -1958,7 +2034,7 @@
       scaleVal.textContent = scale.value + '%';
       if (window.jarvisTheme) window.jarvisTheme.set({ scale: Number(scale.value) / 100 });
     });
-    tune.appendChild(drow('Масштаб', 'Тянет весь интерфейс целиком — текст, отступы и элементы вместе.',
+    tune.appendChild(drow('Масштаб', 'Размер текста и элементов.',
       [scaleVal, scale]));
 
     tune.appendChild(drow('Сбросить настройку вида', 'Вернуть плотность, скругление и масштаб к заводским.',
@@ -1991,81 +2067,118 @@
     } catch (e) { return false; }
   }
 
-  // строка одного узла: точка + имя, ssh-хост и каталог, «Проверить» / «Удалить»
-  function remoteRow(r) {
-    const dot = el('span.dot', { style: 'margin-top:5px' });
-    const grow = el('div.grow');
-    grow.appendChild(el('div.dt', { text: r.name || 'без имени' }));
-    const meta = (r.sshHost || 'ssh-хост не задан') + ' · ' + (r.jarvisDir || '~/.jarvis');
-    grow.appendChild(el('div.dd.mono.s2rmeta', { text: meta, title: meta }));
-    const errLine = el('div.s2err.s2rerr', { style: 'display:none' });
-    grow.appendChild(errLine);
-
-    // Версия узла и отставание: узел ставится приложением и живёт на чужой
-    // машине месяцами. Без явной отметки человек не узнает, что половина
-    // починенного до него просто не доехала.
-    if (r.version) {
-      grow.appendChild(el('div.dd' + (r.outdated ? '.s2rold' : ''), {
-        text: r.outdated
-          ? 'узел v' + r.version + ' — старее приложения, переустанови его'
-          : 'узел v' + r.version,
-      }));
-    }
-
-    const stat = el('span.sval.s2rstat');
-    // одно место, где статус превращается в точку и текст (точка — формой, не цветом)
+  // The selected host owns its actions; inventory cards are navigation only.
+  const machineView = { selected: '', filter: 'all', query: '', editor: false, detail: 'overview', notifiedConnection: '' };
+  function remoteEditorOpen() { return !!currentRoot?.querySelector('#s2-ssh-setup')?.open; }
+  function resumeRemoteWork() {
+    if (!remoteWiz.install?.running && !remoteWiz.manualSaving) return false;
+    machineView.editor = true; reRenderPane('remotes'); return true;
+  }
+  function machineAddress(r) {
+    const host = r.sshHost || '';
+    const at = host.lastIndexOf('@');
+    return { address: at < 0 ? host : host.slice(at + 1), user: at < 0 ? '' : host.slice(0, at) };
+  }
+  function machineBadge(text, state) { return el('span.connection-badge', { text, 'data-state': state }); }
+  function remoteRow(r, changed = () => {}) {
+    const panel = el('section.connection-host', { 'data-machine-name': r.name, 'aria-label': 'Подключение ' + r.name });
+    const avatar = el('span.connection-avatar.large', { 'data-kind': r.transport === 'teleport' ? 'teleport' : 'ssh', 'aria-hidden': 'true' }, icon(r.transport === 'teleport' ? 'shield-check' : 'server'));
+    const stat = machineBadge('', '');
+    const meta = el('div.connection-host-meta', null, [el('span', { text: r.transport === 'teleport' ? 'Teleport' : 'SSH' }), stat]);
+    const head = el('div.connection-host-head', null, [avatar, el('div', null, [el('h2', { text: r.name || 'Машина' }), meta])]);
+    panel.append(head);
+    const errLine = el('div.connection-alert', { role: 'status' });
     const paint = (on, text, error) => {
-      dot.className = 'dot' + (on ? ' done' : '');
-      stat.className = 'sval s2rstat' + (on ? ' on' : '');
-      stat.textContent = text;
-      errLine.textContent = error || '';
-      errLine.style.display = error ? '' : 'none';
+      stat.textContent = text; stat.dataset.state = on ? 'connected' : error ? 'error' : 'unknown';
+      errLine.textContent = remoteDisplayText(error || ''); errLine.hidden = !error;
     };
-    paint(!!r.connected,
-      r.connected ? 'на связи' : (r.error ? 'не отвечает' : 'не проверен'),
-      r.connected ? null : (r.error || null));
-
-    const test = button('Проверить', async (b) => {
-      b.disabled = true; b.textContent = 'Проверяю…';
-      const res = await safe(() => window.jarvis.remotesTest(r.name), null);
+    paint(!!r.connected, r.connected ? 'На связи' : r.error ? 'Нет связи' : 'Не проверено', r.connected ? null : r.error);
+    panel.append(errLine);
+    const actions = el('div.connection-primary-actions');
+    if (r.connected && window.jarvisSessionWorkspace?.newChat) actions.appendChild(button('Новый чат', () => window.jarvisSessionWorkspace.newChat({ machine: r.name, cwd: '' }), 'primary'));
+    const test = button('Проверить', async b => {
+      b.disabled = true; b.textContent = 'Проверяем…';
+      const result = await safe(() => window.jarvis.remotesTest(r.name), null);
       b.disabled = false; b.textContent = 'Проверить';
-      if (res && res.ok) {
-        const parts = [];
-        if (res.host) parts.push(res.host);
-        if (res.version) parts.push('v' + res.version);
-        paint(true, parts.length ? 'на связи · ' + parts.join(' · ') : 'на связи', null);
-      } else {
-        paint(false, 'не отвечает', (res && res.error) || 'узел не ответил — проверь ssh и что там запущен jarvis-node');
+      r.connected = !!result?.ok; r.error = result?.ok ? null : result?.error || 'Машина не ответила. Проверь доступ к ней.';
+      if (result?.ok && result.version) r.version = result.version;
+      if (result?.ok && Array.isArray(result.sources)) r.sources = result.sources;
+      paint(r.connected, r.connected ? 'На связи' : 'Нет связи', r.error);
+      changed(r);
+    }, r.connected ? '' : 'primary');
+    actions.appendChild(test);
+    if (r.transport === 'teleport' && !r.connected) actions.appendChild(button('Обновить вход', async () => {
+      if (resumeRemoteWork()) return;
+      remoteWizReset(); remoteWiz.name = r.name; remoteWiz.host = r.sshHost || ''; remoteWiz.dir = r.jarvisDir || '~/.jarvis';
+      for (const key of ['transport', 'sshConfigFile', 'teleportProxy', 'teleportCluster', 'runAsUser', 'nodeTcpPort']) remoteWiz[key] = r[key] || (key === 'transport' ? 'teleport' : '');
+      remoteWiz.teleport.reconnectName = r.name; machineView.editor = true;
+      await reRenderPane('remotes'); refreshTeleportStatus();
+    }));
+    panel.append(actions);
+    const nav = el('div.connection-detail-tabs', { role: 'group', 'aria-label': 'Детали машины' });
+    const overview = el('div.connection-overview');
+    const maintenance = el('div.connection-maintenance');
+    const tabs = [];
+    const show = mode => {
+      machineView.detail = mode; overview.hidden = mode !== 'overview'; maintenance.hidden = mode !== 'settings';
+      tabs.forEach(([key, btn]) => btn.setAttribute('aria-pressed', String(key === mode)));
+    };
+    for (const [key, label] of [['overview', 'Обзор'], ['settings', 'Настройки']]) {
+      const btn = button(label, () => show(key), 'sm'); tabs.push([key, btn]); nav.append(btn);
+    }
+    panel.append(nav, overview, maintenance);
+    const address = machineAddress(r);
+    const facts = el('dl.connection-facts');
+    const fact = (label, value) => { if (value) facts.appendChild(el('div', null, [el('dt', { text: label }), el('dd', { text: value, title: value })])); };
+    fact('Адрес', address.address || 'Не указан'); fact('Пользователь', address.user || 'Из SSH config');
+    fact('Кластер', r.transport === 'teleport' ? r.teleportCluster : '');
+    overview.append(el('h3.connection-section-label', { text: 'Подключение' }), facts);
+    const profiles = el('div.connection-profiles');
+    overview.append(el('h3.connection-section-label', { text: 'Агенты на машине' }), profiles);
+    if (Array.isArray(r.sources) && r.sources.length) {
+      for (const source of r.sources) {
+        const profile = el('div.connection-profile');
+        const copy = el('div', null, [el('strong', { text: source.label || source.agent || 'Профиль' }), el('span', { text: source.agent === 'codex' ? 'Codex' : source.agent === 'claude' ? 'Claude Code' : source.agent || 'Агент' })]);
+        profile.append(el('span.connection-profile-icon', { 'data-kind': source.agent || '', 'aria-hidden': 'true' }, icon('terminal')), copy);
+        profiles.append(profile);
       }
-    }, 'sm');
-
-    // Переустановка — тот же установщик, что и при добавлении: он идемпотентен
-    // и перезальёт бинарь с хуками. Это единственный способ довезти до чужой
-    // машины то, что починили здесь.
-    const again = button('Переустановить', (b) => {
-      if (!remotesWizardReady()) { paint(false, 'нужна свежая сборка', null); return; }
-      b.disabled = true; b.textContent = 'Ставлю…';
-      remoteWizReset();
-      remoteWiz.host = r.sshHost || ''; remoteWiz.name = r.name; remoteWiz.dir = r.jarvisDir || '~/.jarvis';
-      startRemoteInstall();
-      reRenderPane('remotes');
-    }, 'sm');
-
-    // удаление с подтверждением в самой кнопке (как у моделей) — без диалогов
-    const del = el('button.btn.sm.danger', { text: 'Удалить' });
+    } else profiles.append(el('p.connection-muted', { text: r.connected ? 'Профили пока не обнаружены.' : 'Профили появятся после подключения.' }));
+    if (r.outdated) overview.append(el('div.connection-alert', { text: 'Доступно обновление Jarvis на этой машине.', 'data-tone': 'warning' }), button('Обновить узел', () => reinstall(), 'sm'));
+    const maintenanceFacts = el('dl.connection-facts');
+    for (const [label, value] of [['Каталог Jarvis', r.jarvisDir || '~/.jarvis'], ['Владелец агентов', r.runAsUser || address.user || 'Из SSH config'], ['SSH config', r.sshConfigFile], ['Teleport proxy', r.teleportProxy], ['Версия узла', r.version ? 'v' + r.version : 'Неизвестна']]) {
+      if (value) maintenanceFacts.appendChild(el('div', null, [el('dt', { text: label }), el('dd', { text: value })]));
+    }
+    maintenance.append(el('h3.connection-section-label', { text: 'Параметры подключения' }), maintenanceFacts);
+    for (const source of r.sources || []) {
+      if (source.agent !== 'codex' || !window.jarvis.remotesRepairSource) continue;
+      const b = button('Проверить хуки', async control => {
+        control.disabled = true;
+        try { const result = await window.jarvis.remotesRepairSource(r.name, source.id || source.sourceId); if (result?.ok === false) throw new Error(result.error || 'Хуки не настроены'); control.textContent = 'Хуки настроены'; }
+        catch (error) { errLine.textContent = remoteDisplayText(error?.message || String(error)); errLine.hidden = false; }
+        finally { control.disabled = false; }
+      }, 'sm');
+      maintenance.append(el('div.connection-setting-action', null, [el('div', null, [el('strong', { text: source.label || 'Codex' }), el('p', { text: 'События, вопросы и уведомления' })]), b]));
+    }
+    function reinstall() {
+      if (resumeRemoteWork()) return;
+      if (!remotesWizardReady()) return;
+      remoteWizReset(); remoteWiz.host = r.sshHost || ''; remoteWiz.name = r.name; remoteWiz.dir = r.jarvisDir || '~/.jarvis';
+      for (const key of ['transport', 'sshConfigFile', 'teleportProxy', 'teleportCluster', 'runAsUser', 'nodeTcpPort']) remoteWiz[key] = r[key] || (key === 'transport' ? 'ssh' : '');
+      machineView.editor = true; startRemoteInstall(true); reRenderPane('remotes');
+    }
+    if (remotesWizardReady()) maintenance.append(el('div.connection-setting-action', null, [el('div', null, [el('strong', { text: 'Компонент Jarvis' }), el('p', { text: 'Обновить или восстановить установку' })]), button('Переустановить', reinstall, 'sm')]));
+    const del = el('button.btn.sm.danger', { text: 'Удалить подключение' });
     let armed = false;
     del.addEventListener('click', async () => {
-      if (!armed) {
-        armed = true; del.textContent = 'Точно?';
-        setTimeout(() => { armed = false; del.textContent = 'Удалить'; }, 3000);
-        return;
-      }
-      del.disabled = true; del.textContent = 'Удаляю…';
-      await safe(() => window.jarvis.remotesRemove(r.name), null);
-      reRenderPane('remotes');
+      if (resumeRemoteWork()) return;
+      if (!armed) { armed = true; del.textContent = 'Подтвердить удаление'; setTimeout(() => { if (del.isConnected) { armed = false; del.textContent = 'Удалить подключение'; } }, 4000); return; }
+      del.disabled = true;
+      if (!await action(del, () => window.jarvis.remotesRemove(r.name))) { armed = false; del.disabled = false; del.textContent = 'Удалить подключение'; return; }
+      machineView.selected = ''; reRenderPane('remotes');
     });
-
-    return el('div.drow', null, [dot, grow, el('div.dctl.s2rctl', null, [stat, test, again, del])]);
+    maintenance.append(el('div.connection-remove', null, [el('p', { text: 'Убирает машину из Jarvis. Файлы на сервере сохранятся.' }), del]));
+    show(machineView.detail);
+    return panel;
   }
 
   // пустое состояние: что это вообще и что нужно на той стороне
@@ -2098,24 +2211,67 @@
    * Состояние живёт в модуле, а не в DOM: установка идёт минутами и приезжает
    * событиями, панель за это время перерисовывается — введённые поля, отчёт
    * разведки и лог обязаны это пережить. */
+  // Older backends and successful command output can still contain terminal
+  // escapes. Keep this boundary plain text and bounded, including OSC payloads.
+  function remoteDisplayText(value) {
+    const original = String(value ?? ''), limit = 4096, suffix = '… (вывод сокращён)';
+    let text = original.slice(0, 65536)
+      .replace(/(?:\x1b\]|\x9d)[\s\S]*?(?:\x07|\x1b\\|\x9c|$)/g, '')
+      .replace(/(?:\x1b[PX^_]|[\x90\x98\x9e\x9f])[\s\S]*?(?:\x1b\\|\x9c|$)/g, '')
+      .replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*(?:[@-~]|$)/g, '')
+      .replace(/\x1b[ -/]*[0-~]/g, '')
+      .replace(/\r\n?/g, '\n')
+      .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, '').trim();
+    if (original.length > 65536 || text.length > limit) {
+      text = text.slice(0, limit - suffix.length).replace(/[\ud800-\udbff]$/, '') + suffix;
+    }
+    return text;
+  }
   const remoteWiz = {
     host: '', name: '', dir: '',
+    transport: 'ssh', sshConfigFile: '', teleportProxy: '', teleportCluster: '', runAsUser: '', nodeTcpPort: null, sshDraftHost: '',
+    teleport: null,
     probe: null,      // успешный ответ remotesPreflight
     probeErr: null,   // текст отказа ssh (многострочный — показываем как есть)
     busy: false,      // идёт разведка
     key: null,        // {publicKey, path} — ssh-ключ ЭТОЙ машины, ленивая загрузка
     keyBusy: false,
-    manual: false,    // раскрыта прежняя форма «узел уже стоит»
+    manual: false, manualDraft: null, manualError: '', manualSaving: false,
     formErr: null,
     install: null,    // {name, steps:[…], pct, running, error}
-    flash: null,      // «узел X установлен» — одна строка после успеха
+    flash: null, connectedName: null,
     authErr: null,    // отказ входа по паролю; сам пароль тут НЕ живёт
   };
+  let remoteProbeSequence = 0, teleportStatusSequence = 0, teleportNodesSequence = 0, teleportPollTimer = null;
+  function newTeleportState() {
+    return { status: null, busy: false, checked: false, error: '', nodes: [], nodesBusy: false, nodesLoaded: false, nodesError: '', login: '', node: '', manualTarget: false, loginPending: false, loginAt: 0 };
+  }
+  function resetRemoteProbe() {
+    remoteProbeSequence++;
+    remoteWiz.probe = null; remoteWiz.probeErr = null; remoteWiz.busy = false; remoteWiz.formErr = null; remoteWiz.authErr = null; remoteWiz.flash = null;
+    if (!remoteWiz.install?.running) remoteWiz.install = null;
+  }
+  function resetTeleportState() {
+    teleportStatusSequence++; teleportNodesSequence++; clearTimeout(teleportPollTimer); teleportPollTimer = null;
+    remoteWiz.teleport = newTeleportState();
+  }
+  function remoteConnection(w) {
+    return { sshHost: (w.host || '').trim(), transport: w.transport || 'ssh',
+      ...((w.sshConfigFile || '').trim() && w.transport !== 'teleport' ? { sshConfigFile: w.sshConfigFile.trim() } : {}),
+      ...((w.teleportProxy || '').trim() && w.transport === 'teleport' ? { teleportProxy: w.teleportProxy.trim() } : {}),
+      ...((w.teleportCluster || '').trim() && w.transport === 'teleport' ? { teleportCluster: w.teleportCluster.trim() } : {}),
+      ...(Number.isInteger(w.nodeTcpPort) && w.nodeTcpPort > 0 ? { nodeTcpPort: w.nodeTcpPort } : {}),
+      ...((w.runAsUser || '').trim() ? { runAsUser: w.runAsUser.trim() } : {}) };
+  }
   function remoteWizReset() {
+    machineView.notifiedConnection = '';
     remoteWiz.host = ''; remoteWiz.name = ''; remoteWiz.dir = '';
+    remoteWiz.transport = 'ssh'; remoteWiz.sshConfigFile = ''; remoteWiz.teleportProxy = ''; remoteWiz.teleportCluster = ''; remoteWiz.runAsUser = ''; remoteWiz.nodeTcpPort = null; remoteWiz.sshDraftHost = '';
     remoteWiz.probe = null; remoteWiz.probeErr = null; remoteWiz.busy = false;
-    remoteWiz.formErr = null; remoteWiz.install = null; remoteWiz.manual = false;
+    remoteWiz.formErr = null; remoteWiz.install = null; remoteWiz.manual = false; remoteWiz.manualDraft = null; remoteWiz.manualError = ''; remoteWiz.manualSaving = false;
     remoteWiz.authErr = null;
+    remoteWiz.connectedName = null;
+    resetRemoteProbe(); resetTeleportState();
   }
   // имя по умолчанию из ssh-хоста: dev@vps.example:22 → vps
   function remoteGuessName(host) {
@@ -2129,6 +2285,126 @@
     if (!box) return;
     box.textContent = '';
     paintRemoteWiz(box);
+    syncRemoteEditorChrome();
+  }
+  function syncRemoteEditorChrome() {
+    const setup = currentRoot?.querySelector('#s2-ssh-setup');
+    if (!setup) return;
+    const cancel = setup.querySelector('[data-connection-cancel]');
+    if (cancel) { cancel.textContent = remoteWiz.install?.running ? 'Свернуть' : 'Отмена'; cancel.disabled = !!remoteWiz.manualSaving; }
+    const title = setup.querySelector('.connection-editor-head h2');
+    if (title) title.textContent = remoteWiz.install ? 'Подготовка машины' : remoteWiz.teleport?.reconnectName ? 'Обновление доступа' : remoteWiz.flash ? 'Подключение готово' : 'Новое подключение';
+  }
+  function normalizedTeleportProxy(value) {
+    const text = String(value || '').trim(); if (!text) return '';
+    try { const url = new URL(/^https?:\/\//i.test(text) ? text : 'https://' + text); return url.hostname.toLowerCase() + (url.port && url.port !== '443' ? ':' + url.port : ''); }
+    catch { return text.toLowerCase().replace(/\/$/, ''); }
+  }
+  const sameTeleportProxy = (a, b) => normalizedTeleportProxy(a) === normalizedTeleportProxy(b);
+  const teleportSessionKey = p => p ? JSON.stringify([normalizedTeleportProxy(p.proxy), p.cluster || '', p.username || '', p.validUntil || '']) : '';
+  function teleportProfiles() {
+    const s = remoteWiz.teleport?.status;
+    const profiles = Array.isArray(s?.profiles) ? [...s.profiles] : [];
+    if (s?.authenticated && !profiles.some(p => sameTeleportProxy(p.proxy, s.proxy) && p.cluster === s.cluster)) profiles.unshift(s);
+    return profiles.filter(p => p.authenticated === true && sameTeleportProxy(p.proxy, remoteWiz.teleportProxy));
+  }
+  function teleportProfile() { return teleportProfiles().find(p => p.cluster === remoteWiz.teleportCluster) || null; }
+  function teleportLogins() { return [...new Set((teleportProfile()?.logins || []).filter(x => typeof x === 'string' && x))]; }
+  function remoteSelect(label, options, value, changed, disabled) {
+    const select = el('select.s2rselect.s2-secret', { 'aria-label': label });
+    for (const [id, name] of options) select.appendChild(el('option', { value: id, text: name }));
+    for (const option of select.options) option.selected = false;
+    const selected = [...select.options].find(option => option.value === value); if (selected) selected.selected = true;
+    select.disabled = !!disabled; select.addEventListener('change', () => changed(select.value)); return select;
+  }
+  function remoteField(label, input) { return el('label.s2rfield.s2-field', null, [el('span.s2-field-label', { text: label }), input]); }
+  function syncTeleportLogin() {
+    const w = remoteWiz, ts = w.teleport, logins = teleportLogins();
+    if (!logins.includes(ts.login)) ts.login = logins.length === 1 ? logins[0] : '';
+  }
+  function clearTeleportTarget() {
+    const w = remoteWiz, ts = w.teleport;
+    teleportNodesSequence++; ts.nodes = []; ts.nodesLoaded = false; ts.nodesBusy = false; ts.nodesError = ''; ts.node = ''; w.host = '';
+    resetRemoteProbe();
+  }
+  async function loadTeleportNodes() {
+    const w = remoteWiz, ts = w.teleport;
+    if (w.transport !== 'teleport' || !teleportProfile() || !ts.login) return;
+    const request = ++teleportNodesSequence, proxy = w.teleportProxy.trim(), cluster = w.teleportCluster, login = ts.login;
+    ts.nodesBusy = true; ts.nodesError = ''; repaintRemoteWiz();
+    const result = await safe(() => window.jarvis.teleportNodes(proxy || null, cluster || null), null);
+    if (w.teleport !== ts || request !== teleportNodesSequence || w.transport !== 'teleport' || w.teleportProxy.trim() !== proxy || w.teleportCluster !== cluster || ts.login !== login) return;
+    ts.nodesBusy = false; ts.nodesLoaded = true;
+    if (result?.ok) ts.nodes = Array.isArray(result.nodes) ? result.nodes : [];
+    else { ts.nodes = []; ts.nodesError = result?.error || 'Не удалось получить машины Teleport.'; }
+    if (ts.node && !ts.nodes.some(n => (n.target || n.id || n.name) === ts.node)) { ts.node = ''; if (!ts.manualTarget) w.host = ''; resetRemoteProbe(); }
+    repaintRemoteWiz();
+  }
+  function scheduleTeleportPoll(ts) {
+    clearTimeout(teleportPollTimer);
+    if (remoteWiz.teleport !== ts || !ts.loginPending) return;
+    teleportPollTimer = setTimeout(() => {
+      teleportPollTimer = null;
+      if (remoteWiz.teleport !== ts || remoteWiz.transport !== 'teleport' || !ts.loginPending) return;
+      if (activePane !== 'remotes' || !remoteEditorOpen() || currentRoot?.closest('[hidden]')) return;
+      if (Date.now() - ts.loginAt > 300000) { ts.loginPending = false; ts.error = 'Вход ещё не подтверждён. Заверши его в терминале и обнови доступ.'; repaintRemoteWiz(); return; }
+      refreshTeleportStatus(true);
+    }, 2000);
+  }
+  function resumeTeleportPolling() {
+    if (remoteWiz.transport === 'teleport' && remoteWiz.teleport?.loginPending && remoteEditorOpen()) refreshTeleportStatus(true);
+  }
+  async function refreshTeleportStatus(poll = false) {
+    const w = remoteWiz, ts = w.teleport || (w.teleport = newTeleportState());
+    if (w.transport !== 'teleport') return;
+    if (ts.busy) { if (poll && ts.loginPending) scheduleTeleportPoll(ts); return; }
+    const request = ++teleportStatusSequence, proxy = w.teleportProxy.trim();
+    ts.busy = true; ts.error = ''; repaintRemoteWiz();
+    const result = await safe(() => window.jarvis.teleportStatus(proxy || null), null);
+    if (w.teleport !== ts || request !== teleportStatusSequence || w.transport !== 'teleport' || w.teleportProxy.trim() !== proxy) return;
+    const oldIdentity = JSON.stringify([w.teleportCluster, teleportProfile()?.username || '', ts.login]);
+    ts.busy = false; ts.checked = true; ts.status = result;
+    if (!result?.ok) ts.error = result?.error || 'Не удалось проверить Teleport.';
+    else {
+      if (!w.teleportProxy && result.proxy) w.teleportProxy = result.proxy;
+      const profiles = teleportProfiles();
+      if (!profiles.some(p => p.cluster === w.teleportCluster)) w.teleportCluster = profiles.find(p => p.cluster === result.cluster)?.cluster || profiles[0]?.cluster || '';
+      if (teleportProfile()) {
+        const renewed = ts.loginPending && (!ts.loginBefore || teleportSessionKey(teleportProfile()) !== ts.loginBefore);
+        if (!ts.loginPending || renewed) { ts.loginPending = false; clearTimeout(teleportPollTimer); }
+        syncTeleportLogin();
+        const identity = JSON.stringify([w.teleportCluster, teleportProfile()?.username || '', ts.login]);
+        if (identity !== oldIdentity) { clearTeleportTarget(); w.manualDraft = null; }
+        else if (renewed) { ts.nodesLoaded = false; ts.nodesError = ''; resetRemoteProbe(); }
+      } else {
+        clearTeleportTarget(); ts.login = '';
+        if (result.error) ts.error = result.error;
+      }
+    }
+    repaintRemoteWiz();
+    if (teleportProfile() && ts.login && !ts.nodesLoaded) loadTeleportNodes();
+    if (ts.loginPending) scheduleTeleportPoll(ts);
+  }
+  async function startTeleportLogin(renew = false) {
+    const w = remoteWiz, ts = w.teleport, proxy = w.teleportProxy.trim();
+    if (!proxy) { ts.error = 'Укажи адрес Teleport proxy.'; repaintRemoteWiz(); return; }
+    if (ts.loginPending || ts.busy) return;
+    ts.loginBefore = renew ? teleportSessionKey(teleportProfile()) : '';
+    ts.loginPending = true; ts.loginAt = Date.now(); ts.error = ''; repaintRemoteWiz();
+    const result = await safe(() => window.jarvis.teleportLogin(proxy, !!renew), null);
+    if (w.teleport !== ts || w.transport !== 'teleport' || w.teleportProxy.trim() !== proxy) return;
+    if (!result?.ok) { ts.loginPending = false; ts.error = result?.error || 'Не удалось открыть вход в Teleport.'; }
+    else scheduleTeleportPoll(ts);
+    repaintRemoteWiz();
+  }
+  function setRemoteTransport(value) {
+    const w = remoteWiz;
+    if (w.transport === value || w.install?.running) return;
+    if (w.transport === 'ssh') w.sshDraftHost = w.host;
+    w.transport = value; w.host = value === 'ssh' ? w.sshDraftHost : '';
+    w.manualDraft = null; w.manualError = ''; w.manualSaving = false;
+    resetRemoteProbe(); resetTeleportState(); repaintRemoteWiz();
+    if (value === 'teleport') refreshTeleportStatus();
   }
 
   // строка проверки: точка формой (кольцо — нашлось, залитая — нет) + «есть/нет»
@@ -2151,10 +2427,11 @@
     const inst = remoteWiz.install;
     const grow = el('div.grow');
     grow.appendChild(el('div.dt', { text: 'Машина проверена' }));
-    grow.appendChild(el('div.dd', { text: [p.os, p.arch].filter(Boolean).join(' · ') || 'система не определилась' }));
+    grow.appendChild(el('div.dd', { text: [p.os, p.arch, p.claude ? 'Claude Code' : '', p.codex ? 'Codex' : ''].filter(Boolean).join(' · ') || 'Доступ подтверждён' }));
     const dir = p.dir || (remoteWiz.dir.trim() || '~/.jarvis');
-    grow.appendChild(el('div.dd.mono.s2rmeta', { text: 'узел встанет в ' + dir, title: dir }));
-    grow.appendChild(el('div.s2rchecks', null, [
+    const details = el('div.s2radvanced');
+    details.appendChild(el('div.dd.mono.s2rmeta', { text: 'Каталог: ' + dir, title: dir }));
+    details.appendChild(el('div.s2rchecks', null, [
       remoteCheck(p.tmux, 'tmux'),
       remoteCheck(p.curl, 'curl'),
       remoteCheck(p.claude, 'Claude Code'),
@@ -2163,20 +2440,23 @@
       remoteCheck(p.cargo, 'cargo — сборка на месте'),
     ]));
     // строку про происхождение бинаря отдаёт бэкенд — показываем как есть
-    if (p.nodeNote) grow.appendChild(remoteHintLine(NODE_SRC_ICON[p.nodeSource] || 'info', p.nodeNote, p.nodeSource === 'none'));
-    if (!p.tmux) {
-      grow.appendChild(remoteHintLine('alert-triangle',
-        'tmux на машине нет — узел встанет, но вставить ответ в сессию с него не выйдет, ровно как локально.', true));
-    }
+    if (p.nodeNote) details.appendChild(remoteHintLine(NODE_SRC_ICON[p.nodeSource] || 'info', p.nodeNote, p.nodeSource === 'none'));
+    const runtime = p.runtimeSetup;
+    if (runtime?.automatic && runtime.missing?.length) grow.appendChild(el('div.s2raccess-state', { text: 'Установим ' + runtime.missing.join(' + ') + ' и подключим Jarvis.' }));
+    else if (runtime?.missing?.length) {
+      grow.appendChild(el('div.s2raccess-state.warn', { text: 'Нужно подготовить ' + runtime.missing.join(' + ') + '. Инструкция — ниже.' }));
+      if (runtime.command) details.appendChild(el('pre.s2rpre', { text: runtime.command }));
+    } else grow.appendChild(el('div.dd', { text: 'Подключим Jarvis и найденные профили агентов.' }));
     if (!p.claude && !p.codex) {
       grow.appendChild(remoteHintLine('alert-triangle',
-        'Ни Claude Code, ни Codex там не нашлось — вести сессии на этой машине пока некому.', true));
+        'Claude Code и Codex не найдены. Их нужно установить отдельно.', true));
     }
+    grow.appendChild(settingsDetails('s2-preflight-details', 'Результат проверки', [details]));
 
     // пока идёт (или упала) установка, единственная точка действия — карточка
     // установки ниже: две одинаковые кнопки на экране только путают
     const blocked = p.nodeSource === 'none';
-    const run = button('Установить', () => startRemoteInstall(), 'sm primary');
+    const run = button('Настроить автоматически', () => startRemoteInstall(), 'sm primary');
     run.disabled = blocked;
     if (blocked) run.title = 'Взять бинарь узла неоткуда — смотри пояснение слева';
     return el('div.drow', null, [grow, el('div.dctl', { style: 'align-self:flex-start;margin-top:2px' }, inst ? [] : [run])]);
@@ -2205,17 +2485,20 @@
   function runRemoteProbe() {
     const w = remoteWiz;
     const host = (w.host || '').trim();
-    if (!host) { w.formErr = 'Нужен ssh-хост — алиас из ~/.ssh/config или user@адрес.'; repaintRemoteWiz(); return; }
+    if (!host) { w.formErr = w.transport === 'teleport' ? 'Выбери пользователя и машину Teleport.' : 'Укажи user@адрес или SSH-алиас.'; repaintRemoteWiz(); return; }
+    if (w.transport === 'teleport' && (!teleportProfile() || !w.teleport?.login || w.teleport.loginPending)) { w.formErr = 'Сначала войди в Teleport и выбери пользователя SSH.'; repaintRemoteWiz(); return; }
     if (w.busy) return;
     w.formErr = null; w.busy = true; w.probe = null; w.probeErr = null; w.flash = null;
+    const request = ++remoteProbeSequence, connection = remoteConnection(w), fingerprint = JSON.stringify(connection), dir = (w.dir || '').trim() || '~/.jarvis';
     repaintRemoteWiz();
-    safe(() => window.jarvis.remotesPreflight(host, (w.dir || '').trim() || '~/.jarvis'), null).then((res) => {
+    safe(() => window.jarvis.remotesPreflight(host, dir, connection), null).then((res) => {
+      if (request !== remoteProbeSequence || JSON.stringify(remoteConnection(w)) !== fingerprint || ((w.dir || '').trim() || '~/.jarvis') !== dir) return;
       w.busy = false;
       if (res && res.ok) {
         w.probe = res;
         if (!(w.name || '').trim()) w.name = remoteGuessName(host);
       } else {
-        w.probeErr = (res && res.error) || 'Не удалось сходить на машину: ssh не ответил.';
+        w.probeErr = (res && res.error) || 'Машина не ответила. Проверь доступ и адрес.';
       }
       repaintRemoteWiz();
     });
@@ -2242,10 +2525,13 @@
     const note = el('div.dd');
     const go = button('Войти по паролю', (b) => {
       const value = pass.value;
+      if (w.transport !== 'ssh') return;
       if (!value) { note.textContent = 'Пустой пароль'; return; }
       b.disabled = true; pass.disabled = true; b.textContent = 'Захожу…';
       note.textContent = ''; w.authErr = null;
-      safe(() => window.jarvis.remotesSshAuthorize((w.host || '').trim(), value), null).then((res) => {
+      const identity = remoteProbeSequence, connection = remoteConnection(w), fingerprint = JSON.stringify(connection);
+      safe(() => window.jarvis.remotesSshAuthorize((w.host || '').trim(), value, connection), null).then((res) => {
+        if (w.transport !== 'ssh' || identity !== remoteProbeSequence || JSON.stringify(remoteConnection(w)) !== fingerprint) return;
         b.disabled = false; pass.disabled = false; b.textContent = 'Войти по паролю';
         if (res && res.ok) {
           pass.value = ''; // дальше он не нужен — не держим его в DOM
@@ -2263,7 +2549,7 @@
     }, 'sm primary');
     pass.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !go.disabled) go.click(); });
     box.appendChild(el('div.s2rbtns', null, [pass, go]));
-    if (w.authErr) box.appendChild(el('div.s2rpre.bad', { text: w.authErr }));
+    if (w.authErr) box.appendChild(el('div.s2rpre.bad', { text: remoteDisplayText(w.authErr) }));
     box.appendChild(note);
     return box;
   }
@@ -2272,7 +2558,7 @@
     const w = remoteWiz;
     const grow = el('div.grow');
     grow.appendChild(el('div.dt', { text: 'Машина не пустила по SSH' }));
-    grow.appendChild(el('div.s2rpre.bad', { text: w.probeErr }));
+    grow.appendChild(el('div.s2rpre.bad', { text: remoteDisplayText(w.probeErr) }));
 
     if (remoteSshKeyApi()) {
       if (w.key === null) {
@@ -2300,27 +2586,31 @@
         grow.appendChild(el('div.s2rbtns', null, [mkkey]));
       }
     }
-    if (remoteAuthorizeApi()) grow.appendChild(remotePasswordBlock());
+    if (w.transport === 'ssh' && remoteAuthorizeApi()) grow.appendChild(remotePasswordBlock());
     return el('div.drow', null, [
       el('div.s2note-ic', { style: 'align-self:flex-start;margin-top:2px' }, icon('key')), grow,
     ]);
   }
 
   // ── Установка: запуск, живой лог, финал ────────────────────────────────
-  function startRemoteInstall() {
+  function startRemoteInstall(existing = false) {
     const w = remoteWiz;
+    if (w.install?.running) return;
+    if (!(w.host || '').trim() || (!existing && !w.probe)) { w.formErr = 'Сначала проверь выбранную машину.'; repaintRemoteWiz(); return; }
     const name = (w.name || '').trim() || remoteGuessName(w.host);
     w.name = name; w.flash = null;
-    w.install = { name, steps: [], pct: null, running: true, error: null };
+    const installation = { name, steps: [], pct: null, running: true, error: null, existing };
+    w.install = installation;
     repaintRemoteWiz();
     safe(() => window.jarvis.remotesInstall({
+      ...remoteConnection(w),
       name, sshHost: (w.host || '').trim(), jarvisDir: (w.dir || '').trim() || '~/.jarvis',
     }), null).then((res) => {
       // отказ на входе (кривой ввод / установка уже идёт) — событий не будет
       if (res && res.ok) return;
-      if (!w.install) return;
+      if (w.install !== installation) return;
       w.install.running = false;
-      w.install.error = (res && res.error) || 'не удалось запустить установку';
+      w.install.error = remoteDisplayText(res && res.error) || 'не удалось запустить установку';
       repaintRemoteWiz();
     });
   }
@@ -2337,7 +2627,7 @@
       const dot = s.state === 'done' ? '.done' : (last && st.running && s.state === 'start' ? '.working' : '');
       node.appendChild(el('div.s2rln' + kind, null, [
         el('span.dot' + dot),
-        el('span.ph', { text: s.phase || '' }),
+        el('span.install-phase', { text: s.phase || '' }),
         el('span.msg', { text: s.msg || '' }),
       ]));
     });
@@ -2360,18 +2650,17 @@
     const grow = el('div.grow');
     grow.appendChild(el('div.dt', { text: st.running ? 'Ставлю узел «' + st.name + '»' : 'Установка не удалась' }));
     if (st.running) {
-      grow.appendChild(el('div.dd', { text: 'Занимает от десятков секунд до пары минут — узел может собираться прямо '
-        + 'на той машине. Панель можно не закрывать, шаги идут ниже.' }));
+      grow.appendChild(el('div.dd', { text: 'Подготавливаем Jarvis и подключаем агентов. Можно свернуть этот экран — установка продолжится.' }));
     }
     grow.appendChild(el('div#s2-rprog'));
     const log = el('div.s2rlog#s2-rlog');
     grow.appendChild(log);
     // ошибка установки — та же пошаговая инструкция: пусть занимает всю ширину
     // строки, поэтому кнопки уходят под неё, а не в узкий .dctl справа
-    if (st.error) grow.appendChild(el('div.s2rpre.bad', { text: st.error }));
+    if (st.error) grow.appendChild(el('div.s2rpre.bad', { text: remoteDisplayText(st.error) }));
     if (!st.running) {
       grow.appendChild(el('div.s2rbtns', null, [
-        button('Повторить', () => startRemoteInstall(), 'sm primary'),
+        button('Повторить', () => startRemoteInstall(st.existing), 'sm primary'),
         button('Закрыть', () => { remoteWiz.install = null; repaintRemoteWiz(); }, 'sm'),
       ]));
     }
@@ -2381,90 +2670,179 @@
     return row;
   }
 
-  // сам мастер: поля → разведка → отчёт → установка (+ ручная дорога внизу)
-  function paintRemoteWiz(box) {
+  function repaintRemoteField(input) {
+    const key = input.dataset.remoteField, start = input.selectionStart, end = input.selectionEnd;
+    repaintRemoteWiz();
+    const next = currentRoot?.querySelector('[data-remote-field="' + key + '"]');
+    if (next) { next.focus(); try { next.setSelectionRange(start, end); } catch {} }
+  }
+  function remoteInput(ph, key, label = ph) {
     const w = remoteWiz;
-    const running = !!(w.install && w.install.running);
-
-    if (w.flash) {
-      box.appendChild(el('div.drow', null, [
-        el('span.dot.done', { style: 'margin-top:5px' }),
-        el('div.grow', null, [el('div.dt', { text: w.flash })]),
-      ]));
+    const input = el('input.s2-secret', { type: 'text', placeholder: ph, autocomplete: 'off', spellcheck: 'false', value: w[key] || '', 'aria-label': label, 'data-remote-field': key });
+    input.disabled = !!w.install?.running || w.busy || w.manualSaving;
+    input.addEventListener('input', () => { w[key] = input.value; if (key !== 'name') { resetRemoteProbe(); repaintRemoteField(input); } });
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); runRemoteProbe(); } });
+    return input;
+  }
+  function teleportAccess(grow, blocked) {
+    const w = remoteWiz, ts = w.teleport || (w.teleport = newTeleportState());
+    if (!window.jarvis.teleportStatus || !window.jarvis.teleportNodes || !window.jarvis.teleportLogin) {
+      grow.appendChild(el('div.dd', { text: 'Обнови Jarvis, чтобы подключать Teleport отсюда.' })); return;
     }
-
-    if (remotesWizardReady()) {
-      const mk = (ph, key) => {
-        const i = el('input.s2-secret', {
-          type: 'text', placeholder: ph, autocomplete: 'off', spellcheck: 'false', value: w[key] || '',
-        });
-        i.disabled = running || w.busy;
-        i.addEventListener('input', () => { w[key] = i.value; });
-        return i;
-      };
-      const hostIn = mk('ssh-хост · user@адрес', 'host');
-      const nameIn = mk('имя · vps', 'name');
-      const dirIn = mk('~/.jarvis', 'dir');
-
-      const probe = button(w.busy ? 'Проверяю…' : 'Проверить машину', () => {
-        runRemoteProbe();
-      }, 'sm' + (w.probe ? '' : ' primary'));
-      probe.disabled = w.busy || running;
-      for (const i of [hostIn, nameIn, dirIn]) {
-        i.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !probe.disabled) probe.click(); });
+    const proxy = el('input.s2-secret', { type: 'text', value: w.teleportProxy, placeholder: 'teleport.example.com', 'aria-label': 'Teleport proxy', 'data-remote-field': 'teleportProxy', autocomplete: 'off', spellcheck: 'false' });
+    proxy.disabled = blocked;
+    proxy.addEventListener('input', () => { w.teleportProxy = proxy.value; w.teleportCluster = ''; w.host = ''; w.manualDraft = null; w.manualError = ''; w.manualSaving = false; resetRemoteProbe(); resetTeleportState(); repaintRemoteField(proxy); });
+    proxy.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); refreshTeleportStatus(); } });
+    const check = button(ts.busy ? 'Проверяем…' : 'Обновить доступ', () => refreshTeleportStatus(), 'sm'); check.disabled = blocked || ts.busy;
+    grow.appendChild(el('div.s2raccess-line', null, [remoteField('Teleport proxy', proxy), check]));
+    const status = ts.status;
+    if (status?.available === false) {
+      grow.appendChild(el('div.s2raccess-state', { text: 'tsh не найден. Установи клиент Teleport и обнови доступ.' }));
+      grow.appendChild(button('Установить tsh', () => required(() => window.jarvis.openUrl('https://goteleport.com/docs/connect-your-client/teleport-clients/tsh/')), 'sm'));
+      return;
+    }
+    const profile = teleportProfile();
+    if (profile) {
+      const date = new Date(profile.validUntil || status?.validUntil || '');
+      const expiry = Number.isNaN(date.getTime()) ? '' : ' · до ' + date.toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+      grow.appendChild(el('div.s2raccess-state.on', { text: (profile.username || status?.username || 'Teleport') + ' · вход активен' + expiry }));
+      if (ts.loginPending) grow.appendChild(el('div.s2raccess-state', { text: 'Ждём новый вход через SSO/MFA. Заверши его в открывшемся терминале.' }));
+      if (ts.error || ts.nodesError || w.probeErr || ts.reconnectName) {
+        const again = button(ts.loginPending ? 'Ждём вход…' : 'Выйти и войти заново', () => startTeleportLogin(true), 'sm'); again.disabled = blocked || ts.busy || ts.loginPending;
+        grow.appendChild(el('div.s2raccess-line', null, [again]));
       }
-
-      const grow = el('div.grow', null, [
-        el('div.dt', { text: 'Подключить машину' }),
-        el('div.dd', { text: 'Хост — то же, что пишешь в ssh: алиас из ~/.ssh/config или user@адрес. Имя — как будешь '
-          + 'звать узел в списке сессий. Каталог — куда на той машине встанет jarvis-node.' }),
-        el('div.s2form', null, [hostIn, nameIn, dirIn]),
-      ]);
-      if (w.formErr) grow.appendChild(el('div.s2err', null, [el('span.s2err-ic', null, icon('alert-triangle')), el('span.s2err-txt', { text: w.formErr })]));
-      grow.appendChild(el('div.s2hint', null, [
-        el('kbd', { text: keyName('enter') }),
-        el('span', { text: 'проверить · сначала разведка, установка — потом' }),
-      ]));
-      box.appendChild(el('div.drow', null, [grow, el('div.dctl', { style: 'align-self:flex-start;margin-top:2px' }, [probe])]));
-
-      if (w.probeErr) box.appendChild(remoteSshHelpCard());
-      if (w.probe) box.appendChild(remoteProbeCard());
+      const profiles = Array.isArray(status?.profiles) ? status.profiles : [];
+      const proxies = [...new Set(profiles.filter(p => p.authenticated).map(p => p.proxy).filter(Boolean))];
+      if (proxies.length > 1) grow.appendChild(remoteField('Профиль', remoteSelect('Профиль Teleport', proxies.map(value => [value, value]), w.teleportProxy, value => { w.teleportProxy = value; w.teleportCluster = ''; w.host = ''; resetRemoteProbe(); resetTeleportState(); repaintRemoteWiz(); refreshTeleportStatus(); }, blocked)));
+      const clusters = [...new Set(teleportProfiles().map(p => p.cluster).filter(Boolean))];
+      const cluster = remoteSelect('Кластер Teleport', clusters.map(value => [value, value]), w.teleportCluster, value => {
+        w.teleportCluster = value; clearTeleportTarget(); ts.reconnectName = ''; w.manualDraft = null; ts.login = ''; syncTeleportLogin(); repaintRemoteWiz(); if (ts.login) loadTeleportNodes();
+      }, blocked);
+      const login = remoteSelect('Пользователь SSH', [['', 'Выбери пользователя'], ...teleportLogins().map(value => [value, value])], ts.login, value => { clearTeleportTarget(); w.manualDraft = null; ts.login = value; repaintRemoteWiz(); if (value) loadTeleportNodes(); }, blocked);
+      grow.appendChild(el('div.s2raccess-grid', null, [remoteField('Кластер', cluster), remoteField('Пользователь SSH', login)]));
+      if (!teleportLogins().length) grow.appendChild(el('div.s2raccess-state', { text: 'В профиле нет разрешённых SSH-пользователей. Проверь доступ у администратора Teleport.' }));
+    } else {
+      const login = button(ts.loginPending ? 'Ждём вход…' : 'Войти через Teleport', () => startTeleportLogin(false), 'sm primary'); login.disabled = blocked || ts.busy || ts.loginPending || !w.teleportProxy.trim();
+      grow.appendChild(el('div.s2raccess-line', null, [login, el('span.dd', { text: ts.loginPending ? 'Заверши SSO/MFA в открывшемся терминале и браузере.' : 'Вход через официальный tsh. Пароль здесь не нужен.' })]));
+    }
+    if (ts.error) grow.appendChild(el('div.s2raccess-state.error', { role: 'alert', text: remoteDisplayText(ts.error) }));
+  }
+  function teleportMachine(grow, blocked) {
+    const w = remoteWiz, ts = w.teleport;
+    if (!teleportProfile() || !ts.login) return;
+    const nodes = ts.nodes.map(n => [n.target || n.id || n.name, n.name || n.hostname || n.id]);
+    const select = remoteSelect('Машина Teleport', [['', ts.nodesBusy ? 'Загружаем машины…' : 'Выбери машину'], ...nodes], ts.node, value => {
+      ts.node = value; w.host = value ? ts.login + '@' + value : ''; resetRemoteProbe(); if (!w.name && value) w.name = remoteGuessName(ts.nodes.find(n => (n.target || n.id || n.name) === value)?.name || value); repaintRemoteWiz();
+    }, blocked || ts.nodesBusy || !nodes.length);
+    grow.appendChild(remoteField('Машина Teleport', select));
+    const selected = ts.nodes.find(n => (n.target || n.id || n.name) === ts.node);
+    if (selected?.hostname) grow.appendChild(el('div.s2raccess-state', { text: selected.hostname }));
+    if (ts.nodesError) grow.appendChild(el('div.s2raccess-state.error', { role: 'alert', text: remoteDisplayText(ts.nodesError) }));
+    else if (ts.nodesLoaded && !nodes.length) grow.appendChild(el('div.s2raccess-state', { text: 'Доступных машин нет. Проверь выбранный кластер и права доступа.' }));
+    if (ts.nodesLoaded) { const retry = button('Обновить машины', () => { clearTeleportTarget(); loadTeleportNodes(); }, 'sm'); retry.disabled = blocked || ts.nodesBusy; grow.appendChild(el('div.s2raccess-line', null, [retry])); }
+  }
+  function paintRemoteWiz(box) {
+    const w = remoteWiz, running = !!w.install?.running;
+    w.teleport ||= newTeleportState();
+    const stage = w.flash ? 4 : w.install || w.probe ? 3 : (w.transport === 'ssh' || teleportProfile()) ? 2 : 1;
+    const steps = el('ol.s2rsteps', { 'aria-label': 'Подключение машины' });
+    for (const [number, label] of [[1, 'Доступ'], [2, 'Машина и агенты'], [3, 'Автонастройка'], [4, 'Подключено']]) steps.appendChild(el('li' + (number === stage ? '.current' : number < stage ? '.done' : ''), { 'aria-current': number === stage ? 'step' : null }, [el('span', { text: String(number) }), label]));
+    box.appendChild(steps);
+    if (w.flash) {
+      const actions = el('div.s2raccess-line');
+      if (w.connectedName && window.jarvisSessionWorkspace?.newChat) { const machine = w.connectedName; actions.appendChild(button('Открыть чаты', () => window.jarvisSessionWorkspace.newChat({ machine, cwd: '' }), 'sm primary')); }
+      actions.appendChild(button('Подключить ещё', () => { remoteWizReset(); repaintRemoteWiz(); }, 'sm'));
+      box.append(el('div.s2raccess-state.on', { role: 'status', text: w.flash }), actions); return;
+    }
+    if (remotesWizardReady()) {
+      const grow = el('div.grow');
+      const access = el('div.s2rtransport', { role: 'group', 'aria-label': 'Способ подключения' });
+      for (const [value, label] of [['ssh', 'SSH'], ['teleport', 'Teleport (tsh)']]) { const b = button(label, () => setRemoteTransport(value), 'sm' + (w.transport === value ? ' selected' : '')); b.prepend(icon(value === 'ssh' ? 'terminal' : 'shield-check')); b.setAttribute('aria-pressed', String(w.transport === value)); b.disabled = running || w.manualSaving; access.appendChild(b); }
+      grow.appendChild(access);
+      if (w.transport === 'teleport') teleportAccess(grow, running || w.busy || w.manualSaving);
+      else grow.appendChild(el('div.dd', { text: 'Обычный SSH: user@адрес или алиас из ~/.ssh/config.' }));
+      const ready = w.transport === 'ssh' || !!(teleportProfile() && w.teleport.login);
+      if (w.teleport.reconnectName && w.transport === 'teleport') {
+        const reconnectName = w.teleport.reconnectName;
+        grow.appendChild(el('div.s2raccess-state', { text: 'Обновление доступа: ' + reconnectName }));
+        if (teleportProfile()) grow.appendChild(el('div.s2raccess-line', null, [button('Проверить подключение', async b => {
+          const ts = w.teleport; b.disabled = true;
+          const result = await safe(() => window.jarvis.remotesTest(reconnectName), null);
+          if (w.teleport !== ts) return;
+          if (result?.ok) { remoteWizReset(); w.connectedName = reconnectName; w.flash = 'Машина «' + reconnectName + '» на связи.'; reRenderPane('remotes'); }
+          else { ts.error = result?.error || 'Вход активен, но машина пока не ответила. Попробуй проверить ещё раз.'; repaintRemoteWiz(); }
+        }, 'sm primary')]));
+      } else if (ready) {
+        if (w.transport === 'ssh') grow.appendChild(remoteField('Машина', remoteInput('ssh-хост · user@адрес', 'host', 'SSH-хост')));
+        else teleportMachine(grow, running || w.busy || w.manualSaving);
+        grow.appendChild(remoteField('Название', remoteInput('имя · vps', 'name', 'Имя подключения')));
+        const advanced = el('div.s2radvanced');
+        advanced.appendChild(remoteField('Каталог Jarvis', remoteInput('~/.jarvis', 'dir', 'Каталог Jarvis')));
+        if (w.transport === 'ssh') advanced.appendChild(remoteField('SSH config', remoteInput('Абсолютный путь · необязательно', 'sshConfigFile', 'SSH config')));
+        else {
+          const manual = el('input.s2-secret', { type: 'text', placeholder: 'Имя VM или UUID', 'aria-label': 'Адрес машины Teleport', 'data-remote-field': 'teleportTarget', value: w.teleport.manualTarget ? w.host.slice(w.host.indexOf('@') + 1) : '' }); manual.disabled = running || w.busy;
+          manual.addEventListener('input', () => { w.teleport.manualTarget = true; w.teleport.node = ''; w.host = manual.value.trim() ? w.teleport.login + '@' + manual.value.trim() : ''; resetRemoteProbe(); repaintRemoteField(manual); });
+          advanced.appendChild(remoteField('Адрес вручную', manual));
+        }
+        advanced.appendChild(remoteField('Владелец агентов', remoteInput('Если отличается от SSH login', 'runAsUser', 'Пользователь агента на узле')));
+        advanced.appendChild(el('div.dd', { text: 'Владелец определяет, чьи профили Claude и Codex будут подключены.' }));
+        grow.appendChild(settingsDetails('s2-connection-transport', 'Дополнительно', [advanced]));
+        const probe = button(w.busy ? 'Проверяем машину…' : 'Проверить машину', runRemoteProbe, 'sm' + (w.probe || w.install || w.manual ? '' : ' primary')); probe.disabled = w.busy || running || w.manualSaving || !w.host.trim() || (w.transport === 'teleport' && (w.teleport.loginPending || w.teleport.nodesBusy));
+        if (!running) grow.appendChild(el('div.s2raccess-line', null, [probe, el('span.dd', { text: 'Проверим доступ и найдём агентов.' })]));
+      }
+      if (w.formErr) grow.appendChild(el('div.s2raccess-state.error', { role: 'alert', text: remoteDisplayText(w.formErr) }));
+      if (w.probe || w.install) {
+        const summary = el('details.s2-details.s2rconnection-summary', null, [el('summary', null, [el('span', { text: 'Подключение · ' + (w.transport === 'teleport' ? 'Teleport' : 'SSH') + ' · ' + (w.name || w.host) }), el('span.s2rchange', { text: running ? 'Подробнее' : 'Изменить' })]), el('div.drow', null, [grow])]);
+        box.appendChild(summary);
+      } else box.appendChild(el('div.drow', null, [grow]));
+      if (w.probeErr) {
+        if (w.transport === 'ssh') box.appendChild(remoteSshHelpCard());
+        else box.appendChild(el('div.s2raccess-state.error', { role: 'alert', text: remoteDisplayText(w.probeErr) }));
+      }
+      if (w.probe && !w.manual) box.appendChild(remoteProbeCard());
       if (w.install) box.appendChild(remoteInstallCard());
     }
-
-    // ручная дорога: узел ставили через CLI — его надо просто прописать
     if (w.manual || !remotesWizardReady()) box.appendChild(remotesAddRow());
     if (remotesWizardReady()) {
-      const link = el('button.s2rlink', { text: w.manual ? 'свернуть ручное добавление' : 'узел уже стоит — добавить вручную' });
-      link.addEventListener('click', () => { w.manual = !w.manual; repaintRemoteWiz(); });
-      link.disabled = running;
+      const link = el('button.s2rlink', { text: w.manual ? 'Свернуть ручное добавление' : 'Jarvis уже установлен — добавить вручную' });
+      link.addEventListener('click', () => { w.manual = !w.manual; repaintRemoteWiz(); }); link.disabled = running;
       box.appendChild(el('div.s2rmore', null, [link]));
     }
   }
 
   // форма добавления: имя, ssh-хост, каталог jarvis (по умолчанию ~/.jarvis)
   function remotesAddRow() {
-    const mk = (ph, val) => el('input.s2-secret', {
-      type: 'text', placeholder: ph, autocomplete: 'off', spellcheck: 'false', value: val || '',
-    });
-    const nameIn = mk('имя · vps');
-    const hostIn = mk('ssh-хост · user@адрес');
-    const dirIn = mk('~/.jarvis');
-    const err = el('div.s2err', { style: 'display:none' });
-    const showErr = (t) => { err.textContent = t || ''; err.style.display = t ? '' : 'none'; };
+    const w = remoteWiz;
+    const draft = w.manualDraft || (w.manualDraft = { name: w.name, host: w.host, dir: w.dir });
+    const mk = (ph, key, label) => {
+      const input = el('input.s2-secret', { type: 'text', placeholder: ph, autocomplete: 'off', spellcheck: 'false', value: draft[key] || '', 'aria-label': label });
+      input.disabled = w.manualSaving;
+      input.addEventListener('input', () => { draft[key] = input.value; }); return input;
+    };
+    const nameIn = mk('имя · vps', 'name', 'Имя установленного узла');
+    const hostIn = mk('ssh-хост · user@адрес', 'host', 'Адрес установленного узла');
+    const dirIn = mk('~/.jarvis', 'dir', 'Каталог установленного узла');
+    const err = el('div.s2err', { style: w.manualError ? '' : 'display:none', text: remoteDisplayText(w.manualError), role: 'alert' });
+    const showErr = t => { w.manualError = t || ''; err.textContent = t || ''; err.style.display = t ? '' : 'none'; };
 
     const add = button('Добавить', async (b) => {
-      const name = (nameIn.value || '').trim();
-      const sshHost = (hostIn.value || '').trim();
-      const jarvisDir = (dirIn.value || '').trim() || '~/.jarvis';
+      if (w.manualSaving) return;
+      const name = (draft.name || '').trim();
+      const sshHost = (draft.host || '').trim();
+      const jarvisDir = (draft.dir || '').trim() || '~/.jarvis';
       if (!name || !sshHost) { showErr('Нужны имя и ssh-хост — остальное можно оставить как есть.'); return; }
+      if (w.transport === 'teleport' && (!teleportProfile() || !teleportLogins().includes(sshHost.split('@')[0]))) { showErr('Войди в Teleport и укажи разрешённого SSH-пользователя перед @.'); return; }
       showErr(null);
-      b.disabled = true; b.textContent = 'Добавляю…';
-      const res = await safe(() => window.jarvis.remotesAdd({ name, sshHost, jarvisDir }), null);
-      b.disabled = false; b.textContent = 'Добавить';
-      if (res && res.ok) { nameIn.value = ''; hostIn.value = ''; dirIn.value = ''; remoteWizReset(); reRenderPane('remotes'); return; }
-      showErr((res && res.error) || 'не удалось добавить узел');
+      const connection = remoteConnection(w), identity = JSON.stringify(connection);
+      w.manualSaving = true; repaintRemoteWiz();
+      const res = await safe(() => window.jarvis.remotesAdd({ ...connection, name, sshHost, jarvisDir }), null);
+      if (w.manualDraft !== draft) return;
+      if (JSON.stringify(remoteConnection(w)) !== identity) { w.manualSaving = false; w.manualError = 'Подключение изменилось во время сохранения. Проверь список машин.'; repaintRemoteWiz(); return; }
+      w.manualSaving = false;
+      if (res && res.ok) { remoteWizReset(); w.connectedName = name; w.flash = 'Машина «' + name + '» добавлена.'; reRenderPane('remotes'); return; }
+      w.manualError = (res && res.error) || 'Не удалось добавить узел'; repaintRemoteWiz();
     }, 'sm primary');
+    add.disabled = w.manualSaving; if (w.manualSaving) add.textContent = 'Добавляем…';
 
     for (const i of [nameIn, hostIn, dirIn]) {
       i.addEventListener('keydown', (e) => { if (e.key === 'Enter') add.click(); });
@@ -2480,7 +2858,7 @@
         el('div.dt', { text: 'Узел уже стоит' }),
         el('div.dd', { text: 'Ставили через jarvis-setup remote add — тогда установка не нужна, узел надо просто '
           + 'прописать. Имя — как звать его в списке сессий, хост — то же, что пишешь в ssh, каталог — где живёт jarvis-node.' }),
-        el('div.s2form', null, [nameIn, hostIn, dirIn]),
+        el('div.s2raccess-grid', null, [remoteField('Имя', nameIn), remoteField('Адрес', hostIn), remoteField('Каталог Jarvis', dirIn)]),
         err,
         hint,
       ]),
@@ -2488,38 +2866,223 @@
     ]);
   }
 
+  function vmCard(info, error) {
+    const section = el('section.s2-vm-area', { 'aria-label': 'Виртуальные машины' });
+    section.appendChild(el('div.s2-machine-head', null, [
+      el('div.dsection', { text: 'Виртуальные машины' }),
+      button('Обновить VM', () => reRenderPane('remotes'), 'sm'),
+    ]));
+    const group = el('div.dgroup.s2-vm-list');
+    section.appendChild(group);
+    if (error || !info || info.ok === false) {
+      group.appendChild(drow('Не удалось проверить VM', (error ? error.message || String(error) : info?.error) || 'Управление VM недоступно в этой сборке.', el('span.s2-vm-status', { text: 'Нет данных', 'data-state': 'unknown' })));
+      return section;
+    }
+    if (!info.available) {
+      group.appendChild(drow('agent-vm не найден',
+        'Установи agent-vm для локальных Linux-окружений.',
+        button('Как установить', () => required(() => window.jarvis.openUrl('https://github.com/MikD1/agent-vm')), 'sm')));
+      if (info.error) group.appendChild(drow('Проверка VM', info.error, []));
+      return section;
+    }
+    const generation = info.generation === 'modern'
+      ? 'Одна VM может содержать несколько подключённых проектов. Их папки задаются в конфигурации этой VM.'
+      : info.generation === 'legacy'
+        ? 'В этой версии отдельная VM привязана к проекту. Более новые версии поддерживают несколько проектов в одной VM.'
+        : 'Версия CLI не распознана. Доступны только действия, которые подтвердил адаптер.';
+    if (info.error) group.appendChild(el('div.s2-vm-warning', { text: info.error, role: 'status' }));
+    const vms = Array.isArray(info.vms) ? info.vms : [];
+    for (const vm of vms) {
+      const projects = Array.isArray(vm.projects) ? vm.projects : [];
+      const status = { running: 'Работает', stopped: 'Остановлена', missing: 'Не найдена', unknown: 'Статус неизвестен' }[vm.status] || 'Статус неизвестен';
+      const controls = el('div.s2-machine-actions');
+      const run = (command, label) => button(label, async b => {
+        b.disabled = true; b.textContent = command === 'start' ? 'Запускаем…' : command === 'stop' ? 'Останавливаем…' : 'Открываем…';
+        await required(() => window.jarvis.vmAction(vm.name, command));
+        if (command === 'open-config') { b.disabled = false; b.textContent = label; }
+        else await reRenderPane('remotes');
+      }, command === 'start' && !vm.connection?.canConnect ? 'sm primary' : 'sm');
+      if (vm.status === 'stopped' && vm.capabilities?.start === true) controls.appendChild(run('start', 'Запустить'));
+      if (vm.status === 'running' && vm.capabilities?.stop === true) controls.appendChild(run('stop', 'Остановить'));
+      if (vm.connection?.canConnect) controls.appendChild(button('Подключить к Jarvis', async () => {
+        if (resumeRemoteWork()) return;
+        remoteWizReset(); const c = vm.connection;
+        remoteWiz.host = c.sshHost || ''; remoteWiz.name = c.name || vm.name; remoteWiz.dir = c.jarvisDir || '~/.jarvis';
+        for (const key of ['transport', 'sshConfigFile', 'teleportProxy', 'teleportCluster', 'runAsUser', 'nodeTcpPort']) remoteWiz[key] = c[key] || (key === 'transport' ? 'ssh' : '');
+        machineView.editor = true; await reRenderPane('remotes'); runRemoteProbe();
+      }, 'sm primary'));
+      const copy = projects.length ? 'Проектов: ' + projects.length : 'Без подключённых проектов';
+      const row = drow(vm.name || 'VM без имени', copy, [el('span.s2-vm-status', { text: status, 'data-state': vm.status || 'unknown' }), controls]);
+      row.dataset.vmName = vm.name || '';
+      const grow = row.querySelector('.grow');
+      if (vm.registryStatus === 'unmanaged') grow.appendChild(el('div.s2-vm-meta', { text: 'Эта VM не управляется agent-vm.' }));
+      if (vm.registryStatus === 'orphaned') grow.appendChild(el('div.s2-vm-meta', { text: 'Проверь соответствие конфигурации и VM.' }));
+      const content = [];
+      if (vm.directory) content.push(el('div.s2-vm-mount', null, [el('strong', { text: 'Папка окружения' }), el('div', null, el('code', { text: vm.directory }))]));
+      for (const project of projects) {
+        const mount = el('div.s2-vm-mount', null, [el('strong', { text: project.name || 'Проект' })]);
+        if (project.path) mount.appendChild(el('div', null, el('code', { text: project.path })));
+        if (project.guestPath) mount.appendChild(el('div', { text: 'Внутри VM: ' + project.guestPath }));
+        content.push(mount);
+      }
+      if (vm.configPath) content.push(el('div.s2-vm-mount', null, [el('strong', { text: 'Конфигурация VM' }), el('div', null, el('code', { text: vm.configPath }))]));
+      if (vm.capabilities?.openConfig === true) content.push(el('div.s2-vm-advanced', null, [run('open-config', 'Открыть конфигурацию')]));
+      if (content.length) {
+        const details = settingsDetails('s2-vm-details-' + vm.name, 'Проекты и конфигурация', content);
+        details.classList.add('s2-vm-details'); grow.appendChild(details);
+      }
+      group.appendChild(row);
+    }
+    if (!vms.length) group.appendChild(drow('VM пока нет', 'Создай окружение в agent-vm и обнови список.', []));
+    const environment = settingsDetails('s2-vm-environment', 'О среде agent-vm', [
+      el('div.s2-vm-runtime', null, [
+        el('strong', { text: info.version ? 'Версия ' + info.version : 'Версия неизвестна' }),
+        el('p', { text: generation }),
+        el('p', { text: 'Подключение к Jarvis добавит чаты и уведомления этой VM.' }),
+      ]),
+    ]);
+    section.appendChild(environment);
+    return section;
+  }
+
+  function isolationSettings(settings) {
+    const group = el('div.dgroup');
+    group.appendChild(drow('Отдельная ветка', 'Worktree создаёт отдельную рабочую папку и Git-ветку на выбранной машине. Включается для конкретной задачи в проекте.', []));
+    const docker = drow('Docker', 'Контейнер изолирует инструменты внутри выбранного образа. Включается отдельно для задачи; образ используется при локальном запуске.', []);
+    const image = el('input.s2-secret', { type: 'text', 'aria-label': 'Образ Docker', placeholder: 'registry.example.com/agents/dev:latest', value: settings.launchDockerImage || '', autocomplete: 'off', spellcheck: 'false' });
+    const status = el('span.loadcap', { role: 'status' });
+    const save = button('Сохранить образ', async b => {
+      const value = image.value.trim();
+      if (/\s/.test(value)) throw new Error('Укажи имя образа без пробелов, например registry/team/agent:tag.');
+      b.disabled = true; b.textContent = 'Сохраняем…';
+      await required(() => window.jarvis.setSettings({ launchDockerImage: value }));
+      b.disabled = false; b.textContent = 'Сохранить образ';
+      status.textContent = value ? 'Образ сохранён' : 'Образ не выбран';
+    }, 'sm');
+    image.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); save.click(); } });
+    docker.querySelector('.grow').append(el('div.s2-vm-meta', { text: 'Образ должен содержать нужные CLI и зависимости проекта. Наличие Docker проверяется при старте задачи.' }), image, status);
+    docker.querySelector('.dctl').appendChild(save);
+    group.appendChild(docker);
+    return settingsDetails('s2-task-isolation', 'Изоляция задачи: worktree и Docker', [group]);
+  }
+
+  let closeMachineEditor = null;
   async function renderRemotes(pane) {
-    pane.appendChild(el('div.dtitle', { text: 'Удалённые' }));
-    const ready = remotesApiReady();
-    const _sk = skelGroup(2); pane.appendChild(_sk);
-    // контракт — массив; принимаем и {remotes:[…]}, чтобы форма ответа не роняла вкладку
-    const raw = ready ? await safe(() => window.jarvis.remotesList(), []) : [];
-    _sk.remove();
-    const nodes = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.remotes) ? raw.remotes : []);
-
-    if (nodes.length) {
-      pane.appendChild(el('div.dsection', { text: 'узлы' }));
-      const group = el('div.dgroup');
-      for (const r of nodes) group.appendChild(remoteRow(r || {}));
-      pane.appendChild(group);
-    } else {
-      pane.appendChild(remotesEmptyNote(remotesWizardReady()));
+    pane.classList.add('connections-pane');
+    const header = el('div.connection-page-head');
+    const subtitle = el('p', { text: 'Серверы и рабочие окружения' });
+    const add = button('Добавить машину', () => openEditor(), 'primary');
+    add.prepend(icon('plus'));
+    header.append(el('div', null, [el('h1.dtitle', { text: 'Машины' }), subtitle]));
+    pane.append(header);
+    const ready = remotesApiReady(); add.disabled = true;
+    const skeleton = skelGroup(2); pane.appendChild(skeleton);
+    const [remoteResult, vmResult, settingsResult] = await Promise.allSettled([
+      ready ? required(() => window.jarvis.remotesList()) : Promise.resolve(null),
+      typeof window.jarvis.vmStatus === 'function' ? required(() => window.jarvis.vmStatus()) : Promise.resolve(null),
+      required(() => window.jarvis.getSettings()),
+    ]);
+    if (!pane.isConnected) return;
+    skeleton.remove();
+    const raw = remoteResult.status === 'fulfilled' ? remoteResult.value : null;
+    const nodes = Array.isArray(raw) ? raw : raw?.remotes || [];
+    const vmInfo = vmResult.status === 'fulfilled' ? vmResult.value : null;
+    const vms = Array.isArray(vmInfo?.vms) ? vmInfo.vms : [];
+    const inventory = el('div.connection-inventory');
+    const detail = el('aside.connection-detail', { 'aria-label': 'Выбранная машина' });
+    const workspace = el('div.connection-workspace', null, [inventory, detail]);
+    const tools = el('div.connection-toolbar');
+    const query = el('input', { type: 'search', placeholder: 'Найти машину…', 'aria-label': 'Найти машину', value: machineView.query });
+    tools.append(el('label.connection-search', null, [icon('search'), query]));
+    const refresh = button('Обновить', () => reRenderPane('remotes'), 'sm'); refresh.prepend(icon('refresh-cw')); tools.append(refresh, add);
+    const filters = el('div.connection-filters', { role: 'group', 'aria-label': 'Тип машин' });
+    const filterButtons = [];
+    for (const [value, label, count] of [['all', 'Все', nodes.length + vms.length], ['remote', 'Удалённые', nodes.length], ['local', 'Локальные VM', vms.length]]) {
+      const b = button(label, () => { machineView.filter = value; paintInventory(); }, 'sm');
+      b.append(el('span', { text: String(count), 'aria-hidden': 'true' })); filterButtons.push([value, b]); filters.append(b);
     }
-
-    if (!ready) {
-      // старый бэкенд: методов нет — честно говорим об этом вместо мёртвой формы
-      pane.appendChild(el('div.dgroup', null, [
-        drow('Узлы недоступны', 'Эта сборка Jarvis ещё не умеет удалённые узлы — обнови приложение во вкладке «О программе».', []),
-      ]));
-      return;
+    const grid = el('div.connection-grid', { 'aria-label': 'Машины' });
+    inventory.append(tools, filters, grid);
+    const notices = el('div.connection-inventory-notices'); inventory.append(notices);
+    if (remoteResult.status === 'rejected') notices.append(el('div.connection-alert', { role: 'alert', text: 'Не удалось получить подключения: ' + (remoteResult.reason?.message || remoteResult.reason) }));
+    if (vmResult.status === 'rejected' || vmInfo?.error) notices.append(el('div.connection-alert', { role: 'status', text: vmResult.status === 'rejected' ? String(vmResult.reason?.message || vmResult.reason) : vmInfo.error }));
+    if (!vmInfo?.available && !vmResult.reason) notices.append(el('div.connection-local-note', null, [icon('cube'), el('div', null, [el('strong', { text: 'Локальные VM' }), el('p', { text: 'agent-vm не найден. Удалённые подключения уже доступны.' })]), button('Как установить', () => required(() => window.jarvis.openUrl('https://github.com/MikD1/agent-vm')), 'sm')]));
+    if (settingsResult.status === 'fulfilled') {
+      const preferences = el('div.connection-preferences', null, [isolationSettings(settingsResult.value || {})]); inventory.append(preferences);
     }
-
-    pane.appendChild(el('div.dsection', { text: 'новый узел' }));
-    // мастер целиком живёт в одном контейнере: перерисовываем его сам по себе,
-    // не дёргая список узлов и remotesList() на каждый шаг установки
-    const box = el('div#s2-rwiz');
-    pane.appendChild(el('div.dgroup', null, [box]));
-    paintRemoteWiz(box);
+    const setup = el('section.connection-editor#s2-ssh-setup', { 'aria-label': 'Добавить машину', 'data-escape-owner': '' });
+    const editorTitle = el('h2', { text: 'Новое подключение' });
+    const cancel = button('Отмена', () => closeMachineEditor?.(), 'sm');
+    cancel.dataset.connectionCancel = '';
+    setup.append(el('div.connection-editor-head', null, [el('div', null, [editorTitle, el('p', { text: 'Выбери способ подключения и укажи машину.' })]), cancel]));
+    const box = el('div#s2-rwiz'); setup.append(box); paintRemoteWiz(box);
+    pane.append(workspace, setup);
+    function syncEditor() {
+      setup.open = machineView.editor; setup.hidden = !machineView.editor; workspace.hidden = machineView.editor; add.hidden = machineView.editor;
+      syncRemoteEditorChrome();
+      if (machineView.editor && remoteWiz.transport === 'teleport' && remoteWiz.teleport?.loginPending) refreshTeleportStatus(true);
+    }
+    function openEditor() {
+      machineView.editor = true; repaintRemoteWiz(); syncEditor();
+      (box.querySelector('input:not(:disabled)') || cancel).focus();
+    }
+    closeMachineEditor = () => {
+      if (!setup.isConnected || !machineView.editor || remoteWiz.manualSaving) return false;
+      machineView.editor = false;
+      if (!remoteWiz.install?.running) { resetRemoteProbe(); remoteWiz.formErr = null; }
+      clearTimeout(teleportPollTimer);
+      repaintRemoteWiz(); syncEditor(); paintInventory(); add.focus(); return true;
+    };
+    setup.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); event.stopPropagation(); closeMachineEditor(); }
+    });
+    query.addEventListener('input', () => { machineView.query = query.value; paintInventory(); });
+    const items = [...nodes.map(remote => ({ key: 'remote:' + remote.name, kind: 'remote', value: remote })), ...vms.map(vm => ({ key: 'vm:' + vm.name, kind: 'local', value: vm }))];
+    if (remoteWiz.connectedName && remoteWiz.connectedName !== machineView.notifiedConnection && items.some(item => item.key === 'remote:' + remoteWiz.connectedName)) {
+      machineView.selected = 'remote:' + remoteWiz.connectedName;
+      machineView.notifiedConnection = remoteWiz.connectedName;
+    }
+    if (!items.some(item => item.key === machineView.selected)) machineView.selected = items[0]?.key || '';
+    function paintDetail() {
+      detail.replaceChildren();
+      const item = items.find(item => item.key === machineView.selected);
+      if (!item) {
+        detail.append(el('div.connection-empty-detail', null, [el('span.connection-avatar.large', { 'aria-hidden': 'true' }, icon('server')), el('h2', { text: 'Твои машины — здесь' }), el('p', { text: 'Добавь сервер по SSH или выбери машину в Teleport. Jarvis проверит доступ и найдёт агентов.' }), button('Подключить машину', openEditor, 'primary')])); return;
+      }
+      if (item.kind === 'remote') detail.append(remoteRow(item.value, () => { paintInventory(); paintDetail(); }));
+      else {
+        const vm = item.value;
+        detail.append(el('div.connection-host-head', null, [el('span.connection-avatar.large', { 'data-kind': 'local', 'aria-hidden': 'true' }, icon('cube')), el('div', null, [el('h2', { text: vm.name }), el('p', { text: 'Локальная виртуальная машина' })])]));
+        const card = vmCard({ ...vmInfo, vms: [vm] }, null); detail.append(card);
+        card.querySelector('.s2-machine-head')?.remove();
+      }
+    }
+    function paintInventory() {
+      grid.replaceChildren();
+      for (const [value, b] of filterButtons) b.setAttribute('aria-pressed', String(machineView.filter === value));
+      const needle = machineView.query.trim().toLocaleLowerCase();
+      const matches = items.filter(item => (machineView.filter === 'all' || item.kind === machineView.filter) && [item.value.name, item.value.sshHost, item.value.transport, item.value.teleportCluster].join(' ').toLocaleLowerCase().includes(needle));
+      for (const item of matches) {
+        const value = item.value, remote = item.kind === 'remote';
+        const kind = remote ? value.transport === 'teleport' ? 'teleport' : 'ssh' : 'local';
+        const card = el('button.connection-card', { type: 'button', 'aria-pressed': String(machineView.selected === item.key), 'aria-label': value.name });
+        if (remote) card.dataset.machineName = value.name; else card.dataset.vmName = value.name;
+        const status = remote ? value.connected ? 'На связи' : value.error ? 'Нет связи' : 'Не проверено' : { running: 'Работает', stopped: 'Остановлена', unknown: 'Статус неизвестен', missing: 'Не найдена' }[value.status] || 'Статус неизвестен';
+        const state = remote ? value.connected ? 'connected' : value.error ? 'error' : 'unknown' : value.status;
+        const type = remote ? kind === 'teleport' ? 'Teleport' : 'SSH' : 'Локальная VM';
+        card.append(el('div.connection-card-top', null, [el('span.connection-avatar', { 'data-kind': kind, 'aria-hidden': 'true' }, icon(kind === 'teleport' ? 'shield-check' : kind === 'local' ? 'cube' : 'server')), machineBadge(status, state)]), el('strong', { text: value.name }), el('span.connection-card-address', { text: remote ? machineAddress(value).user ? machineAddress(value).user + ' · ' + type : type : 'Проектов: ' + (value.projects?.length || 0) }), el('span.connection-card-footer', null, [el('span', { text: type }), icon('arrow-right')]));
+        card.addEventListener('click', () => {
+          machineView.selected = item.key; machineView.detail = 'overview'; paintInventory(); paintDetail();
+          [...grid.querySelectorAll('button')].find(b => b.getAttribute('aria-label') === value.name)?.focus();
+          if (typeof matchMedia === 'function' && matchMedia('(max-width: 800px)').matches) detail.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'start' });
+        });
+        grid.append(card);
+      }
+      if (!matches.length) grid.append(el('div.connection-empty-list', null, [icon(needle ? 'search' : 'server'), el('strong', { text: needle ? 'Машины не найдены' : 'Подключений пока нет' }), el('p', { text: needle ? 'Попробуй другое имя или адрес.' : 'Добавь первую машину, чтобы работать с её агентами из Jarvis.' })]));
+      notices.querySelector('.connection-install-resume')?.remove();
+      if (remoteWiz.install?.running || remoteWiz.flash) notices.prepend(el('div.connection-install-resume', null, [el('span', { text: remoteWiz.install?.running ? 'Подготовка «' + remoteWiz.install.name + '» продолжается' : remoteWiz.flash }), button('Открыть', openEditor, 'sm')]));
+    }
+    paintInventory(); paintDetail(); syncEditor(); add.disabled = !ready;
   }
 
   /* 1d. Агенты (agents) — свои CLI помимо claude и codex.
@@ -2530,6 +3093,7 @@
    * спрашивает» и транскрипта у чужого CLI нет — их не выдумываем. */
   async function renderAgents(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Агенты' }));
+    if (window.JarvisInstances) await window.JarvisInstances.render(pane);
     const ready = typeof window.jarvis.agentsList === 'function';
     const _sk = skelGroup(2); pane.appendChild(_sk);
     const res = ready ? await safe(() => window.jarvis.agentsList(), null) : null;
@@ -2542,86 +3106,171 @@
     }
     let list = (res.agents || []).map((a) => ({ ...a }));
     const presets = res.presets || [];
-
-    const note = el('div.dd.s2agents-note', { style: 'display:none' });
-    const paintNote = (text, bad) => {
+    let editingId = null, customId = false, busy = false;
+    const reserved = new Set(['claude', 'codex', 'jarvis', 'tmux', 'sh', 'bash', 'zsh']);
+    const section = el('section.s2-custom-agents', { 'aria-label': 'Другие агенты' });
+    const note = el('p.s2-agent-status', { id: 's2-agent-feedback', role: 'status', 'aria-live': 'polite' });
+    note.hidden = true;
+    const paintNote = (text, bad = false) => {
       note.textContent = text || '';
-      note.style.display = text ? '' : 'none';
-      note.style.color = bad ? 'var(--danger, inherit)' : '';
+      note.hidden = !text;
+      note.dataset.kind = bad ? 'error' : 'success';
+      note.setAttribute('role', bad ? 'alert' : 'status');
+      if (bad && !form.hidden) formTitle.after(note);
+      else if (section.contains(group)) section.insertBefore(note, group);
     };
-
-    const saveAll = async () => {
-      const r = await safe(() => window.jarvis.agentsSave(list), null);
-      if (!r || !r.ok) { paintNote((r && r.error) || 'не сохранилось', true); return false; }
-      if (r.missing && r.missing.length) {
-        paintNote('сохранено; бинарь пока не найден: ' + r.missing.join(', ') + ' — путь можно поправить позже', false);
-      } else {
-        paintNote('сохранено — агент готов к запуску из «Проектов»', false);
-      }
-      return true;
+    const group = el('div.dgroup.s2-agent-list');
+    const form = el('form.s2-agent-form', { 'aria-label': 'Настройка агента', 'aria-describedby': 's2-agent-feedback', 'data-escape-owner': '' });
+    form.hidden = true;
+    const field = (label, name, placeholder, hint) => {
+      const id = 's2-agent-' + name;
+      const control = el('input.s2-secret', { id, name, type: 'text', placeholder, autocomplete: 'off', spellcheck: 'false', 'aria-labelledby': id + '-label' });
+      const wrapper = el('label.s2-field', { for: id }, [
+        el('span.s2-field-label', { id: id + '-label', text: label }), control,
+        hint ? el('span.s2-hint', { id: id + '-hint', text: hint }) : null,
+      ]);
+      if (hint) control.setAttribute('aria-describedby', id + '-hint');
+      return { control, wrapper };
     };
-
-    const group = el('div.dgroup');
-    const paintList = () => {
-      group.textContent = '';
-      if (!list.length) {
-        group.appendChild(drow(
-          'Пока никого',
-          'Добавь свой CLI: кнопка появится в «Проектах», сессия — в списке, ответы — в пану tmux.',
-          [],
-        ));
-      }
-      for (const a of list) {
-        const meta = [a.bin, a.resume ? 'resume: ' + a.resume : 'без возобновления']
-          .filter(Boolean).join(' · ');
-        group.appendChild(drow(a.name || a.id, meta, [
-          button('Удалить', async () => {
-            list = list.filter((x) => x !== a);
-            if (await saveAll()) paintList();
-          }, 'sm'),
-        ]));
-      }
-      pane.insertBefore(group, form);
-    };
-
-    /* форма добавления: пресет заполняет поля, человек правит и сохраняет */
-    const nameIn = el('input.s2-secret', { placeholder: 'Имя (Qwen Code)' });
-    const idIn = el('input.s2-secret', { placeholder: 'id: латиница (qwen)' });
-    const binIn = el('input.s2-secret', { placeholder: 'бинарь: путь или имя в PATH' });
-    const resumeIn = el('input.s2-secret', { placeholder: 'возобновление, например: qwen --resume {sid} (не обязательно)' });
-    const addBtn = button('Добавить агента', async () => {
-      const cand = {
-        id: (idIn.value || '').trim(),
-        name: (nameIn.value || '').trim(),
-        bin: (binIn.value || '').trim(),
-        resume: (resumeIn.value || '').trim(),
-        dangerousFlag: '',
-      };
-      list = list.filter((x) => x.id !== cand.id).concat([cand]);
-      if (await saveAll()) {
-        nameIn.value = idIn.value = binIn.value = resumeIn.value = '';
-        paintList();
-      } else {
-        list = list.filter((x) => x !== cand);
-      }
-    });
-    const chips = el('div.s2agents-chips');
-    for (const pr of presets) {
-      const c = button(pr.name, () => {
-        nameIn.value = pr.name; idIn.value = pr.id; binIn.value = pr.bin; resumeIn.value = pr.resume || '';
-      }, 'sm');
-      chips.appendChild(c);
-    }
-    const form = el('div.dgroup', null, [
-      el('div.dsection', { text: 'добавить' }),
-      chips,
-      nameIn, idIn, binIn, resumeIn,
-      el('div.dd', { text: 'Хуки жизненного цикла настроятся сами: сессия появится в списке при запуске и исчезнет по завершении. Статусов «думает/спрашивает» у чужого CLI нет — Jarvis их не выдумывает.' }),
-      addBtn,
-      note,
+    const nameField = field('Название', 'name', 'Например, Qwen Code');
+    const binField = field('Программа', 'bin', 'qwen или /путь/к/qwen', 'Имя установленного CLI или полный путь к программе.');
+    const idField = field('Идентификатор', 'id', 'qwen', 'Создаётся автоматически. Используется в командах и для связи с чатами.');
+    const resumeField = field('Команда продолжения чата', 'resume', 'qwen --resume {sid}', 'Необязательно. Вставь {sid} на месте номера чата.');
+    const nameIn = nameField.control, binIn = binField.control, idIn = idField.control, resumeIn = resumeField.control;
+    idIn.maxLength = 24;
+    const formTitle = el('h3', { text: 'Новый агент' });
+    const chips = el('div.s2agents-chips', { 'aria-label': 'Готовые варианты' });
+    const advanced = el('details.s2-details.s2-agent-advanced', null, [
+      el('summary', { text: 'Дополнительно' }),
+      el('div.s2-form-grid', null, [idField.wrapper, resumeField.wrapper]),
     ]);
-
-    pane.appendChild(form);
+    const suggestId = () => {
+      if (editingId || customId) return;
+      const bin = binIn.value.trim().split('/').filter(Boolean).pop();
+      let base = (bin || nameIn.value || 'agent').toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || 'agent';
+      if (reserved.has(base)) base = 'external-' + base;
+      base = base.slice(0, 24);
+      let candidate = base, suffix = 2;
+      while (list.some(agent => agent.id === candidate)) {
+        const ending = '-' + suffix++;
+        candidate = base.slice(0, 24 - ending.length) + ending;
+      }
+      idIn.value = candidate;
+    };
+    nameIn.addEventListener('input', suggestId);
+    binIn.addEventListener('input', suggestId);
+    idIn.addEventListener('input', () => { customId = !!idIn.value.trim(); if (!customId) suggestId(); });
+    const clearInvalid = () => { for (const control of form.querySelectorAll('input')) control.removeAttribute('aria-invalid'); };
+    const invalid = (control, message) => {
+      clearInvalid(); control.setAttribute('aria-invalid', 'true');
+      if (advanced.contains(control)) advanced.open = true;
+      paintNote(message, true); control.focus(); return false;
+    };
+    const closeForm = () => {
+      form.hidden = true; editingId = null; paintNote(''); clearInvalid(); addButton.hidden = false; addButton.focus();
+    };
+    const openForm = (agent = null) => {
+      if (busy) return;
+      editingId = agent?.id || null;
+      customId = !!agent;
+      nameIn.value = agent?.name || ''; binIn.value = agent?.bin || '';
+      idIn.value = agent?.id || ''; resumeIn.value = agent?.resume || '';
+      idIn.readOnly = !!agent;
+      formTitle.textContent = agent ? 'Настройка ' + (agent.name || agent.id) : 'Новый агент';
+      saveButton.textContent = agent ? 'Сохранить изменения' : 'Добавить агента';
+      deleteButton.hidden = !agent;
+      chips.hidden = !!agent || !presets.length;
+      advanced.open = false;
+      clearInvalid(); paintNote(''); form.hidden = false; addButton.hidden = true;
+      if (!agent) suggestId();
+      nameIn.focus();
+    };
+    // Commit the in-memory list only after persistence succeeds. A failed
+    // rename, removal or duplicate entry must never erase a working agent.
+    const saveAll = async (next, message = 'Сохранено. Агент доступен в «Проектах».') => {
+      if (busy) return false;
+      busy = true;
+      section.setAttribute('aria-busy', 'true');
+      const controls = [...section.querySelectorAll('button, input')].map(control => [control, control.disabled]);
+      for (const [control] of controls) control.disabled = true;
+      try {
+        const result = await required(() => window.jarvis.agentsSave(next));
+        if (!result?.ok) throw new Error(result?.error || 'Не удалось сохранить агента.');
+        list = next;
+        paintList();
+        closeForm();
+        paintNote(result.missing?.length
+          ? 'Сохранено. Программа не найдена: ' + result.missing.join(', ') + '. Установи её или измени путь.'
+          : message);
+        if (result.missing?.length) note.dataset.kind = 'warning';
+        return true;
+      } catch (error) {
+        paintNote(error?.message || 'Не удалось сохранить. Попробуй ещё раз.', true);
+        return false;
+      } finally {
+        busy = false; section.removeAttribute('aria-busy');
+        for (const [control, disabled] of controls) control.disabled = disabled;
+        if (form.hidden) addButton.focus();
+      }
+    };
+    const saveForm = async () => {
+      if (busy) return;
+      suggestId(); clearInvalid();
+      const name = nameIn.value.trim(), bin = binIn.value.trim(), id = idIn.value.trim(), resume = resumeIn.value.trim();
+      if (!name) return invalid(nameIn, 'Укажи название агента.');
+      if (!bin) return invalid(binIn, 'Укажи программу для запуска.');
+      if (!/^[a-z0-9_-]{1,24}$/.test(id) || reserved.has(id)) return invalid(idIn, 'Выбери свободный идентификатор: до 24 латинских букв, цифр, дефисов или подчёркиваний.');
+      if (list.some(agent => agent.id === id && agent.id !== editingId)) return invalid(idIn, 'Этот идентификатор уже используется. Укажи другой.');
+      if (resume && !resume.includes('{sid}')) return invalid(resumeIn, 'Добавь {sid} в команду продолжения — сюда подставится номер чата.');
+      const previous = list.find(agent => agent.id === editingId);
+      const candidate = { ...(previous || { dangerousFlag: '' }), id: previous?.id || id, name, bin, resume };
+      await saveAll(previous ? list.map(agent => agent.id === editingId ? candidate : agent) : [...list, candidate]);
+    };
+    const addButton = button('Добавить агента', () => openForm(), 'sm');
+    const saveButton = el('button.btn.primary', { type: 'submit', text: 'Добавить агента' });
+    const cancelButton = button('Отмена', closeForm);
+    const deleteButton = button('Удалить агента', () => saveAll(list.filter(agent => agent.id !== editingId), 'Агент удалён из Jarvis.'), 'danger');
+    deleteButton.hidden = true;
+    form.addEventListener('submit', event => { event.preventDefault(); saveForm(); });
+    form.addEventListener('keydown', event => {
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (!busy) closeForm(); }
+    });
+    for (const preset of presets) {
+      chips.appendChild(button(preset.name, () => {
+        nameIn.value = preset.name; binIn.value = preset.bin; resumeIn.value = preset.resume || '';
+        customId = false; suggestId(); clearInvalid(); nameIn.focus();
+      }, 'sm'));
+    }
+    form.append(formTitle, chips,
+      el('div.s2-form-grid', null, [nameField.wrapper, binField.wrapper]),
+      advanced,
+      el('div.s2-form-actions', null, [saveButton, cancelButton, deleteButton]));
+    const paintList = () => {
+      group.replaceChildren();
+      if (!list.length) {
+        group.appendChild(el('p.s2-hint.s2-agent-empty', { text: 'Подключи другой установленный CLI, чтобы запускать его из «Проектов».' }));
+      }
+      for (const agent of list) {
+        const row = drow(agent.name || agent.id, agent.bin || 'Программа не указана', [
+          el('span.s2-agent-kind', { text: 'Терминал' }),
+          button('Изменить', () => openForm(agent), 'sm'),
+        ]);
+        row.dataset.agentId = agent.id;
+        row.querySelector('.dd').classList.add('s2-agent-command');
+        row.querySelector('.dd').title = agent.bin || 'Укажи программу в настройках агента';
+        row.querySelector('button').setAttribute('aria-label', 'Настроить ' + (agent.name || agent.id));
+        group.appendChild(row);
+      }
+    };
+    section.append(
+      el('div.s2-agent-section-head', null, [el('h2.dsection', { text: 'Другие агенты' }), addButton]),
+      group, form, note,
+      el('details.s2-details.s2-agent-capabilities', null, [
+        el('summary', { text: 'Возможности подключения' }),
+        el('p.s2-hint', { text: 'Запуск, просмотр терминала и ответы доступны в Jarvis. Начало и завершение сессии отслеживаются автоматически.' }),
+        el('p.s2-hint', { text: 'История сообщений, расход токенов и вопросы с вариантами ответа требуют отдельной интеграции агента.' }),
+      ]));
+    pane.appendChild(section);
     paintList();
   }
 
@@ -2662,10 +3311,25 @@
         if (!node) break;
         node.textContent = '';
         const fn = RENDERERS[pane];
-        if (fn) { try { await fn(node); } catch (e) {} }
+        if (fn) {
+          try { await fn(node); }
+          catch (e) {
+            for (const skeleton of node.querySelectorAll('.skrow')) skeleton.remove();
+            node.appendChild(el('div.meeting-status.error', { text: 'Не удалось загрузить раздел: ' + String(e), role: 'alert' }));
+            node.appendChild(button('Повторить загрузку', () => reRenderPane(pane), 'sm'));
+          }
+        }
       } while (renderPending[pane]);
     } finally {
       renderingPane[pane] = false;
+      const node = currentRoot?.querySelector('#s2-pane-' + pane);
+      for (const row of node?.querySelectorAll('.drow') || []) {
+        const label = row.querySelector('.dt')?.textContent;
+        if (pane !== 'remotes' && label && !searchIndex.some(entry => entry.pane === pane && entry.label === label)) {
+          searchIndex.push({ pane, label, words: row.querySelector('.dd')?.textContent || '' });
+        }
+      }
+      focusSearchTarget(pane);
     }
   }
 
@@ -2753,7 +3417,7 @@
       window.jarvis.onRemoteInstallStep((s) => {
         const st = remoteWiz.install;
         if (!st || !s) return;
-        st.steps.push({ phase: s.phase || '', state: s.state || 'info', msg: s.msg || '' });
+        st.steps.push({ phase: remoteDisplayText(s.phase), state: s.state || 'info', msg: remoteDisplayText(s.msg) });
         // лог длинной установки не должен расти без границ
         if (st.steps.length > 200) st.steps.splice(0, st.steps.length - 200);
         if (typeof s.pct === 'number') st.pct = s.pct;
@@ -2763,17 +3427,18 @@
     try {
       window.jarvis.onRemoteInstallDone((r) => {
         const st = remoteWiz.install;
-        if (!st) return;
+        if (!st || (r?.name && r.name !== st.name)) return;
         st.running = false;
         if (r && r.ok) {
           // успех: мастер сворачиваем, список перечитываем — узел уже там
           const name = (r && r.name) || st.name;
           remoteWizReset();
-          remoteWiz.flash = 'Узел «' + name + '» установлен и добавлен в список.';
+          remoteWiz.connectedName = name;
+          remoteWiz.flash = 'Машина «' + name + '» подключена.';
           reRenderPane('remotes');
           return;
         }
-        st.error = (r && r.error) || 'установка не удалась — подробности в ~/.jarvis/jarvis.log';
+        st.error = remoteDisplayText(r && r.error) || 'установка не удалась — подробности в ~/.jarvis/jarvis.log';
         repaintRemoteWiz();
       });
     } catch (e) {}
@@ -2782,19 +3447,49 @@
   /* ========================================================================
    * Главная функция: построить весь UI в rootEl.
    * ====================================================================== */
+  function mountSurface(rootEl, pane) {
+    cancelShortcutRecording?.();
+    closeAllSelects(null);
+    clearTimeout(teleportPollTimer);
+    injectStyle();
+    // Shared operation state survives navigation; form DOM belongs to one
+    // mounted surface so callbacks never find duplicate controls in hidden UI.
+    if (currentRoot && currentRoot !== rootEl) currentRoot.replaceChildren();
+    currentRoot = rootEl;
+    activePane = pane;
+    rootEl.replaceChildren();
+    if (!docClickBound) {
+      docClickBound = true;
+      document.addEventListener('click', () => { if (currentRoot) closeAllSelects(null); });
+    }
+    subscribeOnce();
+  }
+
+  function initMachines(rootEl) {
+    if (!rootEl) return;
+    mountSurface(rootEl, 'remotes');
+    const pane = el('div.dpane.on.connections-pane#s2-pane-remotes');
+    rootEl.append(el('div.settings-surface#machines2', null, [el('div.detail.machines-content', null, [pane])]));
+    return reRenderPane('remotes').then(() => {
+      paintSettingsError();
+      if (currentRoot === rootEl && !rootEl.closest('[hidden]') && document.activeElement?.id === 'pageBack') {
+        const target = machineView.editor ? rootEl.querySelector('.connection-editor input:not(:disabled)') : rootEl.querySelector('.connection-search input');
+        target?.focus();
+      }
+    });
+  }
+
   function initSettings2(rootEl) {
     if (!rootEl) return;
-    injectStyle();
-    currentRoot = rootEl;
-    rootEl.textContent = ''; // полная очистка → ре-init не плодит дубли
+    mountSurface(rootEl, lastSettingsPane);
 
-    const win = el('div.swin2#settings2');
+    const win = el('div.swin2.settings-surface#settings2');
 
     // ── Сайдбар ──
     const sidebar = el('div.sidebar');
     sidebar.appendChild(el('div.ssearch', null, [
       el('span.si', null, icon('search')),
-      el('input', { placeholder: 'Поиск настроек…' }), // визуальный no-op (по спеке)
+      el('input#settingsSearch', { placeholder: 'Найти настройку…', 'aria-label': 'Поиск настроек' }),
     ]));
     sidebar.appendChild(el('div.saccount', null, [
       el('span.ava', { text: 'J' }),
@@ -2809,7 +3504,8 @@
     const navItems = {};
     for (const n of NAV) {
       if (n.sep) { snav.appendChild(el('div.sep')); continue; }
-      const item = el('div.item' + (n.pane === activePane ? '.sel' : ''), { 'data-pane': n.pane }, [
+      if (n.group) snav.appendChild(el('div.grp', { text: n.group }));
+      const item = el('button.item' + (n.pane === activePane ? '.sel' : ''), { 'data-pane': n.pane, type: 'button' }, [
         el('span.ic.' + n.ic, null, icon(n.icon)),
         document.createTextNode(n.label),
       ]);
@@ -2817,11 +3513,69 @@
       navItems[n.pane] = item;
       snav.appendChild(item);
     }
+    snav.addEventListener('keydown', event => {
+      if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+      const items = Object.values(navItems).filter(item => !item.hidden);
+      const index = items.indexOf(event.target.closest('.item'));
+      if (index < 0) return;
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+        : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+      event.preventDefault(); event.stopPropagation(); items[next].focus(); items[next].click();
+    });
+    const searchEmpty = el('div.settings-search-empty', { text: 'Ничего не найдено. Попробуй «микрофон», «клавиши» или «Claude».' });
+    searchEmpty.hidden = true;
     sidebar.appendChild(snav);
+    sidebar.appendChild(searchEmpty);
+    const search = sidebar.querySelector('#settingsSearch');
+    function searchNav() {
+      const words = search.value.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
+      const matches = words.length ? searchIndex.filter(entry => words.every(word =>
+        (entry.label + ' ' + entry.words + ' ' + NAV.find(n => n.pane === entry.pane).label).toLocaleLowerCase().includes(word))) : [];
+      let count = 0;
+      for (const n of NAV) {
+        if (n.sep) continue;
+        const match = !words.length || matches.some(entry => entry.pane === n.pane);
+        navItems[n.pane].hidden = !match; if (match) count++;
+      }
+      for (const sep of snav.querySelectorAll('.sep, .grp')) sep.hidden = words.length > 0;
+      searchEmpty.hidden = count > 0;
+      searchResults.replaceChildren(); searchResults.hidden = !words.length;
+      for (const node of Object.values(paneNodes)) node.hidden = words.length > 0;
+      currentRoot.querySelector('#settings-save-error')?.remove();
+      if (!words.length) { paintSettingsError(); return; }
+      searchResults.appendChild(el('div.dtitle', { text: 'Настройки' }));
+      searchResults.appendChild(el('p.settings-result-count', { role: 'status', text: matches.length ? 'Найдено: ' + matches.length : 'Нет подходящих настроек. Попробуйте другой запрос.' }));
+      for (const entry of matches) {
+        searchResults.appendChild(el('button.settings-result', { type: 'button', onclick: () => selectPane(entry.pane, entry.label) }, [
+          el('strong', { text: entry.label }), el('span', { text: NAV.find(n => n.pane === entry.pane).label }),
+        ]));
+      }
+    }
+    search.addEventListener('input', searchNav);
+    search.addEventListener('keydown', e => {
+      if (e.isComposing) return;
+      if (e.key === 'Escape' && search.value) { e.preventDefault(); e.stopPropagation(); search.value = ''; searchNav(); }
+      if (e.key === 'Enter' || e.key === 'ArrowDown') {
+        const first = searchResults.querySelector('button') || Object.values(navItems).find(n => !n.hidden);
+        if (first) { e.preventDefault(); if (e.key === 'Enter') first.click(); first.focus(); }
+      }
+    });
     win.appendChild(sidebar);
 
     // ── Детальная колонка ──
     const detail = el('div.detail');
+    const searchResults = el('div.settings-results', { 'aria-label': 'Результаты поиска настроек' });
+    searchResults.hidden = true;
+    searchResults.addEventListener('keydown', event => {
+      if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key) || event.isComposing) return;
+      const rows = [...searchResults.querySelectorAll('button')], index = rows.indexOf(event.target);
+      if (index < 0) return;
+      event.preventDefault(); event.stopPropagation();
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1 : Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
+      rows[next].focus(); rows[next].scrollIntoView?.({ block: 'nearest' });
+    });
+    detail.appendChild(searchResults);
     // (стрелки ‹ › убраны — навигация только по сайдбару)
     // по одной панели-контейнеру на вкладку; активная получит .on
     const paneNodes = {};
@@ -2835,8 +3589,11 @@
     rootEl.appendChild(win);
 
     // переключение панели сайдбара (ленивый рендер при первом открытии)
-    function selectPane(pane) {
-      activePane = pane;
+    function selectPane(pane, label) {
+      activePane = lastSettingsPane = pane;
+      pendingSettingFocus = label ? { pane, label } : null;
+      if (search.value) { search.value = ''; searchNav(); }
+      paintSettingsError();
       for (const k in navItems) navItems[k].classList.toggle('sel', k === pane);
       for (const k in paneNodes) paneNodes[k].classList.toggle('on', k === pane);
       closeAllSelects(null);
@@ -2844,19 +3601,20 @@
       // через reRenderPane (сериализованный) — чтобы прямой рендер не гонялся с
       // live-перерисовкой (onAudioState и т.п.) и не задваивал контент вкладки.
       if (node && !node.childNodes.length) reRenderPane(pane);
+      else focusSearchTarget(pane);
+      if (pane === 'remotes') resumeTeleportPolling();
     }
-
-    // глобальный «клик мимо» закрывает открытые селекты (ставим один раз)
-    if (!docClickBound) {
-      docClickBound = true;
-      document.addEventListener('click', () => { if (currentRoot) closeAllSelects(null); });
-    }
-
-    subscribeOnce();
+    window.jarvisOpenSettingsPane = pane => {
+      if (pane === 'remotes') { openMachines(); return; }
+      if (paneNodes[pane] && currentRoot === rootEl && win.isConnected) selectPane(pane);
+      else if (Object.prototype.hasOwnProperty.call(RENDERERS, pane)) lastSettingsPane = pane;
+    };
 
     // отрисовать активную панель сразу (через сериализованный reRenderPane)
     reRenderPane(activePane);
+    paintSettingsError();
   }
 
   window.initSettings2 = initSettings2;
+  window.initMachines = initMachines;
 })();

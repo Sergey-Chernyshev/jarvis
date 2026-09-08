@@ -35,6 +35,9 @@ function makeDom() {
       },
       appendChild(k) { node.children.push(k); k.parent = node; return k; },
       addEventListener(ev, fn) { (node.listeners[ev] ||= []).push(fn); },
+      getAttribute(k) { return node.attrs[k] ?? null; },
+      removeAttribute(k) { delete node.attrs[k]; },
+      contains(other) { return node === other || node.children.some(c => c.contains?.(other)); },
       setAttribute(k, v) {
         if (!/^[A-Za-z_:][-A-Za-z0-9_:.]*$/.test(k)) {
           throw new Error(`InvalidCharacterError: имя атрибута «${k}» недопустимо`);
@@ -162,7 +165,7 @@ const CONSOLE = {
 test('пульт: очередь, гейт кнопки «влить», конфликт и горячие файлы', async () => {
   const { root, calls } = await load(CONSOLE);
   const text = textOf(root);
-  assert.ok(text.includes('связка · клевер-релиз'), 'шапки нет');
+  assert.ok(text.includes('команда · клевер-релиз'), 'шапки нет');
   assert.ok(text.includes('верстает экран логина'), 'живой статус руки не показан');
   assert.ok(text.includes('чинит сам, попытка 2'), 'конфликт не рассказан человеческим языком');
   assert.ok(text.includes('shared/types.ts'), 'горячего файла нет');
@@ -197,7 +200,7 @@ test('машина выбирается из списка, директории 
   const { root } = await load({ bundles: [] });
   const text = textOf(root);
   assert.ok(text.includes('директория'), 'поля директории нет');
-  assert.ok(text.includes('создам и инициализирую сам'), 'обещание автоинициализации пропало');
+  assert.ok(text.includes('Создадим папку и Git-репозиторий'), 'обещание автоинициализации пропало');
   const sel = find(root, (n) => n.tag === 'select')[0];
   assert.ok(sel, 'выбора машины нет — снова поле по памяти');
   const opts = textOf(sel);
@@ -249,4 +252,90 @@ test('известный проект узла выбирается одним �
   chip.listeners.click[0]();
   const dirInput = find(root, (n) => n.tag === 'input' && n.value === '/srv/app')[0];
   assert.ok(dirInput, 'клик по известному проекту не заполнил директорию');
+});
+
+test('transport failure preserves the new hand task and explains the failure', async () => {
+  const { root, window } = await load(CONSOLE);
+  const task = find(root, n => n.tag === 'textarea')[0];
+  task.value = 'Сохранить мою задачу'; await task.listeners.input[0]({ target: task });
+  window.jarvis.bundleAddHand = async () => { throw new Error('Узел не отвечает'); };
+  await find(root, n => n.textContent === '+ исполнитель')[0].listeners.click[0]({});
+  assert.equal(task.value, 'Сохранить мою задачу');
+  assert.match(textOf(root), /Узел не отвечает/);
+});
+
+
+const fieldInput = (root, label) => {
+  const field = find(root, n => n.classList.contains('bd-field') &&
+    n.children.some(c => c.classList.contains('bd-label') && c.textContent === label))[0];
+  assert.ok(field, `Missing field ${label}`);
+  return find(field, n => n.tag === 'input')[0];
+};
+const fill = async (input, value) => {
+  input.value = value;
+  await input.listeners.input[0]({ target: input });
+};
+
+test('changing machine clears the selected directory, preserves the draft, and requires a new host path', async () => {
+  const { root, calls } = await load({ bundles: [] });
+  const name = fieldInput(root, 'Название команды');
+  const amount = fieldInput(root, 'Ориентир расхода');
+  const directory = fieldInput(root, 'директория');
+  const task = find(root, n => n.tag === 'textarea')[0];
+  await fill(name, 'Подготовка релиза');
+  await fill(amount, '42000');
+  await fill(task, 'Добавь проверки входа');
+  const [machine, agent] = find(root, n => n.tag === 'select');
+  agent.value = 'codex'; agent.listeners.change[0]();
+  const picker = find(root, n => n.textContent === 'выбрать…')[0];
+  await picker.listeners.click[0]();
+  await new Promise(r => setTimeout(r, 0));
+  await find(root, n => n.classList.contains('lp-chip') && n.textContent === 'jarvis')[0].listeners.click[0]();
+  assert.equal(directory.value, '/home/bob/jarvis');
+
+  machine.value = 'terminalka'; machine.listeners.change[0]();
+  assert.equal(directory.value, '', 'a local path must not silently become a remote path');
+  assert.equal(name.value, 'Подготовка релиза');
+  assert.equal(amount.value, '42000');
+  assert.equal(task.value, 'Добавь проверки входа');
+  assert.equal(agent.value, 'codex');
+  const start = find(root, n => n.textContent === 'Запустить 1 чат')[0];
+  await start.listeners.click[0]();
+  assert.equal(calls.length, 0, 'no save/start may run with an invalidated directory');
+  assert.match(textOf(root), /Выберите директорию.*terminalka/);
+
+  await picker.listeners.click[0]();
+  await new Promise(r => setTimeout(r, 0));
+  await find(root, n => n.classList.contains('lp-chip') && n.textContent === 'app')[0].listeners.click[0]();
+  machine.listeners.change[0]();
+  assert.equal(directory.value, '/srv/app', 'unchanged machine must keep its path');
+  await start.listeners.click[0]();
+  const saved = calls.find(c => c[0] === 'save')[1];
+  assert.equal(saved.machine, 'terminalka');
+  assert.equal(saved.dir, '/srv/app');
+  assert.equal(saved.agent, 'codex');
+  assert.equal(saved.name, 'Подготовка релиза');
+  assert.equal(saved.budgetTokens, 42000);
+  assert.equal(saved.hands[0].task, 'Добавь проверки входа');
+  assert.deepEqual(saved.gates, DRAFT.gates);
+  assert.deepEqual(calls.find(c => c[0] === 'start'), ['start', 'b1']);
+});
+
+test('legacy drafts use Claude and explicitly label advisory token units', async () => {
+  const { root, calls } = await load({ bundles: [] });
+  const agent = find(root, n => n.tag === 'select' && n.attrs['aria-label'] === 'Агент')[0];
+  assert.equal(agent.value, 'claude');
+  assert.match(textOf(agent), /Claude Code.*Codex/);
+  assert.match(textOf(root), /проверим CLI на выбранной машине/);
+  assert.match(textOf(root), /Токенов на исполнителя. Не ограничивает работу/);
+  await fill(fieldInput(root, 'директория'), '/repo');
+  await fill(find(root, n => n.tag === 'textarea')[0], 'Задача');
+  await find(root, n => n.textContent === 'Запустить 1 чат')[0].listeners.click[0]();
+  assert.equal(calls.find(c => c[0] === 'save')[1].agent, 'claude');
+
+  const view = await load(CONSOLE);
+  const meta = find(view.root, n => n.classList.contains('bd-card-meta'))[0];
+  assert.match(textOf(meta), /Расход: 21\s000 токенов/);
+  assert.match(textOf(meta), /Ориентир: 60\s000 токенов/);
+  assert.ok(!textOf(meta).includes(' / '), 'an advisory estimate must not look like a hard token quota');
 });

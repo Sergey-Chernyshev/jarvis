@@ -17,11 +17,15 @@
   const input = document.getElementById('input');
   const sendBtn = document.getElementById('send');
   const sub = document.getElementById('sub');
+  const provider = document.getElementById('provider');
   const hint = msgs.querySelector('.hint');
 
   let sessionId = null; // для многоходового диалога (--resume)
   let curBubble = null; // текущий стриминговый пузырь ассистента
   let busy = false;
+  let ready = false;
+  let hasProvider = false;
+  let sessionProvider = null;
 
   const el = (cls, text) => {
     const d = document.createElement('div');
@@ -47,21 +51,26 @@
 
   function setBusy(v) {
     busy = v;
-    sendBtn.disabled = v;
+    sendBtn.disabled = v || !ready || !hasProvider;
+    provider.disabled = v || !ready;
     sendBtn.textContent = v ? '…' : '⏎';
-    sub.textContent = v ? 'думает…' : 'готов';
+    sub.textContent = v ? 'думает…' : (!ready ? 'подключение…' : (hasProvider ? 'готов' : 'CLI не найден'));
   }
 
   async function send() {
     const text = input.value.trim();
-    if (!text || busy) return;
+    if (!text || busy || !ready || !hasProvider) return;
     input.value = '';
     input.style.height = 'auto';
     addUser(text);
     setBusy(true);
     curBubble = null;
     try {
-      await invoke('agent_send', { message: text, sessionId });
+      const result = await invoke('agent_send', {
+        message: text, sessionId, provider: sessionProvider || provider.value,
+      });
+      if (result?.ok === false) throw new Error(result.error || 'Не удалось запустить агента');
+      if (result?.provider) sessionProvider = result.provider;
     } catch (e) {
       addErr('Ошибка запуска агента: ' + e);
       setBusy(false);
@@ -70,7 +79,21 @@
 
   sendBtn.addEventListener('click', send);
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    if (!e.isComposing && e.keyCode !== 229 && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+
+  provider.addEventListener('change', async () => {
+    // Claude and Codex session IDs are not interchangeable.
+    sessionId = null;
+    sessionProvider = null;
+    curBubble = null;
+    hasProvider = !provider.selectedOptions[0]?.disabled;
+    setBusy(false);
+    if (msgs.querySelector('.msg')) addRow('tool', el('chip', 'Новый диалог · ' + provider.selectedOptions[0].textContent));
+    try {
+      const result = await invoke('settings_set', { patch: { agentProvider: provider.value } });
+      if (result?.ok === false) throw new Error(result.error || 'Не удалось сохранить выбор');
+    } catch (error) { addErr('Выбор действует в этом окне, но не сохранён: ' + error); }
   });
   // авто-рост поля ввода
   input.addEventListener('input', () => {
@@ -79,10 +102,11 @@
   });
 
   // поток ответа агента
-  listen('agent:event', (e) => {
+  const eventsReady = listen('agent:event', (e) => {
     const ev = e.payload || {};
     switch (ev.type) {
       case 'init':
+        if (ev.session_id) sessionId = ev.session_id;
         // агент инициализирован (ev.tools — гранто-фильтрованный набор)
         break;
       case 'delta':
@@ -92,6 +116,12 @@
         break;
       case 'tool_use':
         addTool(ev.name || '?');
+        break;
+      case 'failed':
+        if (ev.session_id) sessionId = ev.session_id;
+        addErr(ev.message || 'Агент завершился без ответа. Попробуй ещё раз.');
+        setBusy(false);
+        curBubble = null;
         break;
       case 'done':
         if (ev.session_id) sessionId = ev.session_id;
@@ -104,7 +134,7 @@
   });
 
   // карточка подтверждения side-effect (PanelConfirmer)
-  listen('agent:confirm', (e) => {
+  const confirmsReady = listen('agent:confirm', (e) => {
     const c = e.payload || {};
     const cd = c.card || {};
     clearHint();
@@ -128,12 +158,25 @@
     if (c.provenance === 'untrusted') box.appendChild(el('cwarn', '⚠ данные из недоверенного источника'));
 
     const btns = el('cbtns');
-    const yes = el('cbtn yes', 'Разрешить');
-    const no = el('cbtn no', 'Отклонить');
-    const decide = (approved) => {
-      invoke('agent_confirm', { nonce: c.nonce, approved });
-      btns.remove();
-      box.appendChild(el('cresult', approved ? '✓ разрешено' : '✕ отклонено'));
+    const choice = (cls, text) => {
+      const button = document.createElement('button');
+      button.type = 'button'; button.className = 'cbtn ' + cls; button.textContent = text;
+      return button;
+    };
+    const yes = choice('yes', 'Разрешить');
+    const no = choice('no', 'Отклонить');
+    const decide = async (approved) => {
+      if (yes.disabled) return;
+      yes.disabled = no.disabled = true;
+      try {
+        const result = await invoke('agent_confirm', { nonce: c.nonce, approved });
+        btns.remove();
+        box.appendChild(el('cresult', result?.ok === false
+          ? 'Запрос уже завершён или истёк' : (approved ? '✓ разрешено' : '✕ отклонено')));
+      } catch (error) {
+        yes.disabled = no.disabled = false;
+        box.appendChild(el('cresult', 'Не удалось отправить решение: ' + error));
+      }
       scroll();
     };
     yes.addEventListener('click', () => decide(true));
@@ -147,5 +190,19 @@
     scroll();
   });
 
+  setBusy(false);
+  Promise.all([eventsReady, confirmsReady, invoke('agent_hosts')]).then(([, , hosts]) => {
+    if (hosts?.ok === false) throw new Error(hosts.error || 'Не удалось проверить CLI');
+    for (const option of provider.options) {
+      const host = hosts.providers?.find((item) => item.id === option.value);
+      option.disabled = !host?.available;
+      option.textContent = (host?.label || option.textContent) + (host?.available ? '' : ' · CLI не найден');
+    }
+    const selected = [...provider.options].find((option) => option.value === hosts.selected);
+    provider.value = selected && !selected.disabled ? hosts.selected : 'auto';
+    hasProvider = !provider.selectedOptions[0]?.disabled;
+    ready = true;
+    setBusy(false);
+  }).catch((error) => { addErr('Не удалось подготовить агента: ' + error); sub.textContent = 'ошибка подключения'; });
   input.focus();
 })();

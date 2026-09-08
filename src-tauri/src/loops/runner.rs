@@ -18,13 +18,40 @@ pub struct AgentOut {
     pub failed: bool,
 }
 
+/// Each invocation owns a fresh process group. Dropping a timed out or
+/// cancelled future terminates the shell AND its agent/tool descendants.
+struct ProcessGroup(u32);
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        unsafe {
+            libc::kill(-(self.0 as i32), libc::SIGKILL);
+        }
+    }
+}
+
+async fn output(
+    cmd: &mut tokio::process::Command,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    cmd.process_group(0).kill_on_drop(true);
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("не запустилась команда: {e}"))?;
+    let _group = ProcessGroup(child.id().ok_or("у процесса нет PID")?);
+    tokio::time::timeout(timeout, child.wait_with_output())
+        .await
+        .map_err(|_| format!("не уложилось в {} с", timeout.as_secs()))?
+        .map_err(|e| format!("не прочитал ответ команды: {e}"))
+}
+
 /// Запустить команду и получить (код, вывод).
 ///
 /// stderr сливаем в stdout: у гейта диагностика почти всегда именно там, а
 /// человеку в экране итерации нужен весь вывод, а не половина.
 pub async fn shell(cwd: &Path, command: &str, timeout: Duration) -> (i32, String) {
     let mut cmd = tokio::process::Command::new("/bin/sh");
-    cmd.arg("-lc")
+    // Inherit the daemon PATH; login profiles can print diagnostics or mutate it.
+    cmd.arg("-c")
         .arg(command)
         .current_dir(cwd)
         .env("JARVIS_IGNORE", "1")
@@ -32,8 +59,9 @@ pub async fn shell(cwd: &Path, command: &str, timeout: Duration) -> (i32, String
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let Ok(Ok(out)) = tokio::time::timeout(timeout, cmd.output()).await else {
-        return (-1, format!("не уложилось в {} с", timeout.as_secs()));
+    let out = match output(&mut cmd, timeout).await {
+        Ok(out) => out,
+        Err(why) => return (-1, why),
     };
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     let err = String::from_utf8_lossy(&out.stderr);
@@ -55,7 +83,11 @@ pub fn tail(text: &str, lines: usize) -> String {
 /// Радиус поражения — ветка: агент правит файлы часами без надзора, и делать
 /// это в рабочем дереве человека значит однажды застать его посреди своей же
 /// несохранённой правки.
-pub async fn make_sandbox(item: &Loop, run_n: u32) -> Result<(PathBuf, String), String> {
+pub async fn make_sandbox(
+    root: &Path,
+    item: &Loop,
+    run_n: u32,
+) -> Result<(PathBuf, String), String> {
     let repo = PathBuf::from(&item.sandbox.repo);
     if !repo.join(".git").exists() {
         return Err(format!("{} — не репозиторий git", repo.display()));
@@ -64,12 +96,18 @@ pub async fn make_sandbox(item: &Loop, run_n: u32) -> Result<(PathBuf, String), 
     if !item.sandbox.worktree {
         return Ok((repo, branch));
     }
-    let dir = crate::util::jarvis_dir()
-        .join("worktrees")
-        .join(format!("{}-{}", super::model::slug(&item.name), run_n));
+    let identity: String = item
+        .id
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let dir = root.join("worktrees").join(format!(
+        "{}-{identity}-{run_n}",
+        super::model::slug(&item.name)
+    ));
     if dir.exists() {
-        // Тот же запуск поднимают второй раз — переиспользуем, а не падаем:
-        // после перезапуска приложения продолжить работу важнее чистоты.
+        validate_sandbox(item, &dir, &branch).await?;
         return Ok((dir, branch));
     }
     std::fs::create_dir_all(dir.parent().unwrap_or(&dir)).map_err(|e| e.to_string())?;
@@ -85,13 +123,38 @@ pub async fn make_sandbox(item: &Loop, run_n: u32) -> Result<(PathBuf, String), 
     Ok((dir, branch))
 }
 
+/// Refuse unrelated/replaced folders, including an old worktree from another loop.
+pub async fn validate_sandbox(item: &Loop, dir: &Path, branch: &str) -> Result<(), String> {
+    let common = "git rev-parse --path-format=absolute --git-common-dir";
+    let (a, repo) = shell(
+        Path::new(&item.sandbox.repo),
+        common,
+        Duration::from_secs(30),
+    )
+    .await;
+    let (b, wt) = shell(dir, common, Duration::from_secs(30)).await;
+    let (c, actual) = shell(dir, "git branch --show-current", Duration::from_secs(30)).await;
+    if a != 0
+        || b != 0
+        || c != 0
+        || repo.trim() != wt.trim()
+        || (item.sandbox.worktree && actual.trim() != branch)
+    {
+        return Err("песочница больше не принадлежит этому репозиторию и ветке".into());
+    }
+    Ok(())
+}
+
 /// Убрать песочницу. Ветку НЕ трогаем: в ней работа, и «убрал за собой» здесь
 /// означало бы «стёр результат ночи».
 pub async fn drop_sandbox(item: &Loop, dir: &Path) {
     if !item.sandbox.worktree || dir == Path::new(&item.sandbox.repo) {
         return;
     }
-    let cmd = format!("git worktree remove --force {}", crate::util::shell_quote(&dir.to_string_lossy()));
+    let cmd = format!(
+        "git worktree remove --force {}",
+        crate::util::shell_quote(&dir.to_string_lossy())
+    );
     let _ = shell(Path::new(&item.sandbox.repo), &cmd, Duration::from_secs(60)).await;
 }
 
@@ -107,10 +170,14 @@ pub async fn run_agent(
     timeout: Duration,
 ) -> AgentOut {
     if agent == "codex" {
-        return run_codex(cwd, prompt, timeout).await;
+        return run_codex(cwd, prompt, model, timeout).await;
     }
     let Some(bin) = crate::claude_bin::resolve_claude_bin() else {
-        return AgentOut { failed: true, text: "claude не найден".into(), ..Default::default() };
+        return AgentOut {
+            failed: true,
+            text: "claude не найден".into(),
+            ..Default::default()
+        };
     };
     let mut cmd = tokio::process::Command::new(bin);
     cmd.arg("-p")
@@ -128,14 +195,29 @@ pub async fn run_agent(
         .env("JARVIS_IGNORE", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
     crate::claude_bin::apply_claude_auth(&mut cmd);
-    let Ok(Ok(out)) = tokio::time::timeout(timeout, cmd.output()).await else {
-        return AgentOut { failed: true, text: "агент не уложился в отведённое время".into(), ..Default::default() };
+    let out = match output(&mut cmd, timeout).await {
+        Ok(out) => out,
+        Err(why) => {
+            return AgentOut {
+                failed: true,
+                text: why,
+                ..Default::default()
+            }
+        }
     };
     if !out.status.success() {
-        return AgentOut { failed: true, text: "агент завершился с ошибкой".into(), ..Default::default() };
+        let mut parsed = parse_agent_json(&String::from_utf8_lossy(&out.stdout));
+        parsed.failed = true;
+        if parsed.text.is_empty() {
+            parsed.text = tail(&String::from_utf8_lossy(&out.stderr), 8);
+        }
+        if parsed.text.is_empty() {
+            parsed.text = "агент завершился с ошибкой".into();
+        }
+        return parsed;
     }
     parse_agent_json(&String::from_utf8_lossy(&out.stdout))
 }
@@ -148,7 +230,11 @@ pub fn parse_agent_json(stdout: &str) -> AgentOut {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(stdout.trim()) else {
         // Не json — значит агент печатал обычным текстом. Работа сделана, а
         // расход просто неизвестен.
-        return AgentOut { text: stdout.trim().to_string(), ..Default::default() };
+        return AgentOut {
+            text: stdout.trim().to_string(),
+            failed: stdout.trim().is_empty(),
+            ..Default::default()
+        };
     };
     let text = v
         .get("result")
@@ -157,28 +243,114 @@ pub fn parse_agent_json(stdout: &str) -> AgentOut {
         .to_string();
     let usage = v.get("usage");
     let field = |name: &str| -> u64 {
-        usage.and_then(|u| u.get(name)).and_then(|n| n.as_u64()).unwrap_or(0)
+        usage
+            .and_then(|u| u.get(name))
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0)
     };
     // Кэш считаем наравне: лимит аккаунта расходуется и им.
     let tokens = field("input_tokens")
         + field("output_tokens")
         + field("cache_creation_input_tokens")
         + field("cache_read_input_tokens");
-    let cost = v.get("total_cost_usd").and_then(|c| c.as_f64()).unwrap_or(0.0);
-    let failed = v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
-    AgentOut { text, tokens, cost_usd: cost, failed }
+    let cost = v
+        .get("total_cost_usd")
+        .and_then(|c| c.as_f64())
+        .unwrap_or(0.0);
+    let failed = v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false)
+        || v.get("subtype")
+            .and_then(|s| s.as_str())
+            .is_some_and(|s| s.starts_with("error"))
+        || text.trim().is_empty();
+    AgentOut {
+        text,
+        tokens,
+        cost_usd: cost,
+        failed,
+    }
 }
 
-async fn run_codex(cwd: &Path, prompt: &str, timeout: Duration) -> AgentOut {
-    // У Codex нет разбора расхода: его headless-вывод — обычный текст.
-    // Ограничитель по токенам для него не работает, и это честнее, чем
-    // подставить выдуманное число.
-    let cmd = format!(
-        "codex exec --dangerously-bypass-approvals-and-sandbox {}",
-        crate::util::shell_quote(prompt)
-    );
-    let (code, out) = shell(cwd, &cmd, timeout).await;
-    AgentOut { text: out, failed: code != 0, ..Default::default() }
+async fn run_codex(cwd: &Path, prompt: &str, model: Option<&str>, timeout: Duration) -> AgentOut {
+    let Some(bin) = crate::backend::codex::resolve_codex_bin() else {
+        return AgentOut {
+            failed: true,
+            text: "codex не найден".into(),
+            ..Default::default()
+        };
+    };
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.args([
+        "exec",
+        "--json",
+        "--dangerously-bypass-approvals-and-sandbox",
+    ]);
+    if let Some(model) = model {
+        cmd.args(["--model", model]);
+    }
+    cmd.arg("--")
+        .arg(prompt)
+        .current_dir(cwd)
+        .env("JARVIS_IGNORE", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let out = match output(&mut cmd, timeout).await {
+        Ok(out) => out,
+        Err(why) => {
+            return AgentOut {
+                failed: true,
+                text: why,
+                ..Default::default()
+            }
+        }
+    };
+    let mut parsed = parse_codex_jsonl(&String::from_utf8_lossy(&out.stdout));
+    parsed.failed |= !out.status.success();
+    if parsed.failed && parsed.text.is_empty() {
+        parsed.text = tail(&String::from_utf8_lossy(&out.stderr), 8);
+    }
+    parsed
+}
+
+fn parse_codex_jsonl(stdout: &str) -> AgentOut {
+    let mut out = AgentOut::default();
+    let mut completed = false;
+    for line in stdout.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match v["type"].as_str().unwrap_or_default() {
+            "item.completed" if v["item"]["type"] == "agent_message" => {
+                if let Some(text) = v["item"]["text"].as_str() {
+                    if !out.text.is_empty() {
+                        out.text.push('\n');
+                    }
+                    out.text.push_str(text);
+                }
+            }
+            "turn.completed" => {
+                completed = true;
+                // cached_input_tokens is a subset of input_tokens, not extra usage.
+                out.tokens += v["usage"]["input_tokens"].as_u64().unwrap_or(0)
+                    + v["usage"]["output_tokens"].as_u64().unwrap_or(0);
+            }
+            "turn.failed" | "error" => {
+                out.failed = true;
+                if let Some(text) = v["error"]["message"]
+                    .as_str()
+                    .or_else(|| v["message"].as_str())
+                {
+                    if !out.text.is_empty() {
+                        out.text.push('\n');
+                    }
+                    out.text.push_str(text);
+                }
+            }
+            _ => {}
+        }
+    }
+    out.failed |= !completed || out.text.trim().is_empty();
+    out
 }
 
 /// Прогнать гейты по порядку. Первый красный останавливает: гонять остальные
@@ -188,7 +360,11 @@ pub async fn run_gates(gates: &[Gate], cwd: &Path) -> Vec<GateRun> {
     for g in gates {
         let (code, text) = shell(cwd, &g.command, Duration::from_secs(1800)).await;
         let ok = code == 0;
-        out.push(GateRun { name: g.name.clone(), ok, output: tail(&text, 40) });
+        out.push(GateRun {
+            name: g.name.clone(),
+            ok,
+            output: tail(&text, 40),
+        });
         if !ok {
             break;
         }
@@ -215,13 +391,36 @@ pub async fn diff(cwd: &Path, max_bytes: usize) -> String {
     if out.len() <= max_bytes {
         return out;
     }
-    let cut = out.char_indices().map(|(i, _)| i).take_while(|i| *i <= max_bytes).last().unwrap_or(0);
+    let cut = out
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|i| *i <= max_bytes)
+        .last()
+        .unwrap_or(0);
     format!("{}\n… дифф обрезан", &out[..cut])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_stream_counts_usage_and_requires_a_successful_terminal_event() {
+        let lines = r#"{"type":"item.completed","item":{"type":"agent_message","text":"done"}}
+{"type":"turn.completed","usage":{"input_tokens":9,"cached_input_tokens":4,"output_tokens":3}}"#;
+        let out = parse_codex_jsonl(lines);
+        assert!(!out.failed);
+        assert_eq!(out.tokens, 12);
+        assert_eq!(out.text, "done");
+        assert!(
+            parse_codex_jsonl(
+                r#"{"type":"item.completed","item":{"type":"agent_message","text":"partial"}}"#
+            )
+            .failed
+        );
+        assert!(parse_agent_json("").failed);
+        assert!(parse_agent_json(r#"{"subtype":"error_max_turns","result":"incomplete"}"#).failed);
+    }
 
     #[test]
     fn agent_json_gives_text_and_the_real_spend() {
@@ -261,7 +460,10 @@ mod tests {
 
     #[test]
     fn tail_keeps_the_end_where_the_diagnosis_is() {
-        let text = (1..=100).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
+        let text = (1..=100)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_eq!(tail(&text, 3), "98\n99\n100");
         assert_eq!(tail("одна строка", 5), "одна строка");
     }
@@ -269,7 +471,12 @@ mod tests {
     #[tokio::test]
     async fn shell_reports_exit_code_and_merges_stderr() {
         let dir = std::env::temp_dir();
-        let (code, out) = shell(&dir, "echo привет; echo беда >&2; exit 3", Duration::from_secs(10)).await;
+        let (code, out) = shell(
+            &dir,
+            "echo привет; echo беда >&2; exit 3",
+            Duration::from_secs(10),
+        )
+        .await;
         assert_eq!(code, 3);
         assert!(out.contains("привет") && out.contains("беда"), "{out}");
     }
@@ -278,9 +485,18 @@ mod tests {
     async fn gates_stop_at_the_first_red_one() {
         let dir = std::env::temp_dir();
         let gates = vec![
-            Gate { name: "первый".into(), command: "true".into() },
-            Gate { name: "второй".into(), command: "false".into() },
-            Gate { name: "третий".into(), command: "true".into() },
+            Gate {
+                name: "первый".into(),
+                command: "true".into(),
+            },
+            Gate {
+                name: "второй".into(),
+                command: "false".into(),
+            },
+            Gate {
+                name: "третий".into(),
+                command: "true".into(),
+            },
         ];
         let runs = run_gates(&gates, &dir).await;
         assert_eq!(runs.len(), 2, "после красного гонять остальные нечего");

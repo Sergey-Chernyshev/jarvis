@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <title>Jarvis — listening ribbon</title>
+  <desc>An original folded silver J, with a small live signal, on a rounded graphite glass tile.</desc>
+  <defs>
+    <linearGradient id="tile" x1="176" y1="114" x2="842" y2="944" gradientUnits="userSpaceOnUse"><stop stop-color="#42434D"/><stop offset=".43" stop-color="#24252E"/><stop offset="1" stop-color="#12131B"/></linearGradient>
+    <linearGradient id="edge" x1="330" y1="92" x2="729" y2="932" gradientUnits="userSpaceOnUse"><stop stop-color="#92939E"/><stop offset=".3" stop-color="#53545F"/><stop offset="1" stop-color="#252631"/></linearGradient>
+    <linearGradient id="ribbon" x1="379" y1="230" x2="614" y2="778" gradientUnits="userSpaceOnUse"><stop stop-color="#FFFFFF"/><stop offset=".35" stop-color="#E5E7F2"/><stop offset=".71" stop-color="#A9ADC7"/><stop offset="1" stop-color="#EEF0FB"/></linearGradient>
+    <linearGradient id="fold" x1="520" y1="296" x2="641" y2="416" gradientUnits="userSpaceOnUse"><stop stop-color="#737A9A"/><stop offset="1" stop-color="#DCE0F0"/></linearGradient>
+    <linearGradient id="signal" x1="717" y1="246" x2="758" y2="325" gradientUnits="userSpaceOnUse"><stop stop-color="#DED9FF"/><stop offset="1" stop-color="#AAA5EB"/></linearGradient>
+    <filter id="shadow" x="72" y="74" width="880" height="910" filterUnits="userSpaceOnUse"><feDropShadow dx="0" dy="20" stdDeviation="15" flood-color="#06070C" flood-opacity=".22"/></filter>
+    <filter id="mark-shadow" x="217" y="193" width="572" height="642" filterUnits="userSpaceOnUse"><feDropShadow dx="0" dy="16" stdDeviation="12" flood-color="#050711" flood-opacity=".32"/></filter>
+  </defs>
+  <g filter="url(#shadow)"><rect x="96" y="92" width="832" height="832" rx="190" fill="url(#tile)"/><rect x="98" y="94" width="828" height="828" rx="188" stroke="url(#edge)" stroke-width="4"/></g>
+  <path d="M286 124H738C818 124 883 187 890 267" stroke="#FFFFFF" stroke-opacity=".055" stroke-width="3" stroke-linecap="round"/>
+  <g filter="url(#mark-shadow)">
+    <path d="M383 244H596C627 244 652 269 652 300V583C652 705 587 778 475 778C369 778 293 708 282 602C280 582 296 565 316 565H364C382 565 397 579 400 597C406 642 431 668 473 668C517 668 542 639 542 584V354H383C363 354 347 338 347 318V280C347 260 363 244 383 244Z" fill="url(#ribbon)"/>
+    <path d="M542 354V298C542 269 566 245 595 244H596C627 244 652 269 652 300V416C652 382 624 354 590 354H542Z" fill="url(#fold)"/>
+    <path d="M383 246H538" stroke="#FFFFFF" stroke-opacity=".68" stroke-width="3" stroke-linecap="round"/>
+    <path d="M306 607C317 697 381 754 475 754C570 754 628 691 628 583V428" stroke="#FFFFFF" stroke-opacity=".19" stroke-width="3" stroke-linecap="round"/>
+  </g>
+  <rect x="718" y="250" width="58" height="112" rx="29" fill="url(#signal)"/>
+  <path d="M748 259C759 260 767 269 767 280V299" stroke="#FFFFFF" stroke-opacity=".54" stroke-width="3" stroke-linecap="round"/>
+</svg>

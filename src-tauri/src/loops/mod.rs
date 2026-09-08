@@ -17,6 +17,8 @@ pub mod pipeline_run; // исполнение пайплайна: ход по г
 pub mod pipeline; // цикл как граф шагов: агент → команда → ревью, с ветвлением
 pub mod presets;
 pub mod runner;
+#[cfg(test)]
+mod qa;
 pub mod schedule;
 pub mod store;
 pub mod templates;

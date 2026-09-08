@@ -41,7 +41,8 @@ pub fn register(reg: &mut DaemonRegistry) {
                 .and_then(|p| p.as_object())
                 .cloned()
                 .ok_or_else(|| "нужен объект 'patch'".to_string())?;
-            Ok(d.settings.save(patch))
+            tauri::async_runtime::spawn_blocking(move || d.settings.try_save(patch))
+                .await.map_err(|error| format!("Не удалось сохранить настройки: {error}"))?
         }),
     );
 }

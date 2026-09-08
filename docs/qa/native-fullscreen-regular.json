@@ -1,0 +1,3678 @@
+{
+  "ok": true,
+  "failure": null,
+  "errors": [],
+  "steps": [
+    {
+      "name": "The owned AppKit editor enters a real fullscreen Space",
+      "ok": true,
+      "elapsedMs": 2404
+    },
+    {
+      "name": "Fullscreen cycle 1: production HUD listening preserves the Space and input",
+      "ok": true,
+      "elapsedMs": 1272
+    },
+    {
+      "name": "Fullscreen cycle 1: production HUD analyzing preserves the Space and input",
+      "ok": true,
+      "elapsedMs": 1263
+    },
+    {
+      "name": "Fullscreen cycle 1: production HUD empty preserves the Space and input",
+      "ok": true,
+      "elapsedMs": 1642.000000000001
+    },
+    {
+      "name": "Fullscreen cycle 1: production paste reaches the original field while the HUD remains visible",
+      "ok": true,
+      "elapsedMs": 162.9999999999991
+    },
+    {
+      "name": "Fullscreen cycle 1: dismissing the HUD keeps the original Space",
+      "ok": true,
+      "elapsedMs": 535
+    },
+    {
+      "name": "Fullscreen cycle 2: production HUD listening preserves the Space and input",
+      "ok": true,
+      "elapsedMs": 1260
+    },
+    {
+      "name": "Fullscreen cycle 2: production HUD analyzing preserves the Space and input",
+      "ok": true,
+      "elapsedMs": 1340
+    },
+    {
+      "name": "Fullscreen cycle 2: production HUD empty preserves the Space and input",
+      "ok": true,
+      "elapsedMs": 1367.0000000000018
+    },
+    {
+      "name": "Fullscreen cycle 2: production paste reaches the original field while the HUD remains visible",
+      "ok": true,
+      "elapsedMs": 173
+    },
+    {
+      "name": "Fullscreen cycle 2: dismissing the HUD keeps the original Space",
+      "ok": true,
+      "elapsedMs": 528.9999999999982
+    },
+    {
+      "name": "The fullscreen regression never changes native permissions",
+      "ok": true,
+      "elapsedMs": 28
+    }
+  ],
+  "evidence": {
+    "jarvisActivationPolicy": {
+      "accepted": false,
+      "nativeValue": 0,
+      "policy": "regular"
+    },
+    "jarvisActivationBaseline": {
+      "events": [
+        {
+          "event": "observation-started",
+          "timestampMs": 1788570828691,
+          "foregroundPid": 26753,
+          "ownsForeground": true,
+          "active": true,
+          "monitoring": false
+        },
+        {
+          "event": "did-resign-active",
+          "timestampMs": 1788570829551,
+          "foregroundPid": 27512,
+          "ownsForeground": false,
+          "active": false,
+          "monitoring": false
+        },
+        {
+          "event": "monitoring-started",
+          "timestampMs": 1788570831049,
+          "foregroundPid": 27512,
+          "ownsForeground": false,
+          "active": false,
+          "monitoring": true
+        }
+      ],
+      "monitoring": true,
+      "observing": true,
+      "pid": 26753,
+      "provenance": "AppKit activation notifications for this owned debug app; only foreground PID, booleans and timestamps"
+    },
+    "fullscreenBaseline": {
+      "editor": {
+        "key": true,
+        "expectedWindowServerFrame": {
+          "y": 33,
+          "x": 0,
+          "width": 1728,
+          "height": 1084
+        },
+        "screenFrame": {
+          "y": 0,
+          "x": 0,
+          "width": 1728,
+          "height": 1117
+        },
+        "windowServerFrameStable": true,
+        "frame": {
+          "y": 0,
+          "x": 0,
+          "width": 1728,
+          "height": 1084
+        },
+        "monitoring": true,
+        "violations": [],
+        "foregroundPid": 27512,
+        "fullscreen": true,
+        "screenSafeAreaFrame": {
+          "y": 0,
+          "x": 0,
+          "width": 1728,
+          "height": 1085
+        },
+        "fullscreenEntered": true,
+        "fullscreenEvents": [
+          "will-enter",
+          "did-enter"
+        ],
+        "ownedOnScreenWindows": [
+          {
+            "number": 6151,
+            "layer": 26,
+            "alpha": 0,
+            "frontToBackOrder": 1,
+            "pid": 27512,
+            "bounds": {
+              "X": 0,
+              "Height": 33,
+              "Y": 0,
+              "Width": 1728
+            }
+          },
+          {
+            "number": 6146,
+            "layer": 0,
+            "alpha": 0,
+            "frontToBackOrder": 3,
+            "pid": 27512,
+            "bounds": {
+              "X": 0,
+              "Height": 32,
+              "Y": 33,
+              "Width": 1728
+            }
+          },
+          {
+            "number": 6137,
+            "layer": 0,
+            "alpha": 1,
+            "frontToBackOrder": 4,
+            "pid": 27512,
+            "bounds": {
+              "X": 0,
+              "Height": 1084,
+              "Y": 33,
+              "Width": 1728
+            }
+          }
+        ],
+        "monitoredSamples": 1,
+        "windowNumber": 6137,
+        "command": "monitor-on",
+        "workspaceEvents": [
+          {
+            "sample": 0,
+            "event": "application-activated",
+            "timestampMs": 1788570829594.4062,
+            "onActiveSpace": true,
+            "monitoring": false,
+            "elapsedMs": 196.08891010284424,
+            "key": false,
+            "foregroundPid": 27512,
+            "ownsForeground": 1,
+            "focused": false
+          },
+          {
+            "sample": 0,
+            "event": "active-space-changed",
+            "timestampMs": 1788570830268.6702,
+            "onActiveSpace": true,
+            "monitoring": false,
+            "elapsedMs": 870.345950126648,
+            "key": true,
+            "foregroundPid": 27512,
+            "ownsForeground": 1,
+            "focused": true
+          },
+          {
+            "sample": 0,
+            "event": "monitoring-started",
+            "timestampMs": 1788570831070.5627,
+            "onActiveSpace": true,
+            "monitoring": true,
+            "elapsedMs": 1672.245979309082,
+            "key": true,
+            "foregroundPid": 27512,
+            "ownsForeground": 1,
+            "focused": true
+          }
+        ],
+        "fullscreenTransition": "",
+        "pid": 27512,
+        "timestampMs": 1788570831071.167,
+        "focused": true,
+        "a": "",
+        "onActiveSpace": true,
+        "b": ""
+      },
+      "focus": {
+        "available": true,
+        "trusted": true,
+        "ownsForeground": true,
+        "operation": "capture",
+        "provenance": "production AXUIElementCopyAttributeValue; scratch app only"
+      },
+      "permissionsBefore": {
+        "microphone": "authorized",
+        "accessibility": true,
+        "provenance": "native authorization status; no request made"
+      }
+    },
+    "transitionFrames": [
+      {
+        "cycle": 1,
+        "phase": "listening",
+        "reducedMotion": false,
+        "before": {
+          "opacity": 0,
+          "finiteAnimations": 0
+        },
+        "frames": [
+          {
+            "timestampMs": 1788570831137,
+            "phase": "listening",
+            "opacity": 0,
+            "rect": {
+              "x": 107.5,
+              "y": 44,
+              "width": 225,
+              "height": 48,
+              "top": 44,
+              "right": 332.5,
+              "bottom": 92,
+              "left": 107.5
+            },
+            "finiteAnimations": 0
+          },
+          {
+            "timestampMs": 1788570831177,
+            "phase": "listening",
+            "opacity": 0,
+            "rect": {
+              "x": 109.1875,
+              "y": 32.36000061035156,
+              "width": 221.625,
+              "height": 47.279998779296875,
+              "top": 32.36000061035156,
+              "right": 330.8125,
+              "bottom": 79.63999938964844,
+              "left": 109.1875
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570831214,
+            "phase": "listening",
+            "opacity": 0.617936,
+            "rect": {
+              "x": 108.13043212890624,
+              "y": 27.12319564819336,
+              "width": 223.7391357421875,
+              "height": 47.731014251708984,
+              "top": 27.12319564819336,
+              "right": 331.86956787109375,
+              "bottom": 74.85420989990234,
+              "left": 108.13043212890624
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570831252,
+            "phase": "listening",
+            "opacity": 0.847884,
+            "rect": {
+              "x": 107.75669860839844,
+              "y": 25.27168655395508,
+              "width": 224.4866180419922,
+              "height": 47.89047622680664,
+              "top": 25.27168655395508,
+              "right": 332.2433166503906,
+              "bottom": 73.16216278076172,
+              "left": 107.75669860839844
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570831290,
+            "phase": "listening",
+            "opacity": 0.942916,
+            "rect": {
+              "x": 107.59632873535156,
+              "y": 24.477218627929688,
+              "width": 224.8073577880859,
+              "height": 47.95890045166016,
+              "top": 24.477218627929688,
+              "right": 332.4036865234375,
+              "bottom": 72.43611907958984,
+              "left": 107.59632873535156
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570831329,
+            "phase": "listening",
+            "opacity": 0.981981,
+            "rect": {
+              "x": 107.53041076660156,
+              "y": 24.1506404876709,
+              "width": 224.9391937255859,
+              "height": 47.987022399902344,
+              "top": 24.1506404876709,
+              "right": 332.4696044921875,
+              "bottom": 72.13766288757324,
+              "left": 107.53041076660156
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570831371,
+            "phase": "listening",
+            "opacity": 0.996249,
+            "rect": {
+              "x": 107.50633239746094,
+              "y": 24.03135871887207,
+              "width": 224.9873504638672,
+              "height": 47.99729919433594,
+              "top": 24.03135871887207,
+              "right": 332.4936828613281,
+              "bottom": 72.02865791320801,
+              "left": 107.50633239746094
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570831408,
+            "phase": "listening",
+            "opacity": 0.999646,
+            "rect": {
+              "x": 107.50059509277344,
+              "y": 24.00296401977539,
+              "width": 224.9987945556641,
+              "height": 47.9997444152832,
+              "top": 24.00296401977539,
+              "right": 332.4993896484375,
+              "bottom": 72.0027084350586,
+              "left": 107.50059509277344
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570831456,
+            "phase": "listening",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24.000003814697266,
+              "width": 225,
+              "height": 47.999996185302734,
+              "top": 24.000003814697266,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570831493,
+            "phase": "listening",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 0
+          }
+        ]
+      },
+      {
+        "cycle": 1,
+        "phase": "analyzing",
+        "reducedMotion": false,
+        "before": {
+          "phase": "listening",
+          "opacity": 1,
+          "rect": {
+            "x": 107.5,
+            "y": 24,
+            "width": 225,
+            "height": 48,
+            "top": 24,
+            "right": 332.5,
+            "bottom": 72,
+            "left": 107.5
+          },
+          "finiteAnimations": 0
+        },
+        "frames": [
+          {
+            "timestampMs": 1788570832379,
+            "phase": "analyzing",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 3
+          },
+          {
+            "timestampMs": 1788570832417,
+            "phase": "analyzing",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 3
+          },
+          {
+            "timestampMs": 1788570832459,
+            "phase": "analyzing",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 3
+          },
+          {
+            "timestampMs": 1788570832504,
+            "phase": "analyzing",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 3
+          },
+          {
+            "timestampMs": 1788570832541,
+            "phase": "analyzing",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 2
+          },
+          {
+            "timestampMs": 1788570832585,
+            "phase": "analyzing",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 2
+          },
+          {
+            "timestampMs": 1788570832627,
+            "phase": "analyzing",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 2
+          },
+          {
+            "timestampMs": 1788570832670,
+            "phase": "analyzing",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570832707,
+            "phase": "analyzing",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570832747,
+            "phase": "analyzing",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 0
+          }
+        ]
+      },
+      {
+        "cycle": 1,
+        "phase": "empty",
+        "reducedMotion": false,
+        "before": {
+          "phase": "analyzing",
+          "opacity": 1,
+          "rect": {
+            "x": 107.5,
+            "y": 24,
+            "width": 225,
+            "height": 48,
+            "top": 24,
+            "right": 332.5,
+            "bottom": 72,
+            "left": 107.5
+          },
+          "finiteAnimations": 0
+        },
+        "frames": [
+          {
+            "timestampMs": 1788570833685,
+            "phase": "empty",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 57,
+              "width": 225,
+              "height": 48,
+              "top": 57,
+              "right": 332.5,
+              "bottom": 105,
+              "left": 107.5
+            },
+            "finiteAnimations": 3
+          },
+          {
+            "timestampMs": 1788570833723,
+            "phase": "empty",
+            "opacity": 1,
+            "rect": {
+              "x": 71.546875,
+              "y": 42.796875,
+              "width": 296.890625,
+              "height": 62.203125,
+              "top": 42.796875,
+              "right": 368.4375,
+              "bottom": 105,
+              "left": 71.546875
+            },
+            "finiteAnimations": 3
+          },
+          {
+            "timestampMs": 1788570833769,
+            "phase": "empty",
+            "opacity": 1,
+            "rect": {
+              "x": 50.21875,
+              "y": 34.359375,
+              "width": 339.5625,
+              "height": 70.640625,
+              "top": 34.359375,
+              "right": 389.78125,
+              "bottom": 105,
+              "left": 50.21875
+            },
+            "finiteAnimations": 3
+          },
+          {
+            "timestampMs": 1788570833810,
+            "phase": "empty",
+            "opacity": 1,
+            "rect": {
+              "x": 33.5,
+              "y": 27.765625,
+              "width": 373,
+              "height": 77.234375,
+              "top": 27.765625,
+              "right": 406.5,
+              "bottom": 105,
+              "left": 33.5
+            },
+            "finiteAnimations": 3
+          },
+          {
+            "timestampMs": 1788570833848,
+            "phase": "empty",
+            "opacity": 1,
+            "rect": {
+              "x": 28.65625,
+              "y": 25.84375,
+              "width": 382.671875,
+              "height": 79.15625,
+              "top": 25.84375,
+              "right": 411.328125,
+              "bottom": 105,
+              "left": 28.65625
+            },
+            "finiteAnimations": 2
+          },
+          {
+            "timestampMs": 1788570833888,
+            "phase": "empty",
+            "opacity": 1,
+            "rect": {
+              "x": 26.03125,
+              "y": 24.8125,
+              "width": 387.9375,
+              "height": 80.1875,
+              "top": 24.8125,
+              "right": 413.96875,
+              "bottom": 105,
+              "left": 26.03125
+            },
+            "finiteAnimations": 2
+          },
+          {
+            "timestampMs": 1788570833943,
+            "phase": "empty",
+            "opacity": 1,
+            "rect": {
+              "x": 24.265625,
+              "y": 24.109375,
+              "width": 391.453125,
+              "height": 80.890625,
+              "top": 24.109375,
+              "right": 415.71875,
+              "bottom": 105,
+              "left": 24.265625
+            },
+            "finiteAnimations": 2
+          },
+          {
+            "timestampMs": 1788570833990,
+            "phase": "empty",
+            "opacity": 1,
+            "rect": {
+              "x": 24.015625,
+              "y": 24.015625,
+              "width": 391.96875,
+              "height": 80.984375,
+              "top": 24.015625,
+              "right": 415.984375,
+              "bottom": 105,
+              "left": 24.015625
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570834028,
+            "phase": "empty",
+            "opacity": 1,
+            "rect": {
+              "x": 24,
+              "y": 24,
+              "width": 391.984375,
+              "height": 81,
+              "top": 24,
+              "right": 415.984375,
+              "bottom": 105,
+              "left": 24
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570834066,
+            "phase": "empty",
+            "opacity": 1,
+            "rect": {
+              "x": 24,
+              "y": 24,
+              "width": 392,
+              "height": 81,
+              "top": 24,
+              "right": 416,
+              "bottom": 105,
+              "left": 24
+            },
+            "finiteAnimations": 0
+          }
+        ]
+      },
+      {
+        "cycle": 2,
+        "phase": "listening",
+        "reducedMotion": false,
+        "before": {
+          "opacity": 0,
+          "finiteAnimations": 0
+        },
+        "frames": [
+          {
+            "timestampMs": 1788570835975,
+            "phase": "listening",
+            "opacity": 0,
+            "rect": {
+              "x": 109.1875,
+              "y": 32.36000061035156,
+              "width": 221.625,
+              "height": 47.279998779296875,
+              "top": 32.36000061035156,
+              "right": 330.8125,
+              "bottom": 79.63999938964844,
+              "left": 109.1875
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570836019,
+            "phase": "listening",
+            "opacity": 0.448245,
+            "rect": {
+              "x": 108.43108367919922,
+              "y": 28.612672805786133,
+              "width": 223.1378173828125,
+              "height": 47.60273742675781,
+              "top": 28.612672805786133,
+              "right": 331.5689010620117,
+              "bottom": 76.21541023254395,
+              "left": 108.43108367919922
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570836057,
+            "phase": "listening",
+            "opacity": 0.764865,
+            "rect": {
+              "x": 107.89678955078124,
+              "y": 25.965730667114254,
+              "width": 224.2064208984375,
+              "height": 47.83070373535156,
+              "top": 25.965730667114254,
+              "right": 332.10321044921875,
+              "bottom": 73.79643440246582,
+              "left": 107.89678955078124
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570836095,
+            "phase": "listening",
+            "opacity": 0.908093,
+            "rect": {
+              "x": 107.65509033203124,
+              "y": 24.76834487915039,
+              "width": 224.6898193359375,
+              "height": 47.9338264465332,
+              "top": 24.76834487915039,
+              "right": 332.34490966796875,
+              "bottom": 72.7021713256836,
+              "left": 107.65509033203124
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570836145,
+            "phase": "listening",
+            "opacity": 0.97675,
+            "rect": {
+              "x": 107.53923034667967,
+              "y": 24.194366455078125,
+              "width": 224.92152404785156,
+              "height": 47.98326110839844,
+              "top": 24.194366455078125,
+              "right": 332.46075439453125,
+              "bottom": 72.17762756347656,
+              "left": 107.53923034667967
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570836183,
+            "phase": "listening",
+            "opacity": 0.994194,
+            "rect": {
+              "x": 107.50979614257812,
+              "y": 24.048540115356445,
+              "width": 224.98040771484375,
+              "height": 47.995819091796875,
+              "top": 24.048540115356445,
+              "right": 332.4902038574219,
+              "bottom": 72.04435920715332,
+              "left": 107.50979614257812
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570836235,
+            "phase": "listening",
+            "opacity": 0.999731,
+            "rect": {
+              "x": 107.50045776367188,
+              "y": 24.00224876403809,
+              "width": 224.99908447265625,
+              "height": 47.99980163574219,
+              "top": 24.00224876403809,
+              "right": 332.4995422363281,
+              "bottom": 72.00205039978027,
+              "left": 107.50045776367188
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570836280,
+            "phase": "listening",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570836340,
+            "phase": "listening",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 0
+          }
+        ]
+      },
+      {
+        "cycle": 2,
+        "phase": "analyzing",
+        "reducedMotion": false,
+        "before": {
+          "phase": "listening",
+          "opacity": 1,
+          "rect": {
+            "x": 107.5,
+            "y": 24,
+            "width": 225,
+            "height": 48,
+            "top": 24,
+            "right": 332.5,
+            "bottom": 72,
+            "left": 107.5
+          },
+          "finiteAnimations": 0
+        },
+        "frames": [
+          {
+            "timestampMs": 1788570837256,
+            "phase": "analyzing",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 3
+          },
+          {
+            "timestampMs": 1788570837296,
+            "phase": "analyzing",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 3
+          },
+          {
+            "timestampMs": 1788570837347,
+            "phase": "analyzing",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 3
+          },
+          {
+            "timestampMs": 1788570837392,
+            "phase": "analyzing",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 2
+          },
+          {
+            "timestampMs": 1788570837441,
+            "phase": "analyzing",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 2
+          },
+          {
+            "timestampMs": 1788570837480,
+            "phase": "analyzing",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 2
+          },
+          {
+            "timestampMs": 1788570837527,
+            "phase": "analyzing",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 2
+          },
+          {
+            "timestampMs": 1788570837575,
+            "phase": "analyzing",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570837612,
+            "phase": "analyzing",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 24,
+              "width": 225,
+              "height": 48,
+              "top": 24,
+              "right": 332.5,
+              "bottom": 72,
+              "left": 107.5
+            },
+            "finiteAnimations": 0
+          }
+        ]
+      },
+      {
+        "cycle": 2,
+        "phase": "empty",
+        "reducedMotion": false,
+        "before": {
+          "phase": "analyzing",
+          "opacity": 1,
+          "rect": {
+            "x": 107.5,
+            "y": 24,
+            "width": 225,
+            "height": 48,
+            "top": 24,
+            "right": 332.5,
+            "bottom": 72,
+            "left": 107.5
+          },
+          "finiteAnimations": 0
+        },
+        "frames": [
+          {
+            "timestampMs": 1788570838611,
+            "phase": "empty",
+            "opacity": 1,
+            "rect": {
+              "x": 107.5,
+              "y": 57,
+              "width": 225,
+              "height": 48,
+              "top": 57,
+              "right": 332.5,
+              "bottom": 105,
+              "left": 107.5
+            },
+            "finiteAnimations": 3
+          },
+          {
+            "timestampMs": 1788570838651,
+            "phase": "empty",
+            "opacity": 1,
+            "rect": {
+              "x": 72.359375,
+              "y": 43.125,
+              "width": 295.265625,
+              "height": 61.875,
+              "top": 43.125,
+              "right": 367.625,
+              "bottom": 105,
+              "left": 72.359375
+            },
+            "finiteAnimations": 3
+          },
+          {
+            "timestampMs": 1788570838702,
+            "phase": "empty",
+            "opacity": 1,
+            "rect": {
+              "x": 42.875,
+              "y": 31.46875,
+              "width": 354.234375,
+              "height": 73.53125,
+              "top": 31.46875,
+              "right": 397.109375,
+              "bottom": 105,
+              "left": 42.875
+            },
+            "finiteAnimations": 3
+          },
+          {
+            "timestampMs": 1788570838746,
+            "phase": "empty",
+            "opacity": 1,
+            "rect": {
+              "x": 33.703125,
+              "y": 27.84375,
+              "width": 372.59375,
+              "height": 77.15625,
+              "top": 27.84375,
+              "right": 406.296875,
+              "bottom": 105,
+              "left": 33.703125
+            },
+            "finiteAnimations": 3
+          },
+          {
+            "timestampMs": 1788570838785,
+            "phase": "empty",
+            "opacity": 1,
+            "rect": {
+              "x": 27.21875,
+              "y": 25.28125,
+              "width": 385.546875,
+              "height": 79.71875,
+              "top": 25.28125,
+              "right": 412.765625,
+              "bottom": 105,
+              "left": 27.21875
+            },
+            "finiteAnimations": 2
+          },
+          {
+            "timestampMs": 1788570838837,
+            "phase": "empty",
+            "opacity": 1,
+            "rect": {
+              "x": 24.859375,
+              "y": 24.34375,
+              "width": 390.265625,
+              "height": 80.65625,
+              "top": 24.34375,
+              "right": 415.125,
+              "bottom": 105,
+              "left": 24.859375
+            },
+            "finiteAnimations": 2
+          },
+          {
+            "timestampMs": 1788570838898,
+            "phase": "empty",
+            "opacity": 1,
+            "rect": {
+              "x": 24.140625,
+              "y": 24.0625,
+              "width": 391.71875,
+              "height": 80.9375,
+              "top": 24.0625,
+              "right": 415.859375,
+              "bottom": 105,
+              "left": 24.140625
+            },
+            "finiteAnimations": 2
+          },
+          {
+            "timestampMs": 1788570838937,
+            "phase": "empty",
+            "opacity": 1,
+            "rect": {
+              "x": 24,
+              "y": 24.015625,
+              "width": 391.984375,
+              "height": 80.984375,
+              "top": 24.015625,
+              "right": 415.984375,
+              "bottom": 105,
+              "left": 24
+            },
+            "finiteAnimations": 1
+          },
+          {
+            "timestampMs": 1788570838988,
+            "phase": "empty",
+            "opacity": 1,
+            "rect": {
+              "x": 24,
+              "y": 24,
+              "width": 392,
+              "height": 81,
+              "top": 24,
+              "right": 416,
+              "bottom": 105,
+              "left": 24
+            },
+            "finiteAnimations": 0
+          }
+        ]
+      }
+    ],
+    "nativeActionTimeline": [
+      {
+        "operation": "toast_listening",
+        "cycle": 1,
+        "timestampMs": 1788570831096
+      },
+      {
+        "operation": "toast_analyzing",
+        "cycle": 1,
+        "timestampMs": 1788570832367
+      },
+      {
+        "operation": "toast_empty",
+        "cycle": 1,
+        "timestampMs": 1788570833629
+      },
+      {
+        "operation": "editor_paste",
+        "cycle": 1,
+        "timestampMs": 1788570835281
+      },
+      {
+        "operation": "toast_dismiss",
+        "cycle": 1,
+        "timestampMs": 1788570835434
+      },
+      {
+        "operation": "toast_listening",
+        "cycle": 2,
+        "timestampMs": 1788570835970
+      },
+      {
+        "operation": "toast_analyzing",
+        "cycle": 2,
+        "timestampMs": 1788570837231
+      },
+      {
+        "operation": "toast_empty",
+        "cycle": 2,
+        "timestampMs": 1788570838571
+      },
+      {
+        "operation": "editor_paste",
+        "cycle": 2,
+        "timestampMs": 1788570839965
+      },
+      {
+        "operation": "toast_dismiss",
+        "cycle": 2,
+        "timestampMs": 1788570840110
+      }
+    ],
+    "fullscreenPhases": [
+      {
+        "cycle": 1,
+        "rendered": {
+          "phase": "listening",
+          "opacity": 1,
+          "rect": {
+            "x": 107.5,
+            "y": 24,
+            "width": 225,
+            "height": 48,
+            "top": 24,
+            "right": 332.5,
+            "bottom": 72,
+            "left": 107.5
+          },
+          "finiteAnimations": 0
+        },
+        "intermediateMotionObserved": true,
+        "reducedMotion": false,
+        "phase": "listening",
+        "editor": {
+          "key": true,
+          "expectedWindowServerFrame": {
+            "y": 33,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "screenFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1117
+          },
+          "windowServerFrameStable": true,
+          "frame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "monitoring": true,
+          "violations": [],
+          "foregroundPid": 27512,
+          "fullscreen": true,
+          "screenSafeAreaFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1085
+          },
+          "fullscreenEntered": true,
+          "fullscreenEvents": [
+            "will-enter",
+            "did-enter"
+          ],
+          "ownedOnScreenWindows": [
+            {
+              "number": 6151,
+              "layer": 26,
+              "alpha": 0,
+              "frontToBackOrder": 1,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 33,
+                "Y": 0,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 6105,
+              "layer": 25,
+              "alpha": 1,
+              "frontToBackOrder": 2,
+              "pid": 26753,
+              "bounds": {
+                "X": 644,
+                "Height": 100,
+                "Y": 1003,
+                "Width": 440
+              }
+            },
+            {
+              "number": 6146,
+              "layer": 0,
+              "alpha": 0,
+              "frontToBackOrder": 4,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 32,
+                "Y": 33,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 6137,
+              "layer": 0,
+              "alpha": 1,
+              "frontToBackOrder": 5,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 1084,
+                "Y": 33,
+                "Width": 1728
+              }
+            }
+          ],
+          "monitoredSamples": 32,
+          "windowNumber": 6137,
+          "command": "monitor-on",
+          "workspaceEvents": [
+            {
+              "sample": 0,
+              "event": "application-activated",
+              "timestampMs": 1788570829594.4062,
+              "onActiveSpace": true,
+              "monitoring": false,
+              "elapsedMs": 196.08891010284424,
+              "key": false,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": false
+            },
+            {
+              "sample": 0,
+              "event": "active-space-changed",
+              "timestampMs": 1788570830268.6702,
+              "onActiveSpace": true,
+              "monitoring": false,
+              "elapsedMs": 870.345950126648,
+              "key": true,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": true
+            },
+            {
+              "sample": 0,
+              "event": "monitoring-started",
+              "timestampMs": 1788570831070.5627,
+              "onActiveSpace": true,
+              "monitoring": true,
+              "elapsedMs": 1672.245979309082,
+              "key": true,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": true
+            }
+          ],
+          "fullscreenTransition": "",
+          "pid": 27512,
+          "timestampMs": 1788570832320.646,
+          "focused": true,
+          "a": "",
+          "onActiveSpace": true,
+          "b": ""
+        },
+        "toast": {
+          "visible": true,
+          "key": false,
+          "canBecomeKey": false,
+          "windowNumber": 6105,
+          "nativeClass": "NSKVONotifying_JarvisNotificationPanel",
+          "isPanel": true,
+          "styleMask": 128,
+          "nonactivatingPanel": true,
+          "onActiveSpace": true,
+          "level": 25,
+          "collectionBehavior": 262465,
+          "joinsAllSpaces": true,
+          "fullScreenAuxiliary": true,
+          "joinsAllApplications": true,
+          "ignoresCycle": true,
+          "frame": {
+            "x": 644,
+            "y": 14,
+            "width": 440,
+            "height": 100
+          },
+          "screenWorkArea": {
+            "x": 0,
+            "y": 0,
+            "width": 1728,
+            "height": 1084
+          }
+        },
+        "overlay": {
+          "number": 6105,
+          "layer": 25,
+          "alpha": 1,
+          "frontToBackOrder": 2,
+          "pid": 26753,
+          "bounds": {
+            "X": 644,
+            "Height": 100,
+            "Y": 1003,
+            "Width": 440
+          }
+        },
+        "fullscreenWindow": {
+          "number": 6137,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 5,
+          "pid": 27512,
+          "bounds": {
+            "X": 0,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        "identity": {
+          "available": true,
+          "sameElement": true,
+          "trusted": true,
+          "ownsForeground": true,
+          "operation": "compare",
+          "provenance": "production retained AXUIElement CFEqual; scratch app only"
+        }
+      },
+      {
+        "cycle": 1,
+        "rendered": {
+          "phase": "analyzing",
+          "opacity": 1,
+          "rect": {
+            "x": 107.5,
+            "y": 24,
+            "width": 225,
+            "height": 48,
+            "top": 24,
+            "right": 332.5,
+            "bottom": 72,
+            "left": 107.5
+          },
+          "finiteAnimations": 0
+        },
+        "intermediateMotionObserved": true,
+        "reducedMotion": false,
+        "phase": "analyzing",
+        "editor": {
+          "key": true,
+          "expectedWindowServerFrame": {
+            "y": 33,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "screenFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1117
+          },
+          "windowServerFrameStable": true,
+          "frame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "monitoring": true,
+          "violations": [],
+          "foregroundPid": 27512,
+          "fullscreen": true,
+          "screenSafeAreaFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1085
+          },
+          "fullscreenEntered": true,
+          "fullscreenEvents": [
+            "will-enter",
+            "did-enter"
+          ],
+          "ownedOnScreenWindows": [
+            {
+              "number": 6151,
+              "layer": 26,
+              "alpha": 0,
+              "frontToBackOrder": 1,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 33,
+                "Y": 0,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 6105,
+              "layer": 25,
+              "alpha": 1,
+              "frontToBackOrder": 2,
+              "pid": 26753,
+              "bounds": {
+                "X": 644,
+                "Height": 100,
+                "Y": 1003,
+                "Width": 440
+              }
+            },
+            {
+              "number": 6146,
+              "layer": 0,
+              "alpha": 0,
+              "frontToBackOrder": 4,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 32,
+                "Y": 33,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 6137,
+              "layer": 0,
+              "alpha": 1,
+              "frontToBackOrder": 5,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 1084,
+                "Y": 33,
+                "Width": 1728
+              }
+            }
+          ],
+          "monitoredSamples": 64,
+          "windowNumber": 6137,
+          "command": "monitor-on",
+          "workspaceEvents": [
+            {
+              "sample": 0,
+              "event": "application-activated",
+              "timestampMs": 1788570829594.4062,
+              "onActiveSpace": true,
+              "monitoring": false,
+              "elapsedMs": 196.08891010284424,
+              "key": false,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": false
+            },
+            {
+              "sample": 0,
+              "event": "active-space-changed",
+              "timestampMs": 1788570830268.6702,
+              "onActiveSpace": true,
+              "monitoring": false,
+              "elapsedMs": 870.345950126648,
+              "key": true,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": true
+            },
+            {
+              "sample": 0,
+              "event": "monitoring-started",
+              "timestampMs": 1788570831070.5627,
+              "onActiveSpace": true,
+              "monitoring": true,
+              "elapsedMs": 1672.245979309082,
+              "key": true,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": true
+            }
+          ],
+          "fullscreenTransition": "",
+          "pid": 27512,
+          "timestampMs": 1788570833589.293,
+          "focused": true,
+          "a": "",
+          "onActiveSpace": true,
+          "b": ""
+        },
+        "toast": {
+          "visible": true,
+          "key": false,
+          "canBecomeKey": false,
+          "windowNumber": 6105,
+          "nativeClass": "NSKVONotifying_JarvisNotificationPanel",
+          "isPanel": true,
+          "styleMask": 128,
+          "nonactivatingPanel": true,
+          "onActiveSpace": true,
+          "level": 25,
+          "collectionBehavior": 262465,
+          "joinsAllSpaces": true,
+          "fullScreenAuxiliary": true,
+          "joinsAllApplications": true,
+          "ignoresCycle": true,
+          "frame": {
+            "x": 644,
+            "y": 14,
+            "width": 440,
+            "height": 100
+          },
+          "screenWorkArea": {
+            "x": 0,
+            "y": 0,
+            "width": 1728,
+            "height": 1084
+          }
+        },
+        "overlay": {
+          "number": 6105,
+          "layer": 25,
+          "alpha": 1,
+          "frontToBackOrder": 2,
+          "pid": 26753,
+          "bounds": {
+            "X": 644,
+            "Height": 100,
+            "Y": 1003,
+            "Width": 440
+          }
+        },
+        "fullscreenWindow": {
+          "number": 6137,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 5,
+          "pid": 27512,
+          "bounds": {
+            "X": 0,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        "identity": {
+          "available": true,
+          "sameElement": true,
+          "trusted": true,
+          "ownsForeground": true,
+          "operation": "compare",
+          "provenance": "production retained AXUIElement CFEqual; scratch app only"
+        }
+      },
+      {
+        "cycle": 1,
+        "rendered": {
+          "phase": "empty",
+          "opacity": 1,
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "width": 392,
+            "height": 81,
+            "top": 24,
+            "right": 416,
+            "bottom": 105,
+            "left": 24
+          },
+          "finiteAnimations": 0
+        },
+        "intermediateMotionObserved": true,
+        "reducedMotion": false,
+        "phase": "empty",
+        "editor": {
+          "key": true,
+          "expectedWindowServerFrame": {
+            "y": 33,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "screenFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1117
+          },
+          "windowServerFrameStable": true,
+          "frame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "monitoring": true,
+          "violations": [],
+          "foregroundPid": 27512,
+          "fullscreen": true,
+          "screenSafeAreaFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1085
+          },
+          "fullscreenEntered": true,
+          "fullscreenEvents": [
+            "will-enter",
+            "did-enter"
+          ],
+          "ownedOnScreenWindows": [
+            {
+              "number": 6151,
+              "layer": 26,
+              "alpha": 0,
+              "frontToBackOrder": 1,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 33,
+                "Y": 0,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 6105,
+              "layer": 25,
+              "alpha": 1,
+              "frontToBackOrder": 2,
+              "pid": 26753,
+              "bounds": {
+                "X": 644,
+                "Height": 133,
+                "Y": 970,
+                "Width": 440
+              }
+            },
+            {
+              "number": 6146,
+              "layer": 0,
+              "alpha": 0,
+              "frontToBackOrder": 4,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 32,
+                "Y": 33,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 6137,
+              "layer": 0,
+              "alpha": 1,
+              "frontToBackOrder": 5,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 1084,
+                "Y": 33,
+                "Width": 1728
+              }
+            }
+          ],
+          "monitoredSamples": 95,
+          "windowNumber": 6137,
+          "command": "monitor-on",
+          "workspaceEvents": [
+            {
+              "sample": 0,
+              "event": "application-activated",
+              "timestampMs": 1788570829594.4062,
+              "onActiveSpace": true,
+              "monitoring": false,
+              "elapsedMs": 196.08891010284424,
+              "key": false,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": false
+            },
+            {
+              "sample": 0,
+              "event": "active-space-changed",
+              "timestampMs": 1788570830268.6702,
+              "onActiveSpace": true,
+              "monitoring": false,
+              "elapsedMs": 870.345950126648,
+              "key": true,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": true
+            },
+            {
+              "sample": 0,
+              "event": "monitoring-started",
+              "timestampMs": 1788570831070.5627,
+              "onActiveSpace": true,
+              "monitoring": true,
+              "elapsedMs": 1672.245979309082,
+              "key": true,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": true
+            }
+          ],
+          "fullscreenTransition": "",
+          "pid": 27512,
+          "timestampMs": 1788570834909.068,
+          "focused": true,
+          "a": "",
+          "onActiveSpace": true,
+          "b": ""
+        },
+        "toast": {
+          "visible": true,
+          "key": false,
+          "canBecomeKey": false,
+          "windowNumber": 6105,
+          "nativeClass": "NSKVONotifying_JarvisNotificationPanel",
+          "isPanel": true,
+          "styleMask": 128,
+          "nonactivatingPanel": true,
+          "onActiveSpace": true,
+          "level": 25,
+          "collectionBehavior": 262465,
+          "joinsAllSpaces": true,
+          "fullScreenAuxiliary": true,
+          "joinsAllApplications": true,
+          "ignoresCycle": true,
+          "frame": {
+            "x": 644,
+            "y": 14,
+            "width": 440,
+            "height": 133
+          },
+          "screenWorkArea": {
+            "x": 0,
+            "y": 0,
+            "width": 1728,
+            "height": 1084
+          }
+        },
+        "overlay": {
+          "number": 6105,
+          "layer": 25,
+          "alpha": 1,
+          "frontToBackOrder": 2,
+          "pid": 26753,
+          "bounds": {
+            "X": 644,
+            "Height": 133,
+            "Y": 970,
+            "Width": 440
+          }
+        },
+        "fullscreenWindow": {
+          "number": 6137,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 5,
+          "pid": 27512,
+          "bounds": {
+            "X": 0,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        "identity": {
+          "available": true,
+          "sameElement": true,
+          "trusted": true,
+          "ownsForeground": true,
+          "operation": "compare",
+          "provenance": "production retained AXUIElement CFEqual; scratch app only"
+        }
+      },
+      {
+        "cycle": 2,
+        "rendered": {
+          "phase": "listening",
+          "opacity": 1,
+          "rect": {
+            "x": 107.5,
+            "y": 24,
+            "width": 225,
+            "height": 48,
+            "top": 24,
+            "right": 332.5,
+            "bottom": 72,
+            "left": 107.5
+          },
+          "finiteAnimations": 0
+        },
+        "intermediateMotionObserved": true,
+        "reducedMotion": false,
+        "phase": "listening",
+        "editor": {
+          "key": true,
+          "expectedWindowServerFrame": {
+            "y": 33,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "screenFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1117
+          },
+          "windowServerFrameStable": true,
+          "frame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "monitoring": true,
+          "violations": [],
+          "foregroundPid": 27512,
+          "fullscreen": true,
+          "screenSafeAreaFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1085
+          },
+          "fullscreenEntered": true,
+          "fullscreenEvents": [
+            "will-enter",
+            "did-enter"
+          ],
+          "ownedOnScreenWindows": [
+            {
+              "number": 6151,
+              "layer": 26,
+              "alpha": 0,
+              "frontToBackOrder": 1,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 33,
+                "Y": 0,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 6105,
+              "layer": 25,
+              "alpha": 1,
+              "frontToBackOrder": 2,
+              "pid": 26753,
+              "bounds": {
+                "X": 644,
+                "Height": 100,
+                "Y": 1003,
+                "Width": 440
+              }
+            },
+            {
+              "number": 6146,
+              "layer": 0,
+              "alpha": 0,
+              "frontToBackOrder": 4,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 32,
+                "Y": 33,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 6137,
+              "layer": 0,
+              "alpha": 1,
+              "frontToBackOrder": 5,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 1084,
+                "Y": 33,
+                "Width": 1728
+              }
+            }
+          ],
+          "monitoredSamples": 147,
+          "windowNumber": 6137,
+          "command": "monitor-on",
+          "workspaceEvents": [
+            {
+              "sample": 0,
+              "event": "application-activated",
+              "timestampMs": 1788570829594.4062,
+              "onActiveSpace": true,
+              "monitoring": false,
+              "elapsedMs": 196.08891010284424,
+              "key": false,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": false
+            },
+            {
+              "sample": 0,
+              "event": "active-space-changed",
+              "timestampMs": 1788570830268.6702,
+              "onActiveSpace": true,
+              "monitoring": false,
+              "elapsedMs": 870.345950126648,
+              "key": true,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": true
+            },
+            {
+              "sample": 0,
+              "event": "monitoring-started",
+              "timestampMs": 1788570831070.5627,
+              "onActiveSpace": true,
+              "monitoring": true,
+              "elapsedMs": 1672.245979309082,
+              "key": true,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": true
+            }
+          ],
+          "fullscreenTransition": "",
+          "pid": 27512,
+          "timestampMs": 1788570837150.016,
+          "focused": true,
+          "a": "Jarvis native paste QA 👋",
+          "onActiveSpace": true,
+          "b": ""
+        },
+        "toast": {
+          "visible": true,
+          "key": false,
+          "canBecomeKey": false,
+          "windowNumber": 6105,
+          "nativeClass": "NSKVONotifying_JarvisNotificationPanel",
+          "isPanel": true,
+          "styleMask": 128,
+          "nonactivatingPanel": true,
+          "onActiveSpace": true,
+          "level": 25,
+          "collectionBehavior": 262465,
+          "joinsAllSpaces": true,
+          "fullScreenAuxiliary": true,
+          "joinsAllApplications": true,
+          "ignoresCycle": true,
+          "frame": {
+            "x": 644,
+            "y": 14,
+            "width": 440,
+            "height": 100
+          },
+          "screenWorkArea": {
+            "x": 0,
+            "y": 0,
+            "width": 1728,
+            "height": 1084
+          }
+        },
+        "overlay": {
+          "number": 6105,
+          "layer": 25,
+          "alpha": 1,
+          "frontToBackOrder": 2,
+          "pid": 26753,
+          "bounds": {
+            "X": 644,
+            "Height": 100,
+            "Y": 1003,
+            "Width": 440
+          }
+        },
+        "fullscreenWindow": {
+          "number": 6137,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 5,
+          "pid": 27512,
+          "bounds": {
+            "X": 0,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        "identity": {
+          "available": true,
+          "sameElement": true,
+          "trusted": true,
+          "ownsForeground": true,
+          "operation": "compare",
+          "provenance": "production retained AXUIElement CFEqual; scratch app only"
+        }
+      },
+      {
+        "cycle": 2,
+        "rendered": {
+          "phase": "analyzing",
+          "opacity": 1,
+          "rect": {
+            "x": 107.5,
+            "y": 24,
+            "width": 225,
+            "height": 48,
+            "top": 24,
+            "right": 332.5,
+            "bottom": 72,
+            "left": 107.5
+          },
+          "finiteAnimations": 0
+        },
+        "intermediateMotionObserved": true,
+        "reducedMotion": false,
+        "phase": "analyzing",
+        "editor": {
+          "key": true,
+          "expectedWindowServerFrame": {
+            "y": 33,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "screenFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1117
+          },
+          "windowServerFrameStable": true,
+          "frame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "monitoring": true,
+          "violations": [],
+          "foregroundPid": 27512,
+          "fullscreen": true,
+          "screenSafeAreaFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1085
+          },
+          "fullscreenEntered": true,
+          "fullscreenEvents": [
+            "will-enter",
+            "did-enter"
+          ],
+          "ownedOnScreenWindows": [
+            {
+              "number": 6151,
+              "layer": 26,
+              "alpha": 0,
+              "frontToBackOrder": 1,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 33,
+                "Y": 0,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 6105,
+              "layer": 25,
+              "alpha": 1,
+              "frontToBackOrder": 2,
+              "pid": 26753,
+              "bounds": {
+                "X": 644,
+                "Height": 100,
+                "Y": 1003,
+                "Width": 440
+              }
+            },
+            {
+              "number": 6146,
+              "layer": 0,
+              "alpha": 0,
+              "frontToBackOrder": 4,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 32,
+                "Y": 33,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 6137,
+              "layer": 0,
+              "alpha": 1,
+              "frontToBackOrder": 5,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 1084,
+                "Y": 33,
+                "Width": 1728
+              }
+            }
+          ],
+          "monitoredSamples": 172,
+          "windowNumber": 6137,
+          "command": "monitor-on",
+          "workspaceEvents": [
+            {
+              "sample": 0,
+              "event": "application-activated",
+              "timestampMs": 1788570829594.4062,
+              "onActiveSpace": true,
+              "monitoring": false,
+              "elapsedMs": 196.08891010284424,
+              "key": false,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": false
+            },
+            {
+              "sample": 0,
+              "event": "active-space-changed",
+              "timestampMs": 1788570830268.6702,
+              "onActiveSpace": true,
+              "monitoring": false,
+              "elapsedMs": 870.345950126648,
+              "key": true,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": true
+            },
+            {
+              "sample": 0,
+              "event": "monitoring-started",
+              "timestampMs": 1788570831070.5627,
+              "onActiveSpace": true,
+              "monitoring": true,
+              "elapsedMs": 1672.245979309082,
+              "key": true,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": true
+            }
+          ],
+          "fullscreenTransition": "",
+          "pid": 27512,
+          "timestampMs": 1788570838513.506,
+          "focused": true,
+          "a": "Jarvis native paste QA 👋",
+          "onActiveSpace": true,
+          "b": ""
+        },
+        "toast": {
+          "visible": true,
+          "key": false,
+          "canBecomeKey": false,
+          "windowNumber": 6105,
+          "nativeClass": "NSKVONotifying_JarvisNotificationPanel",
+          "isPanel": true,
+          "styleMask": 128,
+          "nonactivatingPanel": true,
+          "onActiveSpace": true,
+          "level": 25,
+          "collectionBehavior": 262465,
+          "joinsAllSpaces": true,
+          "fullScreenAuxiliary": true,
+          "joinsAllApplications": true,
+          "ignoresCycle": true,
+          "frame": {
+            "x": 644,
+            "y": 14,
+            "width": 440,
+            "height": 100
+          },
+          "screenWorkArea": {
+            "x": 0,
+            "y": 0,
+            "width": 1728,
+            "height": 1084
+          }
+        },
+        "overlay": {
+          "number": 6105,
+          "layer": 25,
+          "alpha": 1,
+          "frontToBackOrder": 2,
+          "pid": 26753,
+          "bounds": {
+            "X": 644,
+            "Height": 100,
+            "Y": 1003,
+            "Width": 440
+          }
+        },
+        "fullscreenWindow": {
+          "number": 6137,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 5,
+          "pid": 27512,
+          "bounds": {
+            "X": 0,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        "identity": {
+          "available": true,
+          "sameElement": true,
+          "trusted": true,
+          "ownsForeground": true,
+          "operation": "compare",
+          "provenance": "production retained AXUIElement CFEqual; scratch app only"
+        }
+      },
+      {
+        "cycle": 2,
+        "rendered": {
+          "phase": "empty",
+          "opacity": 1,
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "width": 392,
+            "height": 81,
+            "top": 24,
+            "right": 416,
+            "bottom": 105,
+            "left": 24
+          },
+          "finiteAnimations": 0
+        },
+        "intermediateMotionObserved": true,
+        "reducedMotion": false,
+        "phase": "empty",
+        "editor": {
+          "key": true,
+          "expectedWindowServerFrame": {
+            "y": 33,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "screenFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1117
+          },
+          "windowServerFrameStable": true,
+          "frame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "monitoring": true,
+          "violations": [],
+          "foregroundPid": 27512,
+          "fullscreen": true,
+          "screenSafeAreaFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1085
+          },
+          "fullscreenEntered": true,
+          "fullscreenEvents": [
+            "will-enter",
+            "did-enter"
+          ],
+          "ownedOnScreenWindows": [
+            {
+              "number": 6151,
+              "layer": 26,
+              "alpha": 0,
+              "frontToBackOrder": 1,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 33,
+                "Y": 0,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 6105,
+              "layer": 25,
+              "alpha": 1,
+              "frontToBackOrder": 2,
+              "pid": 26753,
+              "bounds": {
+                "X": 644,
+                "Height": 133,
+                "Y": 970,
+                "Width": 440
+              }
+            },
+            {
+              "number": 6146,
+              "layer": 0,
+              "alpha": 0,
+              "frontToBackOrder": 4,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 32,
+                "Y": 33,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 6137,
+              "layer": 0,
+              "alpha": 1,
+              "frontToBackOrder": 5,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 1084,
+                "Y": 33,
+                "Width": 1728
+              }
+            }
+          ],
+          "monitoredSamples": 202,
+          "windowNumber": 6137,
+          "command": "monitor-on",
+          "workspaceEvents": [
+            {
+              "sample": 0,
+              "event": "application-activated",
+              "timestampMs": 1788570829594.4062,
+              "onActiveSpace": true,
+              "monitoring": false,
+              "elapsedMs": 196.08891010284424,
+              "key": false,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": false
+            },
+            {
+              "sample": 0,
+              "event": "active-space-changed",
+              "timestampMs": 1788570830268.6702,
+              "onActiveSpace": true,
+              "monitoring": false,
+              "elapsedMs": 870.345950126648,
+              "key": true,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": true
+            },
+            {
+              "sample": 0,
+              "event": "monitoring-started",
+              "timestampMs": 1788570831070.5627,
+              "onActiveSpace": true,
+              "monitoring": true,
+              "elapsedMs": 1672.245979309082,
+              "key": true,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": true
+            }
+          ],
+          "fullscreenTransition": "",
+          "pid": 27512,
+          "timestampMs": 1788570839909.4507,
+          "focused": true,
+          "a": "Jarvis native paste QA 👋",
+          "onActiveSpace": true,
+          "b": ""
+        },
+        "toast": {
+          "visible": true,
+          "key": false,
+          "canBecomeKey": false,
+          "windowNumber": 6105,
+          "nativeClass": "NSKVONotifying_JarvisNotificationPanel",
+          "isPanel": true,
+          "styleMask": 128,
+          "nonactivatingPanel": true,
+          "onActiveSpace": true,
+          "level": 25,
+          "collectionBehavior": 262465,
+          "joinsAllSpaces": true,
+          "fullScreenAuxiliary": true,
+          "joinsAllApplications": true,
+          "ignoresCycle": true,
+          "frame": {
+            "x": 644,
+            "y": 14,
+            "width": 440,
+            "height": 133
+          },
+          "screenWorkArea": {
+            "x": 0,
+            "y": 0,
+            "width": 1728,
+            "height": 1084
+          }
+        },
+        "overlay": {
+          "number": 6105,
+          "layer": 25,
+          "alpha": 1,
+          "frontToBackOrder": 2,
+          "pid": 26753,
+          "bounds": {
+            "X": 644,
+            "Height": 133,
+            "Y": 970,
+            "Width": 440
+          }
+        },
+        "fullscreenWindow": {
+          "number": 6137,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 5,
+          "pid": 27512,
+          "bounds": {
+            "X": 0,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        "identity": {
+          "available": true,
+          "sameElement": true,
+          "trusted": true,
+          "ownsForeground": true,
+          "operation": "compare",
+          "provenance": "production retained AXUIElement CFEqual; scratch app only"
+        }
+      }
+    ],
+    "screenshots": [
+      {
+        "name": "fullscreen-empty-hud",
+        "label": "toast",
+        "path": "<qa-profile>/fullscreen-empty-hud.png"
+      }
+    ],
+    "fullscreenInsertions": [
+      {
+        "cycle": 1,
+        "outcome": {
+          "copied": true,
+          "pasteSent": true,
+          "confirmed": true,
+          "error": null
+        },
+        "actualText": "Jarvis native paste QA 👋",
+        "otherField": "",
+        "rendered": {
+          "phase": "empty",
+          "opacity": 1,
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "width": 392,
+            "height": 81,
+            "top": 24,
+            "right": 416,
+            "bottom": 105,
+            "left": 24
+          },
+          "finiteAnimations": 0
+        },
+        "phase": "empty after insertion",
+        "editor": {
+          "key": true,
+          "expectedWindowServerFrame": {
+            "y": 33,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "screenFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1117
+          },
+          "windowServerFrameStable": true,
+          "frame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "monitoring": true,
+          "violations": [],
+          "foregroundPid": 27512,
+          "fullscreen": true,
+          "screenSafeAreaFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1085
+          },
+          "fullscreenEntered": true,
+          "fullscreenEvents": [
+            "will-enter",
+            "did-enter"
+          ],
+          "ownedOnScreenWindows": [
+            {
+              "number": 6151,
+              "layer": 26,
+              "alpha": 0,
+              "frontToBackOrder": 1,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 33,
+                "Y": 0,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 6105,
+              "layer": 25,
+              "alpha": 1,
+              "frontToBackOrder": 2,
+              "pid": 26753,
+              "bounds": {
+                "X": 644,
+                "Height": 133,
+                "Y": 970,
+                "Width": 440
+              }
+            },
+            {
+              "number": 6146,
+              "layer": 0,
+              "alpha": 0,
+              "frontToBackOrder": 4,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 32,
+                "Y": 33,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 6137,
+              "layer": 0,
+              "alpha": 1,
+              "frontToBackOrder": 5,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 1084,
+                "Y": 33,
+                "Width": 1728
+              }
+            }
+          ],
+          "monitoredSamples": 106,
+          "windowNumber": 6137,
+          "command": "monitor-on",
+          "workspaceEvents": [
+            {
+              "sample": 0,
+              "event": "application-activated",
+              "timestampMs": 1788570829594.4062,
+              "onActiveSpace": true,
+              "monitoring": false,
+              "elapsedMs": 196.08891010284424,
+              "key": false,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": false
+            },
+            {
+              "sample": 0,
+              "event": "active-space-changed",
+              "timestampMs": 1788570830268.6702,
+              "onActiveSpace": true,
+              "monitoring": false,
+              "elapsedMs": 870.345950126648,
+              "key": true,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": true
+            },
+            {
+              "sample": 0,
+              "event": "monitoring-started",
+              "timestampMs": 1788570831070.5627,
+              "onActiveSpace": true,
+              "monitoring": true,
+              "elapsedMs": 1672.245979309082,
+              "key": true,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": true
+            }
+          ],
+          "fullscreenTransition": "",
+          "pid": 27512,
+          "timestampMs": 1788570835399.924,
+          "focused": true,
+          "a": "Jarvis native paste QA 👋",
+          "onActiveSpace": true,
+          "b": ""
+        },
+        "toast": {
+          "visible": true,
+          "key": false,
+          "canBecomeKey": false,
+          "windowNumber": 6105,
+          "nativeClass": "NSKVONotifying_JarvisNotificationPanel",
+          "isPanel": true,
+          "styleMask": 128,
+          "nonactivatingPanel": true,
+          "onActiveSpace": true,
+          "level": 25,
+          "collectionBehavior": 262465,
+          "joinsAllSpaces": true,
+          "fullScreenAuxiliary": true,
+          "joinsAllApplications": true,
+          "ignoresCycle": true,
+          "frame": {
+            "x": 644,
+            "y": 14,
+            "width": 440,
+            "height": 133
+          },
+          "screenWorkArea": {
+            "x": 0,
+            "y": 0,
+            "width": 1728,
+            "height": 1084
+          }
+        },
+        "overlay": {
+          "number": 6105,
+          "layer": 25,
+          "alpha": 1,
+          "frontToBackOrder": 2,
+          "pid": 26753,
+          "bounds": {
+            "X": 644,
+            "Height": 133,
+            "Y": 970,
+            "Width": 440
+          }
+        },
+        "fullscreenWindow": {
+          "number": 6137,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 5,
+          "pid": 27512,
+          "bounds": {
+            "X": 0,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        "identity": {
+          "available": true,
+          "sameElement": true,
+          "trusted": true,
+          "ownsForeground": true,
+          "operation": "compare",
+          "provenance": "production retained AXUIElement CFEqual; scratch app only"
+        }
+      },
+      {
+        "cycle": 2,
+        "outcome": {
+          "copied": true,
+          "pasteSent": true,
+          "confirmed": true,
+          "error": null
+        },
+        "actualText": "Jarvis native paste QA 👋Jarvis native paste QA 👋",
+        "otherField": "",
+        "rendered": {
+          "phase": "empty",
+          "opacity": 1,
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "width": 392,
+            "height": 81,
+            "top": 24,
+            "right": 416,
+            "bottom": 105,
+            "left": 24
+          },
+          "finiteAnimations": 0
+        },
+        "phase": "empty after insertion",
+        "editor": {
+          "key": true,
+          "expectedWindowServerFrame": {
+            "y": 33,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "screenFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1117
+          },
+          "windowServerFrameStable": true,
+          "frame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1084
+          },
+          "monitoring": true,
+          "violations": [],
+          "foregroundPid": 27512,
+          "fullscreen": true,
+          "screenSafeAreaFrame": {
+            "y": 0,
+            "x": 0,
+            "width": 1728,
+            "height": 1085
+          },
+          "fullscreenEntered": true,
+          "fullscreenEvents": [
+            "will-enter",
+            "did-enter"
+          ],
+          "ownedOnScreenWindows": [
+            {
+              "number": 6151,
+              "layer": 26,
+              "alpha": 0,
+              "frontToBackOrder": 1,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 33,
+                "Y": 0,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 6105,
+              "layer": 25,
+              "alpha": 1,
+              "frontToBackOrder": 2,
+              "pid": 26753,
+              "bounds": {
+                "X": 644,
+                "Height": 133,
+                "Y": 970,
+                "Width": 440
+              }
+            },
+            {
+              "number": 6146,
+              "layer": 0,
+              "alpha": 0,
+              "frontToBackOrder": 4,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 32,
+                "Y": 33,
+                "Width": 1728
+              }
+            },
+            {
+              "number": 6137,
+              "layer": 0,
+              "alpha": 1,
+              "frontToBackOrder": 5,
+              "pid": 27512,
+              "bounds": {
+                "X": 0,
+                "Height": 1084,
+                "Y": 33,
+                "Width": 1728
+              }
+            }
+          ],
+          "monitoredSamples": 206,
+          "windowNumber": 6137,
+          "command": "monitor-on",
+          "workspaceEvents": [
+            {
+              "sample": 0,
+              "event": "application-activated",
+              "timestampMs": 1788570829594.4062,
+              "onActiveSpace": true,
+              "monitoring": false,
+              "elapsedMs": 196.08891010284424,
+              "key": false,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": false
+            },
+            {
+              "sample": 0,
+              "event": "active-space-changed",
+              "timestampMs": 1788570830268.6702,
+              "onActiveSpace": true,
+              "monitoring": false,
+              "elapsedMs": 870.345950126648,
+              "key": true,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": true
+            },
+            {
+              "sample": 0,
+              "event": "monitoring-started",
+              "timestampMs": 1788570831070.5627,
+              "onActiveSpace": true,
+              "monitoring": true,
+              "elapsedMs": 1672.245979309082,
+              "key": true,
+              "foregroundPid": 27512,
+              "ownsForeground": 1,
+              "focused": true
+            }
+          ],
+          "fullscreenTransition": "",
+          "pid": 27512,
+          "timestampMs": 1788570840090.931,
+          "focused": true,
+          "a": "Jarvis native paste QA 👋Jarvis native paste QA 👋",
+          "onActiveSpace": true,
+          "b": ""
+        },
+        "toast": {
+          "visible": true,
+          "key": false,
+          "canBecomeKey": false,
+          "windowNumber": 6105,
+          "nativeClass": "NSKVONotifying_JarvisNotificationPanel",
+          "isPanel": true,
+          "styleMask": 128,
+          "nonactivatingPanel": true,
+          "onActiveSpace": true,
+          "level": 25,
+          "collectionBehavior": 262465,
+          "joinsAllSpaces": true,
+          "fullScreenAuxiliary": true,
+          "joinsAllApplications": true,
+          "ignoresCycle": true,
+          "frame": {
+            "x": 644,
+            "y": 14,
+            "width": 440,
+            "height": 133
+          },
+          "screenWorkArea": {
+            "x": 0,
+            "y": 0,
+            "width": 1728,
+            "height": 1084
+          }
+        },
+        "overlay": {
+          "number": 6105,
+          "layer": 25,
+          "alpha": 1,
+          "frontToBackOrder": 2,
+          "pid": 26753,
+          "bounds": {
+            "X": 644,
+            "Height": 133,
+            "Y": 970,
+            "Width": 440
+          }
+        },
+        "fullscreenWindow": {
+          "number": 6137,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 5,
+          "pid": 27512,
+          "bounds": {
+            "X": 0,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        "identity": {
+          "available": true,
+          "sameElement": true,
+          "trusted": true,
+          "ownsForeground": true,
+          "operation": "compare",
+          "provenance": "production retained AXUIElement CFEqual; scratch app only"
+        }
+      }
+    ],
+    "fullscreenMonitoring": {
+      "key": true,
+      "expectedWindowServerFrame": {
+        "y": 33,
+        "x": 0,
+        "width": 1728,
+        "height": 1084
+      },
+      "screenFrame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1117
+      },
+      "windowServerFrameStable": true,
+      "frame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1084
+      },
+      "monitoring": true,
+      "violations": [],
+      "foregroundPid": 27512,
+      "fullscreen": true,
+      "screenSafeAreaFrame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1085
+      },
+      "fullscreenEntered": true,
+      "fullscreenEvents": [
+        "will-enter",
+        "did-enter"
+      ],
+      "ownedOnScreenWindows": [
+        {
+          "number": 6151,
+          "layer": 26,
+          "alpha": 0,
+          "frontToBackOrder": 1,
+          "pid": 27512,
+          "bounds": {
+            "X": 0,
+            "Height": 33,
+            "Y": 0,
+            "Width": 1728
+          }
+        },
+        {
+          "number": 6146,
+          "layer": 0,
+          "alpha": 0,
+          "frontToBackOrder": 3,
+          "pid": 27512,
+          "bounds": {
+            "X": 0,
+            "Height": 32,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        {
+          "number": 6137,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 4,
+          "pid": 27512,
+          "bounds": {
+            "X": 0,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          }
+        }
+      ],
+      "monitoredSamples": 219,
+      "windowNumber": 6137,
+      "command": "monitor-on",
+      "workspaceEvents": [
+        {
+          "sample": 0,
+          "event": "application-activated",
+          "timestampMs": 1788570829594.4062,
+          "onActiveSpace": true,
+          "monitoring": false,
+          "elapsedMs": 196.08891010284424,
+          "key": false,
+          "foregroundPid": 27512,
+          "ownsForeground": 1,
+          "focused": false
+        },
+        {
+          "sample": 0,
+          "event": "active-space-changed",
+          "timestampMs": 1788570830268.6702,
+          "onActiveSpace": true,
+          "monitoring": false,
+          "elapsedMs": 870.345950126648,
+          "key": true,
+          "foregroundPid": 27512,
+          "ownsForeground": 1,
+          "focused": true
+        },
+        {
+          "sample": 0,
+          "event": "monitoring-started",
+          "timestampMs": 1788570831070.5627,
+          "onActiveSpace": true,
+          "monitoring": true,
+          "elapsedMs": 1672.245979309082,
+          "key": true,
+          "foregroundPid": 27512,
+          "ownsForeground": 1,
+          "focused": true
+        }
+      ],
+      "fullscreenTransition": "",
+      "pid": 27512,
+      "timestampMs": 1788570840631.6782,
+      "focused": true,
+      "a": "Jarvis native paste QA 👋Jarvis native paste QA 👋",
+      "onActiveSpace": true,
+      "b": ""
+    },
+    "scope": {
+      "provenance": "Actual NSWindow toggleFullScreen delegate lifecycle, NSWorkspace foreground PID, retained production AX field, and WindowServer on-screen order/bounds; 40 ms independent native sampling includes fullscreen surface movement",
+      "capture": "Only the owned toast WKWebView is snapshotted; no display pixels or user window metadata is captured",
+      "trigger": "Synthetic listening → analyzing → empty → production CGEvent paste into the retained original AX field → dismiss; two consecutive cycles through the production HUD event, DOM, resize IPC, and native show path",
+      "insertion": "Fixed synthetic marker only, exact original-field content checked after each paste, second field remains empty, clipboard restored by the owned helper if no intervening copy occurs",
+      "excluded": [
+        "microphone capture",
+        "global hotkey callback",
+        "user applications",
+        "multiple physical displays"
+      ]
+    },
+    "jarvisActivationEvents": {
+      "events": [
+        {
+          "event": "observation-started",
+          "timestampMs": 1788570828691,
+          "foregroundPid": 26753,
+          "ownsForeground": true,
+          "active": true,
+          "monitoring": false
+        },
+        {
+          "event": "did-resign-active",
+          "timestampMs": 1788570829551,
+          "foregroundPid": 27512,
+          "ownsForeground": false,
+          "active": false,
+          "monitoring": false
+        },
+        {
+          "event": "monitoring-started",
+          "timestampMs": 1788570831049,
+          "foregroundPid": 27512,
+          "ownsForeground": false,
+          "active": false,
+          "monitoring": true
+        }
+      ],
+      "monitoring": true,
+      "observing": true,
+      "pid": 26753,
+      "provenance": "AppKit activation notifications for this owned debug app; only foreground PID, booleans and timestamps"
+    },
+    "fullscreenBeforeCleanup": {
+      "key": true,
+      "expectedWindowServerFrame": {
+        "y": 33,
+        "x": 0,
+        "width": 1728,
+        "height": 1084
+      },
+      "screenFrame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1117
+      },
+      "windowServerFrameStable": true,
+      "frame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1084
+      },
+      "monitoring": true,
+      "violations": [],
+      "foregroundPid": 27512,
+      "fullscreen": true,
+      "screenSafeAreaFrame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1085
+      },
+      "fullscreenEntered": true,
+      "fullscreenEvents": [
+        "will-enter",
+        "did-enter"
+      ],
+      "ownedOnScreenWindows": [
+        {
+          "number": 6151,
+          "layer": 26,
+          "alpha": 0,
+          "frontToBackOrder": 1,
+          "pid": 27512,
+          "bounds": {
+            "X": 0,
+            "Height": 33,
+            "Y": 0,
+            "Width": 1728
+          }
+        },
+        {
+          "number": 6146,
+          "layer": 0,
+          "alpha": 0,
+          "frontToBackOrder": 3,
+          "pid": 27512,
+          "bounds": {
+            "X": 0,
+            "Height": 32,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        {
+          "number": 6137,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 4,
+          "pid": 27512,
+          "bounds": {
+            "X": 0,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          }
+        }
+      ],
+      "monitoredSamples": 219,
+      "windowNumber": 6137,
+      "command": "monitor-on",
+      "workspaceEvents": [
+        {
+          "sample": 0,
+          "event": "application-activated",
+          "timestampMs": 1788570829594.4062,
+          "onActiveSpace": true,
+          "monitoring": false,
+          "elapsedMs": 196.08891010284424,
+          "key": false,
+          "foregroundPid": 27512,
+          "ownsForeground": 1,
+          "focused": false
+        },
+        {
+          "sample": 0,
+          "event": "active-space-changed",
+          "timestampMs": 1788570830268.6702,
+          "onActiveSpace": true,
+          "monitoring": false,
+          "elapsedMs": 870.345950126648,
+          "key": true,
+          "foregroundPid": 27512,
+          "ownsForeground": 1,
+          "focused": true
+        },
+        {
+          "sample": 0,
+          "event": "monitoring-started",
+          "timestampMs": 1788570831070.5627,
+          "onActiveSpace": true,
+          "monitoring": true,
+          "elapsedMs": 1672.245979309082,
+          "key": true,
+          "foregroundPid": 27512,
+          "ownsForeground": 1,
+          "focused": true
+        }
+      ],
+      "fullscreenTransition": "",
+      "pid": 27512,
+      "timestampMs": 1788570840631.6782,
+      "focused": true,
+      "a": "Jarvis native paste QA 👋Jarvis native paste QA 👋",
+      "onActiveSpace": true,
+      "b": ""
+    },
+    "fullscreenCleanup": {
+      "key": true,
+      "expectedWindowServerFrame": {
+        "y": 186,
+        "x": 544,
+        "width": 640,
+        "height": 472
+      },
+      "screenFrame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1117
+      },
+      "windowServerFrameStable": false,
+      "frame": {
+        "y": 459,
+        "x": 544,
+        "width": 640,
+        "height": 472
+      },
+      "monitoring": false,
+      "violations": [],
+      "foregroundPid": 27512,
+      "fullscreen": false,
+      "screenSafeAreaFrame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1085
+      },
+      "fullscreenEntered": false,
+      "fullscreenEvents": [
+        "will-enter",
+        "did-enter",
+        "will-exit",
+        "did-exit"
+      ],
+      "ownedOnScreenWindows": [
+        {
+          "number": 6201,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 20,
+          "pid": 27512,
+          "bounds": {
+            "X": 0,
+            "Height": 1117,
+            "Y": 0,
+            "Width": 1728
+          }
+        },
+        {
+          "number": 6103,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 21,
+          "pid": 26753,
+          "bounds": {
+            "X": 304,
+            "Height": 780,
+            "Y": 109,
+            "Width": 1120
+          }
+        }
+      ],
+      "monitoredSamples": 219,
+      "windowNumber": 6137,
+      "command": "exit-fullscreen",
+      "workspaceEvents": [
+        {
+          "sample": 0,
+          "event": "application-activated",
+          "timestampMs": 1788570829594.4062,
+          "onActiveSpace": true,
+          "monitoring": false,
+          "elapsedMs": 196.08891010284424,
+          "key": false,
+          "foregroundPid": 27512,
+          "ownsForeground": 1,
+          "focused": false
+        },
+        {
+          "sample": 0,
+          "event": "active-space-changed",
+          "timestampMs": 1788570830268.6702,
+          "onActiveSpace": true,
+          "monitoring": false,
+          "elapsedMs": 870.345950126648,
+          "key": true,
+          "foregroundPid": 27512,
+          "ownsForeground": 1,
+          "focused": true
+        },
+        {
+          "sample": 0,
+          "event": "monitoring-started",
+          "timestampMs": 1788570831070.5627,
+          "onActiveSpace": true,
+          "monitoring": true,
+          "elapsedMs": 1672.245979309082,
+          "key": true,
+          "foregroundPid": 27512,
+          "ownsForeground": 1,
+          "focused": true
+        },
+        {
+          "sample": 219,
+          "event": "monitoring-stopped",
+          "timestampMs": 1788570840669.454,
+          "onActiveSpace": true,
+          "monitoring": false,
+          "elapsedMs": 11271.129012107847,
+          "key": true,
+          "foregroundPid": 27512,
+          "ownsForeground": 1,
+          "focused": true
+        },
+        {
+          "sample": 219,
+          "event": "active-space-changed",
+          "timestampMs": 1788570841324.636,
+          "onActiveSpace": true,
+          "monitoring": false,
+          "elapsedMs": 11926.312923431396,
+          "key": true,
+          "foregroundPid": 27512,
+          "ownsForeground": 1,
+          "focused": true
+        }
+      ],
+      "fullscreenTransition": "",
+      "pid": 27512,
+      "timestampMs": 1788570841351.311,
+      "focused": true,
+      "a": "Jarvis native paste QA 👋Jarvis native paste QA 👋",
+      "onActiveSpace": true,
+      "b": ""
+    },
+    "permissionsAfter": {
+      "microphone": "authorized",
+      "accessibility": true,
+      "provenance": "native authorization status; no request made"
+    }
+  },
+  "elapsedMs": 12791,
+  "runtime": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+    "url": "tauri://localhost",
+    "viewport": {
+      "width": 1120,
+      "height": 780,
+      "dpr": 2
+    }
+  },
+  "geometry": [
+    {
+      "tag": "BODY",
+      "id": "",
+      "text": "\nJarvis\nПоиск команд\n⌘K\n\n\nРазделы\n\nЧаты\nАктивные сессии Claude и Codex\n⌘1\n\nПроекты\nНачать задачу на компьютере или удалё",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1120,
+        "height": 780,
+        "top": 0,
+        "right": 1120,
+        "bottom": 780,
+        "left": 0
+      },
+      "display": "block",
+      "visibility": "visible"
+    },
+    {
+      "tag": "MAIN",
+      "id": "",
+      "text": "\nРазделы\n\nЧаты\nАктивные сессии Claude и Codex\n⌘1\n\nПроекты\nНачать задачу на компьютере или удалённой машине\n⌘2\n\nДиктовка\n",
+      "rect": {
+        "x": 1,
+        "y": 43,
+        "width": 1118,
+        "height": 698,
+        "top": 43,
+        "right": 1119,
+        "bottom": 741,
+        "left": 1
+      },
+      "display": "flex",
+      "visibility": "visible"
+    },
+    {
+      "tag": "MAIN",
+      "id": "",
+      "text": "\n        \n        С чего начнём?\n        Продолжи разговор слева или начни новую задачу.\nПроекты, голос и встречи — всё ",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0,
+        "top": 0,
+        "right": 0,
+        "bottom": 0,
+        "left": 0
+      },
+      "display": "block",
+      "visibility": "visible"
+    },
+    {
+      "tag": "SECTION",
+      "id": "",
+      "text": "\n        esc\n        \n        ↑ ↓ выбрать↵ открытьesc закрыть\n      ",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0,
+        "top": 0,
+        "right": 0,
+        "bottom": 0,
+        "left": 0
+      },
+      "display": "flex",
+      "visibility": "visible"
+    }
+  ],
+  "native": {
+    "pid": 26753,
+    "profile": "<qa-profile>",
+    "visible": true,
+    "focused": true,
+    "outerPosition": {
+      "x": 608,
+      "y": 218
+    },
+    "innerSize": {
+      "width": 2240,
+      "height": 1560
+    },
+    "scaleFactor": 2.0,
+    "windowLabels": [
+      "toast",
+      "main"
+    ],
+    "excluded": [
+      "hook reconciliation",
+      "sidecar processes",
+      "voice warmup",
+      "remotes",
+      "global hotkeys",
+      "background timers",
+      "updater",
+      "live audio capture"
+    ]
+  }
+}

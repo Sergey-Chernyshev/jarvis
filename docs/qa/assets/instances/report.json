@@ -1,0 +1,12 @@
+{
+  "checks": [
+    "two profiles displayed separately with technical details collapsed",
+    "default profile persisted",
+    "rename retains identity and home",
+    "repair targets selected profile",
+    "compact VM inventory fits 900/1280px with runtime details collapsed",
+    "VM connection retains explicit SSH configuration",
+    "new chat uses selected default profile"
+  ],
+  "errors": []
+}

@@ -1,0 +1,14 @@
+{
+  "checks": [
+    "managed model selector applies exact model and displays confirmation",
+    "failed model selection restores actual model",
+    "state snapshots cannot reopen an in-flight model change",
+    "working state explains when model controls return",
+    "Codex uses account model catalog and hides unsupported standalone effort",
+    "local and remote external sessions are read-only despite stale pane metadata",
+    "disconnected managed session keeps editable draft and disables delivery",
+    "missing terminal is distinct from external observation",
+    "new task passes chosen model with its selected source"
+  ],
+  "errors": []
+}

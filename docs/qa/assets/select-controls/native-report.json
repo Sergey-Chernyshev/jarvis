@@ -1,0 +1,62 @@
+{
+  "ok": true,
+  "failure": null,
+  "errors": [],
+  "steps": [
+    {
+      "name": "New-task provider uses a designed, accessible popup above the composer",
+      "ok": true,
+      "elapsedMs": 335
+    },
+    {
+      "name": "Real profile and model catalogs populate the designed controls asynchronously",
+      "ok": true,
+      "elapsedMs": 365
+    },
+    {
+      "name": "Arrow navigation is a draft until Enter commits exactly one selection",
+      "ok": true,
+      "elapsedMs": 125
+    },
+    {
+      "name": "Disabled permissions remain unavailable and Escape preserves the draft",
+      "ok": true,
+      "elapsedMs": 2
+    },
+    {
+      "name": "Machine popup cancels without altering machine or profile",
+      "ok": true,
+      "elapsedMs": 1
+    },
+    {
+      "name": "Default profile settings popup is readable and cancels without saving",
+      "ok": true,
+      "elapsedMs": 653
+    }
+  ],
+  "elapsedMs": 1482,
+  "runtime": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+    "url": "tauri://localhost",
+    "viewport": {
+      "width": 988,
+      "height": 747,
+      "dpr": 2
+    }
+  },
+  "catalog": {
+    "profileLabel": "codex-personal",
+    "modelCount": 8
+  },
+  "input": "DOM-dispatched keyboard events and real WKWebView clicks; hardware input is covered by Chromium Playwright separately.",
+  "isolation": [
+    "hook reconciliation",
+    "sidecar processes",
+    "voice warmup",
+    "remotes",
+    "global hotkeys",
+    "background timers",
+    "updater",
+    "live audio capture"
+  ]
+}

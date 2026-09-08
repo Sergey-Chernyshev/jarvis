@@ -282,10 +282,11 @@ impl Power {
 
     pub async fn cmd(d: &Arc<Daemon>, id: &str, name: &str, args: &Value) -> Value {
         if name == "_enable" {
+            if id != "keep-awake" && id != "clamshell" { return json!({"ok":false,"error":"плагин не найден"}); }
             let on = args.get("on").and_then(Value::as_bool).unwrap_or(false);
             let mut patch = Map::new();
             patch.insert("enabled".into(), Value::Bool(on));
-            d.settings.set_plugin(id, patch);
+            if let Err(error) = d.settings.try_set_plugin(id, patch) { return json!({"ok":false,"error":error}); }
             match (id, on) {
                 ("keep-awake", true) => {
                     if !d.power.ka_enabled() {
@@ -340,12 +341,12 @@ impl Power {
                     // этом фиксируем выключенным в настройках — иначе ближайший
                     // working снова поднимет ассерт, и «выключить» не сработает
                     // (ровно тот баг, на который жаловались).
+                    let mut patch = Map::new();
+                    patch.insert("auto".into(), Value::Bool(false));
+                    if let Err(error) = d.settings.try_set_plugin("keep-awake", patch) { return json!({"ok":false,"error":error}); }
                     let mut events = engine.set_auto(false, now);
                     events.extend(engine.stop_manual());
                     drop(guard);
-                    let mut patch = Map::new();
-                    patch.insert("auto".into(), Value::Bool(false));
-                    d.settings.set_plugin("keep-awake", patch);
                     handle_engine_events(d, events);
                     return json!({ "ok": true });
                 }
@@ -354,17 +355,19 @@ impl Power {
                     let mut events = Vec::new();
                     if let Some(auto) = args.get("auto").and_then(Value::as_bool) {
                         patch.insert("auto".into(), Value::Bool(auto));
-                        events.extend(engine.set_auto(auto, now));
+
                     }
                     if let Some(kd) = args.get("keepDisplayOn").and_then(Value::as_bool) {
                         patch.insert("keepDisplayOn".into(), Value::Bool(kd));
-                        events.extend(engine.set_display_pref(kd));
+
                     }
                     if patch.is_empty() {
                         return json!({ "ok": false, "error": "пустой set" });
                     }
+                    if let Err(error) = d.settings.try_set_plugin("keep-awake", patch) { return json!({"ok":false,"error":error}); }
+                    if let Some(auto) = args.get("auto").and_then(Value::as_bool) { events.extend(engine.set_auto(auto, now)); }
+                    if let Some(kd) = args.get("keepDisplayOn").and_then(Value::as_bool) { events.extend(engine.set_display_pref(kd)); }
                     drop(guard);
-                    d.settings.set_plugin("keep-awake", patch);
                     handle_engine_events(d, events);
                     return json!({ "ok": true });
                 }
@@ -398,7 +401,7 @@ impl Power {
                     return json!({ "ok": false, "error": "пустой set" });
                 }
                 let auto_on = patch.get("autoArm") == Some(&Value::Bool(true));
-                d.settings.set_plugin("clamshell", patch);
+                if let Err(error) = d.settings.try_set_plugin("clamshell", patch) { return json!({"ok":false,"error":error}); }
                 if auto_on {
                     peer_sync(d); // авто включили — сразу синхронизируемся с keep-awake
                 }

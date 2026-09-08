@@ -1,0 +1,83 @@
+/* A readable account list. Configuration appears beside its profile only on request. */
+.instance-settings { min-width: 0; margin-bottom: 32px; font-family: var(--font); }
+.instance-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 16px; }
+.instance-section-title { color: var(--ink); font-size: 15px; font-weight: 600; }
+.instance-settings .instance-button { flex: none; min-height: 34px; border: 1px solid var(--line-strong); border-radius: 10px; padding: 7px 12px; background: var(--fill-2); color: var(--ink-2); font: 500 12px/1.35 var(--font); cursor: pointer; transition: background 140ms ease, border-color 140ms ease; }
+.instance-settings .instance-button:hover { background: var(--fill-3); border-color: var(--ink-faint); }
+.instance-settings .instance-primary { background: var(--accent); border-color: transparent; color: var(--on-accent); }
+.instance-settings .instance-primary:hover { background: var(--accent); border-color: var(--accent-text); filter: brightness(1.08); }
+.instance-settings .instance-quiet { border-color: transparent; background: transparent; color: var(--ink-mute); }
+.instance-settings .instance-button:disabled { cursor: default; filter: none; opacity: .5; }
+.instance-settings .instance-button:focus-visible, .instance-settings .toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.instance-default { display: flex; gap: 24px; justify-content: space-between; align-items: center; margin-bottom: 8px; padding: 14px 16px; border-radius: 12px; background: var(--fill-2); }
+.instance-default-copy { min-width: 0; }
+.instance-settings .instance-hint { color: var(--ink-mute); font-size: 12px; line-height: 1.55; max-width: 64ch; }
+.instance-default .instance-hint { margin-top: 4px; }
+.instance-settings .instance-input { display: block; width: 100%; min-width: 0; min-height: 38px; margin: 0; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--paper-2); color: var(--ink); padding: 9px 12px; font: 400 13px/1.4 var(--font); outline: none; transition: box-shadow 140ms ease, border-color 140ms ease; }
+.instance-settings .instance-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.instance-settings .instance-input::placeholder { color: var(--ink-faint); }
+.instance-settings .instance-input:disabled { opacity: .5; }
+.instance-settings .instance-select { width: min(42%, 240px); flex: none; cursor: pointer; padding-right: 24px; }
+.instance-profile { border-bottom: 1px solid var(--line); min-width: 0; }
+.instance-profile-row { display: flex; align-items: center; gap: 13px; min-height: 88px; padding: 18px 0; }
+.instance-avatar { width: 36px; height: 36px; display: inline-flex; align-items: center; justify-content: center; flex: none; border-radius: 11px; background: var(--accent-soft); color: var(--accent-text); }
+.instance-avatar .ph, .instance-avatar svg { font-size: 21px; width: 21px; height: 21px; }
+.instance-avatar-blue { color: var(--info-text, #91baff); background: var(--info-soft, #6a9dff16); }
+.instance-identity { flex: 1; min-width: 0; }
+.instance-name { color: var(--ink); font-size: 14px; font-weight: 600; line-height: 1.45; overflow-wrap: anywhere; }
+.instance-meta { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-top: 5px; font-size: 11px; line-height: 1.4; }
+.instance-chat-count { color: var(--ink-mute); font-variant-numeric: tabular-nums; }
+.instance-badge { padding: 3px 7px; border-radius: 6px; font-size: 10px; font-weight: 500; }
+.instance-badge[data-tone='success'] { background: var(--success-soft, var(--accent-soft)); color: var(--success-text, var(--accent-text)); }
+.instance-badge[data-tone='info'] { background: var(--info-soft, #6a9dff16); color: var(--info-text, #91baff); }
+.instance-badge[data-tone='warning'] { background: var(--warning-soft, #ffbd5918); color: var(--warning-text, #edbd75); }
+.instance-badge[data-tone='muted'] { background: var(--fill-2); color: var(--ink-mute); }
+.instance-row-actions { display: flex; flex: none; align-items: center; gap: 18px; }
+.instance-tracking { display: flex; align-items: center; gap: 8px; color: var(--ink-mute); font-size: 11px; cursor: pointer; }
+.instance-tracking .toggle { cursor: pointer; }
+.instance-settings .instance-disclosure { display: flex; align-items: center; gap: 10px; border-color: transparent; background: transparent; }
+.instance-caret { color: var(--ink-mute); transition: transform 180ms ease; }
+.instance-disclosure[aria-expanded='true'] .instance-caret { transform: rotate(180deg); }
+.instance-details { min-width: 0; margin: 0 0 18px 49px; padding: 18px; border-radius: 12px; background: var(--fill-2); animation: instance-details-in 180ms ease-out; }
+.instance-rename { display: flex; align-items: flex-end; gap: 10px; margin-bottom: 22px; }
+.instance-field { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 7px; }
+.instance-field-label { display: block; color: var(--ink-2); font-size: 12px; font-weight: 500; line-height: 1.4; }
+.instance-rename .instance-field { max-width: 340px; }
+.instance-rename .instance-button { min-height: 38px; }
+.instance-hook-setting { display: flex; align-items: center; gap: 18px; margin-bottom: 18px; }
+.instance-hook-copy { flex: 1; min-width: 0; }
+.instance-hook-copy strong { color: var(--ink); font-size: 12px; font-weight: 550; }
+.instance-hook-copy p { color: var(--ink-mute); font-size: 12px; line-height: 1.55; margin-top: 5px; max-width: 58ch; }
+.instance-facts { display: grid; gap: 11px; padding-top: 16px; border-top: 1px solid var(--line); user-select: text; }
+.instance-fact { display: grid; grid-template-columns: 136px minmax(0, 1fr); align-items: baseline; gap: 12px; font-size: 11px; line-height: 1.6; }
+.instance-fact dt { color: var(--ink-mute); }
+.instance-fact dd { color: var(--ink-2); min-width: 0; overflow-wrap: anywhere; }
+.instance-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
+.instance-settings .instance-add-button { margin-top: 17px; color: var(--accent-text); border-color: var(--accent-line); background: var(--accent-soft); }
+.instance-add-form { display: flex; flex-direction: column; gap: 16px; max-width: 540px; padding: 22px 0 8px; }
+.instance-form-title { color: var(--ink); font-size: 14px; font-weight: 600; }
+.instance-form-actions { display: flex; gap: 8px; padding-top: 2px; }
+.instance-empty { padding: 30px 16px; text-align: center; line-height: 1.6; }
+.instance-empty strong { display: block; color: var(--ink); font-size: 14px; font-weight: 550; }
+.instance-empty p { color: var(--ink-mute); font-size: 12px; margin-top: 6px; }
+.instance-status { padding: 10px 13px; border-radius: 10px; background: var(--info-soft, var(--accent-soft)); color: var(--info-text, var(--accent-text)); margin-bottom: 14px; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.instance-status[data-tone='success'] { background: var(--success-soft, var(--accent-soft)); color: var(--success-text, var(--accent-text)); }
+.instance-status[data-tone='warning'], .instance-errors { background: var(--warning-soft, #ffbd5918); color: var(--warning-text, #edbd75); }
+.instance-status[data-tone='error'] { background: var(--danger-soft); color: var(--danger); }
+.instance-errors { padding: 10px 12px; border-radius: 9px; margin-bottom: 16px; font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; user-select: text; }
+.instance-errors p + p { margin-top: 6px; }
+@keyframes instance-details-in { from { opacity: .5; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+@media (max-width: 800px) {
+  .instance-profile-row { flex-wrap: wrap; }
+  .instance-row-actions { width: 100%; padding-left: 49px; justify-content: space-between; gap: 12px; }
+  .instance-details { margin-left: 0; }
+}
+@media (max-width: 650px) {
+  .instance-default { flex-direction: column; align-items: stretch; gap: 12px; }
+  .instance-settings .instance-select { width: 100%; }
+  .instance-rename, .instance-hook-setting { flex-direction: column; align-items: stretch; gap: 12px; }
+  .instance-rename .instance-field { max-width: none; }
+  .instance-rename .instance-button, .instance-hook-setting .instance-button { align-self: flex-start; }
+  .instance-fact { grid-template-columns: minmax(0, 1fr); gap: 1px; }
+}
+@media (prefers-reduced-motion: reduce) { .instance-details { animation: none; } .instance-settings * { transition: none; } }

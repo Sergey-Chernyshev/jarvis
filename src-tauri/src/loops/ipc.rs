@@ -101,7 +101,9 @@ pub async fn loops_compose(app: AppHandle, text: String, item: Option<Value>) ->
     }
     // Заготовка из панели: репозиторий и агент человек мог выбрать до описания,
     // и его выбор сильнее того, что придумает модель.
-    let base: Loop = item.and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+    let base: Loop = item
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
     let _ = &app; // команда ничего не берёт у демона, но подпись держим общей
 
     let p = super::compose::prompt(&text, &base.sandbox.repo, &base.agent);
@@ -118,7 +120,9 @@ pub async fn loops_compose(app: AppHandle, text: String, item: Option<Value>) ->
             let problems = item.problems();
             json!({ "ok": true, "item": item, "problems": problems })
         }
-        None => json!({ "ok": false, "error": "не разобрал ответ модели — попробуй переформулировать" }),
+        None => {
+            json!({ "ok": false, "error": "не разобрал ответ модели — попробуй переформулировать" })
+        }
     }
 }
 
@@ -177,7 +181,13 @@ pub fn loops_start(app: AppHandle, id: String) -> Value {
 
 /// Поднять запуск в фоне. Вынесено отдельно: этим же пользуется расписание.
 pub fn spawn_run(d: &Arc<Daemon>, item: Loop) {
-    let run_n = d.loops.store.run(&item.id).map(|r| r.n + 1).unwrap_or(1);
+    let run_n = d
+        .loops
+        .store
+        .run(&item.id)
+        .map(|r| r.n.saturating_add(1))
+        .unwrap_or(1);
+    d.loops.store.put_run(engine::initial_run(&item, run_n));
     let mut stamped = item.clone();
     stamped.last_run_at = crate::util::now_ms();
     d.loops.store.save(stamped);
@@ -226,7 +236,10 @@ pub fn loops_intervene(app: AppHandle, id: String, text: String) -> Value {
     if text.is_empty() {
         return json!({ "ok": false, "error": "пустая реплика" });
     }
-    let updated = d.loops.store.with_run(&id, |run| run.interventions.push(text));
+    let updated = d
+        .loops
+        .store
+        .with_run(&id, |run| run.interventions.push(text));
     push(&d);
     json!({ "ok": updated.is_some() })
 }
@@ -245,14 +258,17 @@ pub fn loops_answer(app: AppHandle, id: String, answer: String) -> Value {
     if run.state != RunState::Asking {
         return json!({ "ok": false, "error": "цикл ни о чём не спрашивает" });
     }
-    d.loops.store.with_run(&id, |r| {
-        let q = r.ask.take().map(|a| a.question).unwrap_or_default();
-        r.interventions.push(format!("Ты спрашивал: {q}\nОтвет: {answer}"));
-        r.state = RunState::Running;
-    });
+    if answer.trim().is_empty() {
+        return json!({ "ok": false, "error": "пустой ответ" });
+    }
     if !d.loops.claim() {
         return json!({ "ok": false, "error": "уже крутится другой цикл" });
     }
+    d.loops.store.with_run(&id, |r| {
+        // Keep the question's step: the pipeline must continue AFTER it.
+        r.interventions.push(answer.trim().to_string());
+        r.state = RunState::Running;
+    });
     // Продолжаем ТОТ ЖЕ запуск: новый начал бы с чистой ветки и потерял всё,
     // что цикл успел за ночь.
     resume_run(&d, item, run.n);
@@ -295,7 +311,8 @@ pub fn loops_review(app: AppHandle, id: String, n: u32, accept: bool, comment: S
             }
         }
         if !accept && !comment.trim().is_empty() {
-            run.interventions.push(format!("Человек вернул итерацию {n}: {comment}"));
+            run.interventions
+                .push(format!("Человек вернул итерацию {n}: {comment}"));
             run.streak = 0;
         }
     });
@@ -316,6 +333,9 @@ pub fn loops_resume(app: AppHandle, id: String, extra_tokens: Option<u64>) -> Va
     if !run.stop.is_limit() {
         return json!({ "ok": false, "error": "этот запуск остановлен не ограничителем" });
     }
+    if !d.loops.claim() {
+        return json!({ "ok": false, "error": "уже крутится другой цикл" });
+    }
     // Потолок поднимаем в самой конфигурации: иначе следующая же проверка
     // ограничителя остановит запуск на том же месте.
     match run.stop {
@@ -331,9 +351,6 @@ pub fn loops_resume(app: AppHandle, id: String, extra_tokens: Option<u64>) -> Va
         r.stop_note.clear();
         r.ended_at = 0;
     });
-    if !d.loops.claim() {
-        return json!({ "ok": false, "error": "уже крутится другой цикл" });
-    }
     resume_run(&d, item, run.n);
     push(&d);
     json!({ "ok": true })
@@ -393,8 +410,15 @@ mod tests {
         }
         assert!(item.limits.tokens > before);
 
-        let run = Run { tokens: 200_000, ..Default::default() };
-        assert_eq!(run.tripped(&item.limits, 0), None, "после подъёма стена отодвинулась");
+        let run = Run {
+            tokens: 200_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            run.tripped(&item.limits, 0),
+            None,
+            "после подъёма стена отодвинулась"
+        );
     }
 
     #[test]

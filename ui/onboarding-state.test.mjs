@@ -82,3 +82,47 @@ test('ready core distinguishes a warming runtime socket from online', () => {
   }));
   assert.equal(view.runtimeState, 'warming');
 });
+
+test('stale native reads cannot regress a terminal job or replace a newer job', () => {
+  const done = snapshot({ job: { id: 4, state: 'done' } });
+  assert.equal(State.mergeSnapshot(done, snapshot({ job: { id: 4, state: 'running' } })).job.state, 'done');
+  assert.equal(State.mergeSnapshot(done, snapshot({ job: { id: 3, state: 'failed' } })).job.id, 4);
+  assert.equal(State.mergeSnapshot(done, { id: 5, state: 'running' }).job.id, 5);
+  assert.equal(State.mergeSnapshot(done, { id: 5, state: 'running' }).coreReady, false);
+});
+
+test('progress exposes only actual current-stage percentages', () => {
+  assert.equal(State.stepProgress({ steps: [] }).pct, null);
+  assert.equal(State.stepProgress({ steps: [{ state: 'start', phase: 'download' }] }).pct, null);
+  assert.equal(State.stepProgress({ steps: [{ state: 'info', pct: 53 }] }).pct, 53);
+  assert.equal(State.stepProgress({ steps: [{ state: 'info', pct: NaN }] }).pct, null);
+  assert.equal(State.stepProgress({ steps: [{ state: 'done', pct: 100 }] }).pct, null);
+  const progress = State.stepProgress({ steps: [{ phase: 'old', state: 'warn' }, { phase: 'new', state: 'info', pct: 17 }] });
+  assert.equal(progress.latest.phase, 'new');
+  assert.equal(progress.pct, 17);
+});
+
+test('unavailable and installed choices cannot enter an installation plan', () => {
+  assert.deepEqual(State.selectedPlan({ whisper: true, qwen: true, wake: true, silero: true }, [
+    { id: 'whisper-turbo', ready: true, available: true },
+    { id: 'qwen3-runtime', ready: false, available: false },
+    { id: 'hey_jarvis', ready: false, available: false },
+    { id: 'silero', ready: false, available: true },
+  ]), ['silero']);
+});
+
+test('navigation preserves the chosen step but cannot bypass core readiness or a running job', () => {
+  assert.equal(State.navigation('ready', snapshot()), 'agents');
+  assert.equal(State.navigation('welcome', snapshot({ job: { state: 'running' } }), true), 'installing');
+  assert.equal(State.navigation('capabilities', snapshot({ coreReady: true, job: { state: 'failed' } })), 'degraded');
+  assert.equal(State.navigation('capabilities', snapshot({ coreReady: true, job: { state: 'failed' } }), true), 'capabilities');
+});
+
+test('explicit voice-only navigation never invents agent readiness', () => {
+  const withoutAgents = snapshot();
+  assert.equal(State.navigation('capabilities', withoutAgents, false, true), 'capabilities');
+  assert.equal(State.navigation('ready', withoutAgents, false, true), 'ready');
+  assert.equal(State.derive(withoutAgents).runtimeState, 'offline');
+  assert.equal(withoutAgents.coreReady, false);
+  assert.equal(State.navigation('ready', snapshot({ job: { state: 'running' } }), false, true), 'installing');
+});

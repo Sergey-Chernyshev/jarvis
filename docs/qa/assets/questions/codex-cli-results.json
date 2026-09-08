@@ -1,0 +1,196 @@
+{
+  "root": "/tmp/jq-egicazv3",
+  "socket": "/tmp/jq-egicazv3/tmux.sock",
+  "codexHome": "/tmp/jq-egicazv3/codex",
+  "binary": "/Applications/ChatGPT.app/Contents/Resources/codex",
+  "requests": [
+    {
+      "path": "/v1/responses",
+      "tools": [
+        "exec_command",
+        "write_stdin",
+        "request_user_input",
+        "apply_patch",
+        "view_image",
+        "get_goal",
+        "create_goal",
+        "update_goal",
+        null,
+        null
+      ],
+      "functionOutputs": []
+    },
+    {
+      "path": "/v1/responses",
+      "tools": [],
+      "functionOutputs": []
+    },
+    {
+      "path": "/v1/responses",
+      "tools": [
+        "exec_command",
+        "write_stdin",
+        "request_user_input",
+        "apply_patch",
+        "view_image",
+        "get_goal",
+        "create_goal",
+        "update_goal",
+        null,
+        null
+      ],
+      "functionOutputs": [
+        {
+          "type": "function_call_output",
+          "id": "fco_01a06f4b-64a0-7713-812e-c1a1210be8f6",
+          "call_id": "call_question_qa",
+          "output": "{\"answers\":{\"machine\":{\"answers\":[\"Local\"]},\"notes\":{\"answers\":[\"None of the above\",\"user_note: Первая строка: без сети.\\nВторая строка: сохранять черновик.\"]}}}"
+        }
+      ]
+    }
+  ],
+  "accepted": [
+    {
+      "type": "function_call_output",
+      "id": "fco_01a06f4b-64a0-7713-812e-c1a1210be8f6",
+      "call_id": "call_question_qa",
+      "output": "{\"answers\":{\"machine\":{\"answers\":[\"Local\"]},\"notes\":{\"answers\":[\"None of the above\",\"user_note: Первая строка: без сети.\\nВторая строка: сохранять черновик.\"]}}}"
+    }
+  ],
+  "screen": "╭───────────────────────────────────────╮\n│ >_ OpenAI Codex (v0.153.1)            │\n│                                       │\n│ model:     gpt-5.5   /model to change │\n│ directory: /tmp/jq-egicazv3/work      │\n╰───────────────────────────────────────╯\n\n  Tip: New Build faster with the Desktop app. Run 'codex app' or visit https://chatgpt.com/codex?app-landing-page=true\n\n• Model changed to gpt-5.5 medium for Plan mode.\n\n\n› Ask the synthetic question now.\n\n\n\n  Question 1/2 (2 unanswered)\n  Where should the synthetic checks run?\n\n  › 1. Local              This isolated computer\n    2. VM                 An isolated remote machine\n    3. None of the above  Optionally, add details in notes (tab).\n\n  tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+  "ok": true,
+  "plans": [
+    {
+      "question": {
+        "requestId": "qa-codex-real-tui",
+        "revision": 1,
+        "transport": "tmux",
+        "providerTurnId": null,
+        "providerItemId": null,
+        "rpcRequestId": null,
+        "screen": {
+          "fingerprint": "73a87d7465044ca2",
+          "cursor": 2,
+          "selected": [],
+          "optionNumbers": [
+            1,
+            2
+          ],
+          "customIndex": 3,
+          "picker": "codex-input",
+          "editing": false
+        },
+        "at": 0,
+        "fromScreen": true,
+        "questions": [
+          {
+            "id": "q1",
+            "question": "Where should the synthetic checks run?",
+            "header": "",
+            "multiSelect": false,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Local",
+                "description": ""
+              },
+              {
+                "id": "o2",
+                "label": "VM",
+                "description": ""
+              }
+            ],
+            "customAllowed": true,
+            "customMode": "alternative",
+            "isSecret": false
+          }
+        ]
+      },
+      "keys": [
+        {
+          "key": "Up"
+        },
+        {
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "question": {
+        "requestId": "qa-codex-real-tui",
+        "revision": 1,
+        "transport": "tmux",
+        "providerTurnId": null,
+        "providerItemId": null,
+        "rpcRequestId": null,
+        "screen": {
+          "fingerprint": "65308f5f2f3135ca",
+          "cursor": 2,
+          "selected": [],
+          "optionNumbers": [
+            1,
+            2
+          ],
+          "customIndex": 3,
+          "picker": "codex-input",
+          "editing": false
+        },
+        "at": 0,
+        "fromScreen": true,
+        "questions": [
+          {
+            "id": "q1",
+            "question": "Which extra synthetic constraint should we use?",
+            "header": "",
+            "multiSelect": false,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Fast",
+                "description": ""
+              },
+              {
+                "id": "o2",
+                "label": "Thorough",
+                "description": ""
+              }
+            ],
+            "customAllowed": true,
+            "customMode": "alternative",
+            "isSecret": false
+          }
+        ]
+      },
+      "keys": [
+        {
+          "key": "Down"
+        },
+        {
+          "key": "Tab"
+        },
+        {
+          "text": "Первая строка: без сети.\nВторая строка: сохранять черновик."
+        },
+        {
+          "key": "Enter"
+        }
+      ]
+    }
+  ],
+  "confirmedAnswers": {
+    "answers": {
+      "machine": {
+        "answers": [
+          "Local"
+        ]
+      },
+      "notes": {
+        "answers": [
+          "None of the above",
+          "user_note: Первая строка: без сети.\nВторая строка: сохранять черновик."
+        ]
+      }
+    }
+  },
+  "finalScreen": "╭───────────────────────────────────────╮\n│ >_ OpenAI Codex (v0.153.1)            │\n│                                       │\n│ model:     gpt-5.5   /model to change │\n│ directory: /tmp/jq-egicazv3/work      │\n╰───────────────────────────────────────╯\n\n  Tip: New Build faster with the Desktop app. Run 'codex app' or visit https://chatgpt.com/codex?app-landing-page=true\n\n• Model changed to gpt-5.5 medium for Plan mode.\n\n\n› Ask the synthetic question now.\n\n\n• Questions 2/2 answered\n  • Where should the synthetic checks run?\n    answer: Local\n  • Which extra synthetic constraint should we use?\n    answer: None of the above\n    note: Первая строка: без сети.\n          Вторая строка: сохранять черновик.\n\n• Synthetic answers accepted.\n\n\n› Ask Codex to do anything\n\n  gpt-5.5 medium · /tmp/jq-egicazv3/work                                                                    Plan mode (shift+tab to cycle)\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+}

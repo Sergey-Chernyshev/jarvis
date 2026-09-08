@@ -1,0 +1,12 @@
+{
+  "checks": [
+    "dark/1280: visible controls, no horizontal overflow, readable descriptions",
+    "dark/900: visible controls, no horizontal overflow, readable descriptions",
+    "dark/650: visible controls, no horizontal overflow, readable descriptions",
+    "light/1280: visible controls, no horizontal overflow, readable descriptions",
+    "light/900: visible controls, no horizontal overflow, readable descriptions",
+    "light/650: visible controls, no horizontal overflow, readable descriptions",
+    "settings search hides/restores category headings"
+  ],
+  "errors": []
+}

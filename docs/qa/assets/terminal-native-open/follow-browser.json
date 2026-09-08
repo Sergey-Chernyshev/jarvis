@@ -1,0 +1,20 @@
+{
+  "passed": 14,
+  "results": [
+    "short output visible at zoom 1",
+    "cursor visible at zoom 1",
+    "short output visible at zoom 0.85",
+    "cursor visible at zoom 0.85",
+    "short output visible at zoom 1.15",
+    "cursor visible at zoom 1.15",
+    "long output cursor stays visible",
+    "wheel enters history",
+    "wheel returns to live buffer",
+    "returning by wheel resumes live follow",
+    "search selection survives incoming output",
+    "search selection visible at zoom 0.85",
+    "search selection visible at zoom 1.15",
+    "no JavaScript exceptions"
+  ],
+  "errors": []
+}

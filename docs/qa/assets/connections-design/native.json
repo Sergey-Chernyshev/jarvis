@@ -1,0 +1,80 @@
+{
+  "ok": true,
+  "runtime": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+    "url": "tauri://localhost",
+    "viewport": {
+      "width": 988,
+      "height": 747,
+      "dpr": 2
+    }
+  },
+  "steps": [
+    {
+      "name": "Machine inventory renders real bridge data in the designed workspace",
+      "ok": true,
+      "elapsedMs": 1006.0000000000002
+    },
+    {
+      "name": "Cmd8 and navigation Back return to the standalone Machines module",
+      "ok": true,
+      "elapsedMs": 212.99999999999977
+    },
+    {
+      "name": "Machine search is editable and empty results preserve a working Add action",
+      "ok": true,
+      "elapsedMs": 1
+    },
+    {
+      "name": "SSH draft fields are comfortable and survive cancel without a connection request",
+      "ok": true,
+      "elapsedMs": 279
+    },
+    {
+      "name": "Native machine design fits its scroll area",
+      "ok": true,
+      "elapsedMs": 101
+    }
+  ],
+  "errors": [],
+  "failure": null,
+  "evidence": {
+    "startupNavigationRetries": 0,
+    "inventory": {
+      "remoteCount": 0,
+      "vmCount": 1
+    },
+    "screenshots": [
+      {
+        "name": "native-connections-inventory",
+        "label": "main",
+        "path": "native-connections-inventory.png"
+      },
+      {
+        "name": "native-connections-inventory-light",
+        "label": "main",
+        "path": "native-connections-inventory-light.png"
+      },
+      {
+        "name": "native-connections-add-ssh",
+        "label": "main",
+        "path": "native-connections-add-ssh.png"
+      },
+      {
+        "name": "native-connections-complete",
+        "label": "main",
+        "path": "native-connections-complete.png"
+      }
+    ]
+  },
+  "generatedAt": "2026-09-05T19:59:43.577080+00:00",
+  "scope": "Real WKWebView and bridge, isolated native-smoke profile. No connection, login, installation, VM action, hook repair, or account save.",
+  "sourceProfile": "/var/folders/sz/1yzw2zzs64x5kcr0c9hqhnr40000gq/T/jarvis-native-smoke-nTaGiF",
+  "sourceReport": "/var/folders/sz/1yzw2zzs64x5kcr0c9hqhnr40000gq/T/jarvis-native-smoke-nTaGiF/report.json",
+  "build": {
+    "configuration": "debug",
+    "app": "/private/tmp/jarvis-machines-qa-bundle/Jarvis.app",
+    "executableSha256": "f3cbb88bebbf7e81aba30275f0b985621da8b6907b8a55c014be4db4d9f578f3",
+    "codesign": "verified --deep --strict"
+  }
+}

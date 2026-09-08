@@ -1,0 +1,66 @@
+{
+  "ok": true,
+  "backupDirectory": "/home/coder/.jarvis/qa-backups/profile-discovery-20260905T193351Z",
+  "removedManifestRows": 1,
+  "removedGeneratedHooks": 10,
+  "services": [
+    {
+      "service": "jarvis-node.service",
+      "pid": 343049,
+      "sha256": "d6ec4929d169e26566b6e109672c9e17c44b7a490b74d5d08ccddb08d143afdd",
+      "sources": [
+        {
+          "agent": "claude",
+          "available": true,
+          "id": "claude-v1-13f51e34d9e8474a",
+          "instanceId": "claude-v1-13f51e34d9e8474a",
+          "label": "Claude",
+          "providerHome": "/root/.claude"
+        },
+        {
+          "agent": "codex",
+          "available": true,
+          "id": "codex-v1-7da47d59dd0a5ab7",
+          "instanceId": "codex-v1-7da47d59dd0a5ab7",
+          "label": "Codex",
+          "providerHome": "/root/.codex"
+        }
+      ],
+      "active": true
+    },
+    {
+      "service": "jarvis-node-coder.service",
+      "pid": 343092,
+      "sha256": "d6ec4929d169e26566b6e109672c9e17c44b7a490b74d5d08ccddb08d143afdd",
+      "sources": [
+        {
+          "agent": "claude",
+          "available": true,
+          "id": "claude-v1-073a77c81e4400d3",
+          "instanceId": "claude-v1-073a77c81e4400d3",
+          "label": "Claude",
+          "providerHome": "/home/coder/.claude"
+        },
+        {
+          "agent": "codex",
+          "available": true,
+          "id": "codex-v1-da1d395b1883bb70",
+          "instanceId": "codex-v1-da1d395b1883bb70",
+          "label": "Codex",
+          "providerHome": "/home/coder/.codex"
+        }
+      ],
+      "active": true
+    }
+  ],
+  "nodeSourceFingerprint": "af47383e66ba800d",
+  "tests": {
+    "nodeSourceTests": 6,
+    "installerDiscoveryTests": 2
+  },
+  "desktopInstallerStatus": "Source fix tested; next desktop bundle coordinated with the active chat-continuation task. Existing design application remains running.",
+  "sourceSha256": {
+    "src-tauri/node/src/node/sources.rs": "0070844c0fb1e371e82d1e6d16ff0ff201e5dbc606e3f446bf5ea6363f2afa94",
+    "src-tauri/src/install/remote.rs": "46defd4664f42915b2967e16ac9bc5a4d617c67eaa3bf27e801032851b362d4d"
+  }
+}

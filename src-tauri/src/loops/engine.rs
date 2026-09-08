@@ -37,15 +37,29 @@ pub enum CriticSays {
 pub fn parse_critic(text: &str) -> CriticSays {
     let body = text.trim();
     let first = body.lines().next().unwrap_or("").trim().to_uppercase();
-    let rest = body.lines().skip(1).collect::<Vec<_>>().join("\n").trim().to_string();
-    if first.starts_with("OK") {
+    let rest = body
+        .lines()
+        .skip(1)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+    if first == "OK" {
         CriticSays::Fine
-    } else if first.starts_with("ASK") {
-        CriticSays::Ask(if rest.is_empty() { body.to_string() } else { rest })
+    } else if first == "ASK" {
+        CriticSays::Ask(if rest.is_empty() {
+            body.to_string()
+        } else {
+            rest
+        })
     } else {
         // Всё, что не опознано, — возврат. Непонятый вердикт не имеет права
         // выпускать работу наружу.
-        CriticSays::Return(if rest.is_empty() { body.to_string() } else { rest })
+        CriticSays::Return(if rest.is_empty() {
+            body.to_string()
+        } else {
+            rest
+        })
     }
 }
 
@@ -82,7 +96,11 @@ pub fn iteration_prompt(
     last_return: &str,
 ) -> String {
     let mut p = String::new();
-    p.push_str(&format!("Ты — итерация {} автономного цикла «{}».\n\n", run.iterations.len() + 1, item.name));
+    p.push_str(&format!(
+        "Ты — итерация {} автономного цикла «{}».\n\n",
+        run.iterations.len() + 1,
+        item.name
+    ));
     p.push_str(&format!("Цель цикла: {}\n\n", item.source.goal));
     if !tasks.trim().is_empty() {
         p.push_str(&format!("Задачи из источника:\n{}\n\n", tasks.trim()));
@@ -96,7 +114,10 @@ pub fn iteration_prompt(
         ));
     }
     if !last_return.trim().is_empty() {
-        p.push_str(&format!("Прошлую итерацию вернули на доработку: {}\n\n", last_return.trim()));
+        p.push_str(&format!(
+            "Прошлую итерацию вернули на доработку: {}\n\n",
+            last_return.trim()
+        ));
     }
     if !run.interventions.is_empty() {
         p.push_str(&format!(
@@ -146,37 +167,65 @@ pub fn is_sampled(sampling: &Sampling, n: u32) -> bool {
 /// или остановка человеком. Промежуточные состояния кладутся в стор — панель
 /// читает их оттуда.
 pub async fn run_loop(store: Arc<Store>, item: Loop, run_n: u32, on_change: impl Fn(&Run)) {
-    let started = crate::util::now_ms();
-    let (dir, branch) = match runner::make_sandbox(&item, run_n).await {
+    let run = store
+        .run(&item.id)
+        .filter(|r| r.n == run_n)
+        .unwrap_or_else(|| {
+            let run = initial_run(&item, run_n);
+            store.put_run(run.clone());
+            run
+        });
+    if run.state != RunState::Running {
+        return;
+    }
+    let remaining_ms = if item.limits.minutes > 0 {
+        (run.started_at + i64::from(item.limits.minutes) * 60_000 - crate::util::now_ms()).max(0)
+            as u64
+    } else {
+        86_400_000
+    };
+    tokio::select! {
+        biased;
+        _ = store.cancelled(&item.id, run_n) => {},
+        _ = tokio::time::sleep(Duration::from_millis(remaining_ms)), if item.limits.minutes > 0 => {
+            if let Some(mut current) = store.run(&item.id) {
+                finish(&store, &mut current, StopReason::Time, &on_change);
+            }
+        },
+        _ = execute(store.clone(), item.clone(), run, &on_change) => {},
+    }
+}
+
+pub fn initial_run(item: &Loop, n: u32) -> Run {
+    Run {
+        loop_id: item.id.clone(),
+        n,
+        state: RunState::Running,
+        started_at: crate::util::now_ms(),
+        ..Default::default()
+    }
+}
+
+async fn execute(store: Arc<Store>, item: Loop, mut run: Run, on_change: &impl Fn(&Run)) {
+    let sandbox = if run.worktree.is_empty() {
+        runner::make_sandbox(store.root(), &item, run.n).await
+    } else {
+        let dir = std::path::PathBuf::from(&run.worktree);
+        runner::validate_sandbox(&item, &dir, &run.branch)
+            .await
+            .map(|_| (dir, run.branch.clone()))
+    };
+    let (dir, branch) = match sandbox {
         Ok(v) => v,
         Err(why) => {
-            let run = Run {
-                loop_id: item.id.clone(),
-                n: run_n,
-                state: RunState::Stopped,
-                started_at: started,
-                ended_at: crate::util::now_ms(),
-                stop: StopReason::Failed,
-                stop_note: why,
-                ..Default::default()
-            };
-            store.put_run(run.clone());
-            on_change(&run);
+            run.stop_note = why;
+            finish(&store, &mut run, StopReason::Failed, &on_change);
             return;
         }
     };
-
-    let mut run = Run {
-        loop_id: item.id.clone(),
-        n: run_n,
-        state: RunState::Running,
-        started_at: started,
-        branch: branch.clone(),
-        worktree: dir.to_string_lossy().into_owned(),
-        ..Default::default()
-    };
-    store.put_run(run.clone());
-    on_change(&run);
+    run.branch = branch;
+    run.worktree = dir.to_string_lossy().into_owned();
+    publish(&store, &mut run, &on_change);
 
     // Пайплайн — другой порядок исполнения, но та же песочница, тот же журнал
     // и те же ограничители: развилка ровно здесь, ниже — прежний линейный цикл.
@@ -185,7 +234,12 @@ pub async fn run_loop(store: Arc<Store>, item: Loop, run_n: u32, on_change: impl
         return;
     }
 
-    let mut last_return = String::new();
+    let mut last_return = run
+        .iterations
+        .last()
+        .map(|it| it.critic.clone())
+        .unwrap_or_default();
+    run.ask = None;
     loop {
         // Человек мог остановить цикл, пока шла итерация: стор — единственный
         // источник правды о том, чего он хочет прямо сейчас.
@@ -193,7 +247,6 @@ pub async fn run_loop(store: Arc<Store>, item: Loop, run_n: u32, on_change: impl
             if current.state == RunState::Stopped {
                 return;
             }
-            run.interventions = current.interventions.clone();
         }
         let now = crate::util::now_ms();
         if let Some(reason) = run.tripped(&item.limits, now) {
@@ -202,20 +255,26 @@ pub async fn run_loop(store: Arc<Store>, item: Loop, run_n: u32, on_change: impl
         }
 
         let n = run.iterations.len() as u32 + 1;
-        let mut it = Iteration { n, started_at: now, verdict: Verdict::Running, ..Default::default() };
+        let mut it = Iteration {
+            n,
+            started_at: now,
+            verdict: Verdict::Running,
+            ..Default::default()
+        };
         run.iterations.push(it.clone());
-        store.put_run(run.clone());
-        on_change(&run);
+        publish(&store, &mut run, &on_change);
 
         // Источник задач — настоящая команда: список задач устарел бы к первой
         // же ночи.
         let tasks = if item.source.command.trim().is_empty() {
             String::new()
         } else {
-            let (_, out) = runner::shell(&dir, &item.source.command, Duration::from_secs(300)).await;
+            let (_, out) =
+                runner::shell(&dir, &item.source.command, Duration::from_secs(300)).await;
             runner::tail(&out, 40)
         };
         let notes = read_notes(&item, &dir);
+        run.interventions = store.take_interventions(&item.id);
         let prompt = iteration_prompt(&item, &run, &tasks, &notes, &last_return);
 
         let out = runner::run_agent(&item.agent, &dir, &prompt, None, ITERATION_TIMEOUT).await;
@@ -225,6 +284,7 @@ pub async fn run_loop(store: Arc<Store>, item: Loop, run_n: u32, on_change: impl
         run.tokens += out.tokens;
         run.cost_usd += out.cost_usd;
         if out.failed {
+            run.stop_note = out.text.clone();
             it.verdict = Verdict::Failed;
             it.ended_at = crate::util::now_ms();
             put_iteration(&mut run, it);
@@ -243,7 +303,13 @@ pub async fn run_loop(store: Arc<Store>, item: Loop, run_n: u32, on_change: impl
                 .gates
                 .iter()
                 .find(|g| !g.ok)
-                .map(|g| format!("красный гейт «{}»:\n{}", g.name, runner::tail(&g.output, 20)))
+                .map(|g| {
+                    format!(
+                        "красный гейт «{}»:\n{}",
+                        g.name,
+                        runner::tail(&g.output, 20)
+                    )
+                })
                 .unwrap_or_default();
             run.streak = 0;
         } else if item.exit.critic.enabled {
@@ -253,7 +319,12 @@ pub async fn run_loop(store: Arc<Store>, item: Loop, run_n: u32, on_change: impl
             let verdict = runner::run_agent(&item.agent, &dir, &cp, model, CRITIC_TIMEOUT).await;
             run.tokens += verdict.tokens;
             run.cost_usd += verdict.cost_usd;
-            match parse_critic(&verdict.text) {
+            let decision = if verdict.failed {
+                CriticSays::Return(verdict.text.clone())
+            } else {
+                parse_critic(&verdict.text)
+            };
+            match decision {
                 CriticSays::Fine => {
                     it.verdict = Verdict::Passed;
                     run.streak += 1;
@@ -282,8 +353,7 @@ pub async fn run_loop(store: Arc<Store>, item: Loop, run_n: u32, on_change: impl
                         // нечего, он один.
                         step: String::new(),
                     });
-                    store.put_run(run.clone());
-                    on_change(&run);
+                    publish(&store, &mut run, &on_change);
                     return;
                 }
             }
@@ -295,13 +365,21 @@ pub async fn run_loop(store: Arc<Store>, item: Loop, run_n: u32, on_change: impl
         it.sampled = is_sampled(&item.sampling, n);
         it.ended_at = crate::util::now_ms();
         put_iteration(&mut run, it);
-        store.put_run(run.clone());
-        on_change(&run);
+        publish(&store, &mut run, &on_change);
 
         if run.streak >= item.exit.streak.max(1) {
             finish(&store, &mut run, StopReason::Exit, &on_change);
             return;
         }
+    }
+}
+
+/// Apply concurrent human edits before calculating the next transition/exit.
+pub(super) fn publish(store: &Store, run: &mut Run, on_change: &impl Fn(&Run)) {
+    store.put_run(run.clone());
+    if let Some(current) = store.run(&run.loop_id).filter(|current| current.n == run.n) {
+        *run = current;
+        on_change(run);
     }
 }
 
@@ -313,7 +391,11 @@ fn put_iteration(run: &mut Run, it: Iteration) {
 }
 
 fn finish(store: &Store, run: &mut Run, reason: StopReason, on_change: &impl Fn(&Run)) {
-    run.state = if reason == StopReason::Exit { RunState::Done } else { RunState::Stopped };
+    run.state = if reason == StopReason::Exit {
+        RunState::Done
+    } else {
+        RunState::Stopped
+    };
     run.stop = reason;
     run.ended_at = crate::util::now_ms();
     run.stop_note = match reason {
@@ -326,8 +408,7 @@ fn finish(store: &Store, run: &mut Run, reason: StopReason, on_change: &impl Fn(
         StopReason::Failed => run.stop_note.clone(),
         StopReason::None => String::new(),
     };
-    store.put_run(run.clone());
-    on_change(run);
+    publish(store, run, on_change);
 }
 
 fn read_notes(item: &Loop, dir: &Path) -> String {
@@ -381,24 +462,48 @@ mod tests {
 
     #[test]
     fn summary_is_the_first_meaningful_line() {
-        assert_eq!(summarize("\n\n  Починил флаки-тест  \nдальше подробности"), "Починил флаки-тест");
+        assert_eq!(
+            summarize("\n\n  Починил флаки-тест  \nдальше подробности"),
+            "Починил флаки-тест"
+        );
         assert_eq!(summarize(""), "без ответа");
     }
 
     #[test]
     fn prompt_carries_goal_notes_and_human_words() {
-        let mut item = Loop { name: "test-fix".into(), ..Default::default() };
+        let mut item = Loop {
+            name: "test-fix".into(),
+            ..Default::default()
+        };
         item.source.goal = "чинить флаки".into();
-        item.exit.gates = vec![Gate { name: "тесты".into(), command: "cargo test".into() }];
-        let run = Run { interventions: vec!["не трогай CI".into()], ..Default::default() };
+        item.exit.gates = vec![Gate {
+            name: "тесты".into(),
+            command: "cargo test".into(),
+        }];
+        let run = Run {
+            interventions: vec!["не трогай CI".into()],
+            ..Default::default()
+        };
 
         let p = iteration_prompt(&item, &run, "#12 упал тест", "не трогать adopt_tmux", "");
         assert!(p.contains("чинить флаки"));
         assert!(p.contains("#12 упал тест"));
-        assert!(p.contains("не трогать adopt_tmux"), "дневник обязан попасть в промт");
-        assert!(p.contains("не трогай CI"), "реплика человека обязана попасть в промт");
-        assert!(p.contains("тесты"), "агент должен знать, чем его будут проверять");
-        assert!(p.contains("ОДИН шаг"), "итерация — это шаг, а не вся работа разом");
+        assert!(
+            p.contains("не трогать adopt_tmux"),
+            "дневник обязан попасть в промт"
+        );
+        assert!(
+            p.contains("не трогай CI"),
+            "реплика человека обязана попасть в промт"
+        );
+        assert!(
+            p.contains("тесты"),
+            "агент должен знать, чем его будут проверять"
+        );
+        assert!(
+            p.contains("ОДИН шаг"),
+            "итерация — это шаг, а не вся работа разом"
+        );
     }
 
     #[test]
@@ -406,13 +511,19 @@ mod tests {
         let mut item = Loop::default();
         item.memory.enabled = false;
         let p = iteration_prompt(&item, &Run::default(), "", "", "");
-        assert!(!p.contains("Допиши"), "выключенная память не должна просачиваться в промт");
+        assert!(
+            !p.contains("Допиши"),
+            "выключенная память не должна просачиваться в промт"
+        );
     }
 
     #[test]
     fn critic_prompt_states_the_contract() {
         let item = Loop::default();
-        let it = Iteration { summary: "починил".into(), ..Default::default() };
+        let it = Iteration {
+            summary: "починил".into(),
+            ..Default::default()
+        };
         let p = critic_prompt(&item, &it, "diff --git");
         for word in ["OK", "RETURN", "ASK", "diff --git", "починил"] {
             assert!(p.contains(word), "в промте критика нет «{word}»");

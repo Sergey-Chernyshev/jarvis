@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Jarvis · агент</title>
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'" />
+<link rel="stylesheet" href="./vendor/phosphor/style.css" />
 <link rel="stylesheet" href="./theme.css" />
+<script src="./icons.js"></script>
 <script src="./theme.js"></script>
   <script src="./keys.js"></script>
 <style>
@@ -33,6 +35,9 @@
   .dot{ width:7px; height:7px; border-radius:50%; background: var(--accent); flex: none; }
   .title{ font-size:15px; font-weight:600; letter-spacing:-0.01em; }
   .sub{ color: var(--ink-mute); font-size:12.5px; margin-left:auto; font-variant-numeric: tabular-nums; }
+  #provider{ -webkit-app-region:no-drag; max-width:150px; min-height:30px; border:1px solid var(--line);
+    border-radius:8px; background:var(--surface); color:var(--ink); font:inherit; padding:3px 8px }
+  #provider:focus-visible{ outline:2px solid var(--accent); outline-offset:2px }
 
   /* лента: подпись сверху, текст колонкой — без пузырей */
   #msgs{ flex:1 1 auto; overflow-y:auto; padding:22px 24px 8px; display:flex; flex-direction:column; gap:18px }
@@ -105,6 +110,11 @@
   <header data-tauri-drag-region>
     <span class="dot"></span>
     <span class="title">Jarvis · агент</span>
+    <select id="provider" aria-label="Провайдер агента" title="Проверяется наличие CLI. Авторизация проверяется при запросе." disabled>
+      <option value="auto">Авто</option>
+      <option value="claude">Claude</option>
+      <option value="codex">Codex</option>
+    </select>
     <span class="sub" id="sub">готов</span>
   </header>
   <div id="msgs">
@@ -112,7 +122,7 @@
   </div>
   <footer>
     <textarea id="input" rows="1" placeholder="Сообщение агенту…  (Enter — отправить)"></textarea>
-    <button id="send">⏎</button>
+    <button id="send" disabled>⏎</button>
   </footer>
   <script src="agent-chat.js"></script>
 </body>

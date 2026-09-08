@@ -1,0 +1,17 @@
+{
+  "checks": [
+    "registration form hidden until requested",
+    "Enter submits a new preset exactly once",
+    "failed save preserves form draft and installed agent",
+    "rename preserves stable identity and launch settings",
+    "main fields have visible spacing and no form overflow",
+    "form remains unclipped at 1300px and 900px window widths",
+    "Escape closes the form without leaving settings"
+  ],
+  "errors": [],
+  "geometry": {
+    "width": 820,
+    "scrollWidth": 820,
+    "gap": "16px"
+  }
+}

@@ -1,0 +1,9 @@
+.project-avatar { position: relative; display: inline-flex; align-items: center; justify-content: center; flex: none; width: 43px; height: 43px; padding: 7px; border: 1px solid var(--line); border-radius: 11px; color: var(--ink-mute); background: var(--fill-2); vertical-align: middle; }
+button.project-avatar { cursor: pointer; }
+button.project-avatar:hover { border-color: var(--line-strong); background: var(--fill-3); }
+button.project-avatar:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 3px; }
+.project-avatar-image { display: block; width: 100%; height: 100%; object-fit: contain; border-radius: 4px; }
+.project-avatar-count { position: absolute; right: -5px; bottom: -4px; min-width: 16px; height: 16px; display: grid; place-items: center; padding: 0 3px; background: var(--paper); border: 1px solid var(--line); border-radius: 5px; color: var(--ink-mute); font: 9px/1 var(--font-ui, sans-serif); }
+.sw-project-toggle .project-avatar { width: 22px; height: 22px; padding: 2px; border-radius: 6px; margin-right: 2px; overflow: visible; }
+.sw-project-toggle .project-avatar .ph { --icon-size: 15px !important; }
+.sw-project-toggle .project-avatar-count { min-width: 12px; height: 12px; font-size: 8px; right: -4px; bottom: -4px; }

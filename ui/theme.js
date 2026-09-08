@@ -29,9 +29,9 @@
   const media = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
   const DEFAULTS = {
-    theme: 'light',
+    theme: 'auto',
     paint: 'clover',
-    mode: 'overlay',
+    mode: 'window',
     density: 'normal',
     radius: 'normal',
     scale: 1,
@@ -40,6 +40,7 @@
 
   /** Текущий выбор пользователя (не разрешённый). */
   let choice = { ...DEFAULTS };
+  let saveQueue = Promise.resolve(), saveVersion = 0;
 
   const clean = (v, allowed, fallback) => (allowed.includes(v) ? v : fallback);
   const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
@@ -71,9 +72,23 @@
   function luminance({ r, g, b }) {
     const f = (c) => {
       const s = c / 255;
-      return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+      return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
     };
     return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+  }
+
+  const contrast = (a, b) => {
+    const x = luminance(a), y = luminance(b);
+    return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+  };
+  // Preserve the selected hue, adjusting only text where it would disappear
+  // against the paper or a tinted control surface. Leave a rounding margin.
+  function readableAccent(color, backgrounds, toward) {
+    for (let step = 0; step <= 100; step++) {
+      const candidate = parseHex(toHex(mix(color, toward, step / 100)));
+      if (backgrounds.every(background => contrast(candidate, background) >= 4.6)) return candidate;
+    }
+    return toward;
   }
 
   const rgba = ({ r, g, b }, a) =>
@@ -93,9 +108,11 @@
 
     // на тёмном тёмный тон не читается — подтягиваем к светлому
     const accent = dark && luminance(base) < 0.18 ? mix(base, white, 0.38) : base;
-    // текст акцентом на бумаге: слишком светлый тон притемняем
-    const accentText = !dark && luminance(accent) > 0.45 ? mix(accent, ink, 0.35) : accent;
-    const onAccent = luminance(accent) > 0.42 ? ink : white;
+    const accentText = readableAccent(accent, [paper, mix(paper, accent, dark ? 0.17 : 0.12)], dark ? white : ink);
+    // Theme ink is light in dark mode; it cannot decide text on a bright CTA.
+    // Black/white selection guarantees readable text for any custom fill.
+    const black = { r: 0, g: 0, b: 0 };
+    const onAccent = contrast(accent, black) >= contrast(accent, white) ? black : white;
 
     const set = (k, v) => root.style.setProperty(k, v);
     set('--accent', toHex(accent));
@@ -135,7 +152,9 @@
     root.setAttribute('data-theme', theme);
     root.setAttribute('data-paint', choice.paint);
     // раскладка: 'overlay' — накладка ⌘J, 'window' — обычное окно (макет 14h)
-    root.setAttribute('data-mode', choice.mode);
+    const surface = window.__JARVIS_SURFACE__;
+    root.setAttribute('data-mode', surface === 'workspace' ? 'window' : surface === 'quick' ? 'overlay' : choice.mode);
+    if (surface) root.setAttribute('data-surface', surface);
     root.setAttribute('data-density', choice.density);
     root.setAttribute('data-radius', choice.radius);
     root.style.setProperty('--ui-scale', String(choice.scale));
@@ -195,15 +214,30 @@
     /** Сменить и сохранить в settings.json (демон разошлёт остальным окнам). */
     set(next) {
       apply(next);
+      const version = ++saveVersion;
       const patch = {};
       for (const k of ['theme', 'paint', 'mode', 'density', 'radius', 'scale', 'accent']) {
         if (next && next[k] !== undefined) patch[k] = choice[k];
       }
-      try { window.jarvis?.setSettings?.(patch); } catch { /* окно без моста */ }
+      saveQueue = saveQueue.then(async () => {
+        if (!window.jarvis?.setSettings) throw new Error('Нет связи с приложением.');
+        const result = await window.jarvis.setSettings(patch);
+        if (result?.ok === false) throw new Error(result.error || 'Настройка вида не сохранена.');
+        return true;
+      }).catch(async error => {
+        if (version !== saveVersion) return false;
+        try {
+          const saved = await window.jarvis?.getSettings?.();
+          if (saved && saved.ok !== false && version === saveVersion) apply(saved);
+        } catch { /* Keep the visible choice, explicitly marked unsaved below. */ }
+        window.dispatchEvent(new CustomEvent('jarvis:appearance-error', { detail: String(error) }));
+        return false;
+      });
+      return saveQueue;
     },
     /** Вернуть вид к заводскому (краска и режим остаются — их выбирают отдельно). */
     reset() {
-      this.set({
+      return this.set({
         density: DEFAULTS.density,
         radius: DEFAULTS.radius,
         scale: DEFAULTS.scale,

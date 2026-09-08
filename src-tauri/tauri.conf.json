@@ -4,6 +4,7 @@
   "version": "0.3.3",
   "identifier": "app.jarvis.monitor",
   "build": {
+    "beforeBuildCommand": "node scripts/vendor-terminal.mjs --check && node scripts/prepare-node-bundle.mjs --verify",
     "frontendDist": "../ui"
   },
   "app": {

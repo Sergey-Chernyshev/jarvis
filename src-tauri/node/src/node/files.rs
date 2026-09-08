@@ -41,14 +41,9 @@ pub struct Chunk {
 /// каталог бывает за симлинком (на macOS — почти всегда), и сравнение сырых
 /// строк давало бы ложный отказ на совершенно легальном пути.
 pub fn transcript_roots(home: &Path) -> Vec<PathBuf> {
-    let codex = match std::env::var("CODEX_HOME") {
-        Ok(d) if !d.is_empty() => PathBuf::from(d),
-        _ => home.join(".codex"),
-    };
-    [home.join(".claude"), codex]
-        .into_iter()
-        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
-        .collect()
+    super::sources::discover(home, &super::jarvis_dir()).iter()
+        .flat_map(|source| source.roots())
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p)).collect()
 }
 
 /// Запрошенный путь → реальный путь под одним из корней.
@@ -108,7 +103,7 @@ fn decode(buf: &[u8]) -> (String, usize) {
     match std::str::from_utf8(buf) {
         Ok(s) => (s.to_string(), buf.len()),
         // error_len() == None — обрыв ровно на границе куска, а не порча файла
-        Err(e) if e.error_len().is_none() && e.valid_up_to() > 0 => {
+        Err(e) if e.error_len().is_none() => {
             let end = e.valid_up_to();
             (String::from_utf8_lossy(&buf[..end]).into_owned(), end)
         }
@@ -252,6 +247,21 @@ mod tests {
         let (data, taken) = decode(cut);
         assert_eq!(data, "приве");
         assert_eq!(taken, cut.len() - 1, "недоеденный байт вернётся следующим куском");
+    }
+
+    #[test]
+    fn chunk_waits_when_writer_has_only_started_a_utf8_character() {
+        let home = sandbox("partial-character");
+        let path = home.join(".claude/partial.jsonl");
+        let bytes = "👋\n".as_bytes();
+        std::fs::write(&path, &bytes[..2]).unwrap();
+        let partial = read_chunk(&path, 0).unwrap();
+        assert_eq!((partial.data.as_str(), partial.next), ("", 0));
+        std::fs::write(&path, bytes).unwrap();
+        let completed = read_chunk(&path, partial.next).unwrap();
+        assert_eq!(completed.data, "👋\n");
+        assert_eq!(completed.next, bytes.len() as u64);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     // Битые байты внутри самого файла не должны застопорить чтение навсегда.

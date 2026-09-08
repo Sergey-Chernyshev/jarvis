@@ -3,7 +3,6 @@
 //! по инкрементам (см. план); здесь то, что известно статически.
 
 use serde_json::Value;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use super::{Agent, Backend};
@@ -16,34 +15,8 @@ pub static CODEX: CodexBackend = CodexBackend;
 
 /// Настоящий `codex` в PATH (+типовые каталоги), минуя наш шим `~/.jarvis/shims`.
 pub fn resolve_codex_bin() -> Option<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::env::var("PATH")
-        .unwrap_or_default()
-        .split(':')
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .collect();
-    for extra in [
-        crate::util::home_dir().join(".local/bin"),
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
-    ] {
-        if !dirs.contains(&extra) {
-            dirs.push(extra);
-        }
-    }
-    let shims = crate::util::jarvis_dir().join("shims");
-    for d in dirs {
-        if d == shims {
-            continue;
-        }
-        let p = d.join("codex");
-        if let Ok(meta) = std::fs::metadata(&p) {
-            if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
-                return Some(p);
-            }
-        }
-    }
-    None
+    crate::agent_instances::load_registry(&crate::util::jarvis_dir())
+        .ok()?.launch_spec(None).ok().map(|spec| spec.program)
 }
 
 /// Найти rollout-файл codex по `session_id` (хвост имени файла = uuid сессии):
@@ -52,7 +25,28 @@ pub fn resolve_codex_bin() -> Option<PathBuf> {
 /// демон всё равно находит транскрипт по sid и достаёт модель + переписку. Возвращает
 /// самый свежий матч; обход ограничен глубиной (YYYY/MM/DD — 3-4 уровня).
 pub fn find_rollout_by_sid(sid: &str) -> Option<PathBuf> {
-    find_rollout_in(&crate::util::codex_dir().join("sessions"), sid)
+    let registry = crate::agent_instances::load_registry(&crate::util::jarvis_dir()).ok()?;
+    find_rollout_in_registry(&registry, sid, None)
+}
+
+/// A known account never falls back to another home. Legacy events without
+/// identity resolve only when exactly one enabled home contains that UUID.
+pub fn find_rollout_for_instance(sid: &str, instance_id: &str) -> Option<PathBuf> {
+    let registry = crate::agent_instances::load_registry(&crate::util::jarvis_dir()).ok()?;
+    find_rollout_in_registry(&registry, sid, Some(instance_id))
+}
+
+fn find_rollout_in_registry(registry: &crate::agent_instances::Registry, sid: &str, instance_id: Option<&str>) -> Option<PathBuf> {
+    if let Some(id) = instance_id { registry.resolve(Some(id)).ok()?; }
+    let mut matches = std::collections::BTreeMap::new();
+    for root in registry.roots(true).into_iter().filter(|root| instance_id.map_or(true, |id| root.instance_id == id)) {
+        if let Some(path) = find_rollout_in(&root.path, sid) {
+            let modified = std::fs::metadata(&path).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+            let best = matches.entry(root.instance_id).or_insert((modified, path.clone()));
+            if modified > best.0 { *best = (modified, path); }
+        }
+    }
+    if matches.len() == 1 { matches.into_values().next().map(|(_, path)| path) } else { None }
 }
 
 /// Чистое ядро поиска (тестируется на temp-каталоге без env): рекурсивный обход
@@ -104,11 +98,11 @@ impl Backend for CodexBackend {
         resolve_codex_bin().is_some()
     }
     fn read_entries(&self, file: &Path, max_bytes: u64) -> Vec<Value> {
-        // Codex rollout линейный (без uuid/parentUuid) → просто хвост JSONL.
-        crate::transcript::read_recent_entries(file, max_bytes)
+        if super::codex_transcript::file_is_technical(file) {return Vec::new();}
+        super::codex_transcript::display_entries(crate::transcript::read_recent_entries(file, max_bytes))
     }
     fn entries_from_text(&self, text: &str) -> Vec<Value> {
-        crate::transcript::entries_from_text(text)
+        super::codex_transcript::display_entries(crate::transcript::entries_from_text(text))
     }
     fn to_chat_items(&self, entry: &Value) -> Vec<ChatItem> {
         super::codex_transcript::to_chat_items(entry)
@@ -129,18 +123,9 @@ impl Backend for CodexBackend {
         format!("codex resume {sid}")
     }
     fn friendly_model(&self, id: &str) -> String {
-        let v = id.to_lowercase();
-        if v.contains("codex") {
-            return "Codex".to_string();
-        }
-        if v.contains("gpt-5") || v.contains("gpt5") {
-            return "GPT-5".to_string();
-        }
-        if v.contains("o3") {
-            return "o3".to_string();
-        }
-        // дефолт: первый сегмент, как util::friendly_model
-        id.split('-').next().unwrap_or("").to_string()
+        // The exact slug is also the session control identity. Collapsing every
+        // GPT-5 variant to "GPT-5" made the model picker select a different model.
+        id.to_string()
     }
     fn models(&self) -> &'static [(&'static str, &'static str)] {
         &[
@@ -166,9 +151,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rollout_lookup_preserves_instance_identity_and_refuses_ambiguous_legacy_ids() {
+        use crate::agent_instances::{DiscoveryContext, InstanceConfig, InstanceEntry};
+        let root = std::env::temp_dir().join(format!("jarvis-rollout-accounts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let work = root.join("home/.codex"); let personal = root.join("personal");
+        for home in [&work, &personal] {
+            std::fs::create_dir_all(home.join("sessions/2026/09/05")).unwrap();
+            std::fs::write(home.join("sessions/2026/09/05/rollout-0-same-uuid.jsonl"), "{}\n").unwrap();
+        }
+        let context = DiscoveryContext { machine: "local".into(), home: root.join("home"), codex_home: None, path_dirs: vec![], cli_candidates: vec![], excluded_dirs: vec![] };
+        let config = InstanceConfig { entries: vec![InstanceEntry { home: personal.clone(), label: "Personal".into(), enabled: true, machine: "local".into(), cli: None, desktop_launcher: None }], ..Default::default() };
+        let registry = crate::agent_instances::discover_with(&config, &context).unwrap();
+        assert!(find_rollout_in_registry(&registry, "same-uuid", None).is_none());
+        let id = crate::agent_instances::instance_id("local", &personal).unwrap();
+        let found = find_rollout_in_registry(&registry, "same-uuid", Some(&id)).unwrap();
+        assert!(found.starts_with(std::fs::canonicalize(&personal).unwrap()));
+        assert!(find_rollout_in_registry(&registry, "same-uuid", Some("unknown")).is_none());
+        std::fs::remove_file(personal.join("sessions/2026/09/05/rollout-0-same-uuid.jsonl")).unwrap();
+        std::fs::create_dir_all(personal.join("archived_sessions")).unwrap();
+        std::fs::write(personal.join("archived_sessions/rollout-0-archived-uuid.jsonl"), "{}\n").unwrap();
+        assert!(find_rollout_in_registry(&registry, "archived-uuid", Some(&id)).unwrap().to_string_lossy().contains("archived_sessions"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn friendly_model_codex_names() {
-        assert_eq!(CODEX.friendly_model("gpt-5-codex"), "Codex");
-        assert_eq!(CODEX.friendly_model("gpt-5.5"), "GPT-5");
+        assert_eq!(CODEX.friendly_model("gpt-5-codex"), "gpt-5-codex");
+        assert_eq!(CODEX.friendly_model("gpt-5.5"), "gpt-5.5");
         assert_eq!(CODEX.resume_cmd("xyz"), "codex resume xyz");
         assert!(!CODEX.has_separate_effort());
     }

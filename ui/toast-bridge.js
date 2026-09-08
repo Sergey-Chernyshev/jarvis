@@ -18,6 +18,9 @@
   });
 
   window.toast = {
+    onMeetingChanged: (cb) => { listen('meetings_changed', (e) => cb(e.payload)); },
+    meetingStatus: () => invoke('meetings_status'),
+    meetingStop: () => invoke('meetings_stop'),
     onAdd: (cb) => { listen('toast-add', (e) => cb(e.payload)).then(armed); },
     onUpdate: (cb) => { listen('toast-update', (e) => cb(e.payload)).then(armed); },
     // нативный hover (курсор над окном тостов): WKWebView не шлёт mouseenter,
@@ -48,6 +51,8 @@
     voiceConfirm: (nonce, approved) => invoke('voice_confirm_resolve', { nonce, approved }),
     // крестик в HUD = «стоп всё»: оборвать озвучку и завершить разговор
     voiceAbort: () => invoke('voice_abort'),
+    systemAccessibilitySettings: () => invoke('system_accessibility_settings'),
+    dictationCancelInsertion: (attemptId) => invoke('dictation_cancel_insertion', { attemptId }),
     // клик по карточке «Услышал» → открыть панель на вкладке «История голоса»
     openVoiceHistory: () => invoke('voice_history_open'),
     // копировать текст в буфер (надёжный путь через плагин Tauri — навигаторный

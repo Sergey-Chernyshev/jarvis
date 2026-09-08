@@ -262,6 +262,27 @@ impl SttEngine for WhisperEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "whisper-native")]
+    #[test]
+    #[ignore = "Explicit local model and synthetic 16 kHz mono WAV required; exercises real Metal/Whisper"]
+    fn real_whisper_decodes_explicit_synthetic_speech() {
+        let model = std::env::var("JARVIS_QA_WHISPER_MODEL").expect("Select a real model explicitly");
+        let wav = std::env::var("JARVIS_QA_WHISPER_WAV").expect("Select synthetic speech explicitly");
+        let expected = std::env::var("JARVIS_QA_WHISPER_EXPECT").expect("Set expected phrase");
+        let mut reader = hound::WavReader::open(wav).unwrap();
+        let spec = reader.spec();
+        assert_eq!((spec.sample_rate, spec.channels, spec.bits_per_sample), (16000, 1, 16));
+        let pcm: Vec<_> = reader.samples::<i16>().map(|sample| sample.unwrap() as f32 / 32768.0).collect();
+        let engine = WhisperEngine::with_path(model.into());
+        let result = engine.transcribe(&pcm, &SttOptions { dominant_lang: "en".into(), ..Default::default() }).unwrap();
+        let normalized = result.text.to_lowercase();
+        println!("Synthetic native Whisper result: {}", result.text);
+        assert!(normalized.contains(&expected.to_lowercase()), "Expected {expected:?}, got {:?}", result.text);
+        // Reuse the actual cached context; dictation must support a second turn.
+        let again = engine.transcribe(&pcm, &SttOptions { dominant_lang: "en".into(), ..Default::default() }).unwrap();
+        assert!(again.text.to_lowercase().contains(&expected.to_lowercase()));
+    }
     use crate::stt::engine::{SttOptions, SttTask};
 
     // --- whisper_lang_and_translate ---

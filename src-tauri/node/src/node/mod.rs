@@ -22,11 +22,16 @@
 pub mod agent;
 pub mod files;
 pub mod http;
+pub mod hooks;
 pub mod projects;
+pub mod sources;
 pub mod ring;
 pub mod tmux;
 
-use std::os::unix::fs::PermissionsExt;
+use std::io::{self, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -51,7 +56,9 @@ pub struct Node {
     bell: watch::Sender<u64>,
     started: Instant,
     host: String,
+    instance: String,
     roots: Vec<PathBuf>,
+    sources: Vec<sources::Source>,
 }
 
 impl Node {
@@ -62,11 +69,26 @@ impl Node {
             bell,
             started: Instant::now(),
             host,
+            instance: format!("{}-{}", std::process::id(), SystemTime::now()
+                .duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()),
             roots,
+            sources: sources::discover(&home_dir(), &jarvis_dir()),
         }
     }
 
-    pub fn push(&self, envelope: Value) -> u64 {
+    pub fn push(&self, mut envelope: Value) -> u64 {
+        if let Some(home) = envelope.get("providerHome").and_then(Value::as_str) {
+            let path = std::fs::canonicalize(home).unwrap_or_else(|_| PathBuf::from(home));
+            let agent = envelope.get("agent").and_then(Value::as_str).unwrap_or("");
+            let known = self.sources.iter().find(|source| source.home == path && source.agent == agent).map(|source|source.id.clone());
+            // A newly installed profile is visible through /sources immediately;
+            // its first hook must use that same identity before a node restart.
+            let id = known.or_else(|| sources::discover(&home_dir(), &jarvis_dir()).into_iter()
+                .find(|source| source.home == path && source.agent == agent).map(|source|source.id));
+            if let Some(id) = id {
+                if let Some(obj) = envelope.as_object_mut() { obj.insert("instanceId".into(), Value::String(id)); }
+            }
+        }
         let cursor = self.events.lock().unwrap().push(envelope, now_ms());
         // send_replace, а не send: подписчиков может не быть вовсе (ноут спит),
         // и это штатная ситуация, а не ошибка отправки
@@ -88,6 +110,10 @@ impl Node {
 
     pub fn host(&self) -> &str {
         &self.host
+    }
+
+    pub fn instance(&self) -> &str {
+        &self.instance
     }
 
     pub fn roots(&self) -> &[PathBuf] {
@@ -199,6 +225,26 @@ fn is_loopback(addr: &str) -> bool {
     }
 }
 
+/// Keep an OS-owned lock beside the socket. Unlinking first lets a second node
+/// silently steal the address; the first node's shutdown then removes its socket.
+fn claim_socket(sock: &Path) -> io::Result<std::fs::File> {
+    let path = sock.with_extension("sock.lock");
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    file.set_len(0)?;
+    writeln!(file, "{}", std::process::id())?;
+    Ok(file)
+}
+
 /// Поднять сокет и слушать до сигнала завершения.
 pub async fn run() {
     // Разбираем адрес TCP первым делом: «слушать наружу» — ошибка настройки,
@@ -211,6 +257,13 @@ pub async fn run() {
         // ещё с правами по umask, до него всё равно не дойти чужому.
         let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
     }
+    let _claim = match claim_socket(&sock) {
+        Ok(claim) => claim,
+        Err(error) => {
+            eprintln!("[jarvis-node] не могу занять {}: другой узел уже работает или каталог недоступен ({error})", sock.display());
+            std::process::exit(1);
+        }
+    };
     // прошлый сокет мог остаться от узла, убитого -9: bind по занятому пути
     // падает, хотя слушателя за ним давно нет
     let _ = std::fs::remove_file(&sock);
@@ -298,6 +351,21 @@ async fn terminate() {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn duplicate_node_cannot_claim_or_remove_live_socket() {
+        let dir = std::env::temp_dir().join(format!("jarvis-node-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("node.sock");
+        let first = claim_socket(&sock).unwrap();
+        std::fs::write(&sock, b"live socket sentinel").unwrap();
+        assert!(claim_socket(&sock).is_err());
+        assert_eq!(std::fs::read(&sock).unwrap(), b"live socket sentinel");
+        drop(first);
+        let next = claim_socket(&sock).unwrap();
+        drop(next);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     fn node() -> Node {
         Node::new(3, vec![PathBuf::from("/nowhere")], "vps".into())

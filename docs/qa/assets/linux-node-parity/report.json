@@ -1,0 +1,31 @@
+{
+  "ok": true,
+  "guestFixture": "/tmp/jarvis-linux-qa-EblB9d",
+  "unit": "jarvis-qa-eblb9d",
+  "checks": [
+    {
+      "scenario": "portable sources build and runtime suite on Linux",
+      "passed": true,
+      "evidence": {
+        "exitCode": 0
+      }
+    },
+    {
+      "scenario": "Linux runtime checks all passed",
+      "passed": true,
+      "evidence": {
+        "checks": 20
+      }
+    },
+    {
+      "scenario": "Lima provided SSH config forwards native VM node socket",
+      "passed": true,
+      "evidence": null
+    },
+    {
+      "scenario": "systemd restart exposes a new replay epoch over the same SSH tunnel",
+      "passed": true,
+      "evidence": null
+    }
+  ]
+}

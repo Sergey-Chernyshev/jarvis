@@ -4,6 +4,8 @@
   "description": "Панель, тосты и онбординг: события ядра + запись в буфер обмена",
   "windows": [
     "main",
+    "workspace",
+    "workspace-*",
     "toast",
     "onboarding",
     "agent-chat",

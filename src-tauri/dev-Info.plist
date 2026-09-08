@@ -12,6 +12,8 @@
     <key>CFBundleName</key>
     <string>Jarvis (dev)</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Jarvis (dev) использует микрофон для wake-word и голосовой диктовки.</string>
+    <string>Jarvis (dev) использует микрофон для wake-word, диктовки и записи встреч по вашему запросу.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Jarvis (dev) записывает звук приложений вместе с микрофоном, когда вы выбираете онлайн-встречу. Изображение экрана не сохраняется.</string>
 </dict>
 </plist>

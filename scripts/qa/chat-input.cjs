@@ -1,0 +1,163 @@
+// Browser regression checks reuse the workspace's strict synthetic bridge.
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const http = require('node:http');
+const os = require('node:os');
+let playwright;
+try { playwright = require('playwright'); } catch { playwright = require(path.join(os.homedir(), '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright')); }
+const ui = path.resolve(__dirname, '../../ui');
+const fixtureSource = fs.readFileSync(path.join(__dirname, 'session-workspace.cjs'), 'utf8').split('function bridgeFixture() {')[1].split('\nconst records = [];')[0];
+const fixture = 'function bridgeFixture() {' + fixtureSource;
+const server = http.createServer((req, res) => {
+  const file = path.resolve(ui, '.' + new URL(req.url, 'http://localhost').pathname);
+  if (!file.startsWith(ui + path.sep)) return res.writeHead(403).end();
+  fs.readFile(file, (error, data) => error ? res.writeHead(404).end() : res.end(data));
+});
+(async () => {
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  const browser = await playwright.chromium.launch({ channel: 'chrome', headless: true });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 850 } });
+  const out = path.resolve(__dirname, '../../output/chat-input'); fs.mkdirSync(out, {recursive:true});
+  const errors = []; page.on('pageerror', error => errors.push(error.message));
+  page.setDefaultTimeout(10000);
+  try {
+    await page.route('**/bridge.js', route => route.fulfill({ contentType: 'text/javascript', body: `(${fixture})();
+      const original = window.jarvis;
+      window.jarvis = new Proxy(original, { get(target, name) {
+        if (name === 'getState') return () => new Promise(resolve => { window.__resolveInitial = () => original.getState().then(resolve); });
+        if (name === 'openChat') return (...args) => window.__emptyHistory === args[0] ? Promise.resolve({ok:true,items:window.__historyItems || [],spans:[],cards:{}}) : window.__holdHistory ? new Promise(resolve => { window.__resolveHistory = () => original.openChat(...args).then(resolve); }) : original.openChat(...args);
+        if (name === 'saveAttachment') return async (...args) => { window.__sessionFixture.calls.push({name,args}); return {ok:true,path:'/tmp/jarvis-attachment.fixture/' + args[1]}; };
+        if (name === 'sendReply') return (...args) => { window.__sessionFixture.calls.push({name,args}); return new Promise(resolve => { window.__resolveSend = resolve; }); };
+        return target[name];
+      } });` }));
+    await page.goto(`http://127.0.0.1:${server.address().port}/index.html`);
+    await page.locator('#tabSessions').click();
+    await page.locator('#newChatPrompt').waitFor();
+    await page.locator('.sw-recent .ui-skeleton').waitFor();
+    assert.equal(await page.locator('.sw-projects .ui-skeleton').count(), 1);
+    await page.screenshot({path:path.join(out,'loading-chats.png')});
+    await page.evaluate(() => window.__resolveInitial());
+    await page.waitForFunction(() => !document.querySelector('.sw-recent .ui-skeleton'));
+    await page.evaluate(() => {
+      window.__recentButtons = [...document.querySelectorAll('.sw-recent [data-session-id]')];
+      for (let n = 0; n < 15; n++) {
+        const sessions = window.__sessionFixture.sessions().reverse().map((s, i) => ({ ...s, updatedAt: Date.now() + i, detail: 'poll ' + n }));
+        window.__sessionFixture.emitState(sessions);
+      }
+    });
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('.sw-recent [data-session-id]')].every((el, i) => el === window.__recentButtons[i])), true);
+    await page.locator('#newChatDirectory').fill('/work/jarvis');
+    await page.locator('.sw-composer input[type=file]').setInputFiles({ name: 'brief.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.7\nfixture') });
+    await page.locator('.sw-composer .sw-attachment').waitFor();
+    await page.evaluate(() => { window.__sessionFixture.nextLaunch = { hold: true, result: {ok:false,error:'Fixture launch failed'} }; });
+    await page.getByRole('button', { name: 'Начать задачу', exact: true }).click();
+    await page.locator('.sw-startup').waitFor();
+    assert.match(await page.locator('.sw-startup').innerText(), /brief.pdf/);
+    await page.waitForFunction(() => window.__sessionFixture.pendingLaunchReplies.length === 1);
+    assert.equal(await page.locator('.sw-startup [data-stage=active]').innerText(), 'Запуск агента');
+    await page.screenshot({path:path.join(out,'loading-startup.png')});
+    await page.evaluate(() => window.__sessionFixture.resolveLaunchReplies());
+    await page.locator('.sw-composer').waitFor();
+    assert.equal(await page.locator('.sw-composer .sw-attachment').count(), 1);
+    await page.evaluate(() => { window.__holdHistory = true; });
+    await page.locator('#sessionSidebar [data-session-id="build-box:remote-chat"]').click();
+    await page.locator('#chatlog .ui-skeleton-history').waitFor();
+    assert.equal(await page.locator('#chatlog').getAttribute('aria-busy'), 'true');
+    await page.screenshot({path:path.join(out,'loading-history-dark.png')});
+    await page.emulateMedia({reducedMotion:'reduce'});
+    assert.equal(await page.locator('.ui-skeleton-line').first().evaluate(el => getComputedStyle(el).animationName), 'none');
+    await page.evaluate(() => window.jarvisTheme.adopt({theme:'light',mode:'window'}));
+    await page.setViewportSize({width:600,height:760});
+    await page.screenshot({path:path.join(out,'loading-history-light-narrow.png')});
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.setViewportSize({width:1280,height:850});
+    await page.evaluate(() => { window.jarvisTheme.adopt({theme:'dark',mode:'window'}); window.__holdHistory = false; window.__resolveHistory(); });
+    await page.waitForFunction(() => !document.getElementById('reply').disabled);
+    await page.locator('#chat input[type=file]').setInputFiles({ name: 'report.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: Buffer.from('PK\0fixture') });
+    await page.locator('#chatAttach .sw-attachment').waitFor();
+    await page.locator('#reply').fill('Прочитай документ');
+    await page.locator('#chatSend').click();
+    assert.equal(await page.locator('#reply').inputValue(), '');
+    await page.waitForFunction(() => !!window.__resolveSend);
+    assert.match(await page.locator('#chatlog').innerText(), /Отправляем/);
+    assert.equal(await page.locator('#chatSend').getAttribute('aria-busy'), 'true');
+    await page.screenshot({path:path.join(out,'loading-send.png')});
+    const upload = await page.evaluate(() => window.__sessionFixture.calls.filter(c => c.name === 'saveAttachment').at(-1));
+    assert.equal(upload.args[1], 'report.docx'); assert.equal(upload.args[2], 'build-box');
+    const delivery = await page.evaluate(() => window.__sessionFixture.calls.filter(c => c.name === 'sendReply').at(-1));
+    assert.equal(delivery.args[0], 'build-box:remote-chat'); assert.match(delivery.args[1], /report\.docx/);
+    await page.evaluate(() => window.__resolveSend({ok:false,error:'Fixture delivery failed'}));
+    await page.waitForFunction(() => document.getElementById('reply').value === 'Прочитай документ');
+    assert.equal(await page.locator('#chatAttach .sw-attachment').count(), 1);
+    await page.locator('#chatAttach button[aria-label^="Убрать"]').click();
+    await page.evaluate(() => {
+      const data = new DataTransfer(); data.items.add(new File(['image'], 'clipboard.png', {type:'image/png'}));
+      document.getElementById('reply').dispatchEvent(new ClipboardEvent('paste', {clipboardData:data,bubbles:true,cancelable:true}));
+    });
+    await page.locator('#chatAttach .sw-attachment').waitFor();
+    assert.match(await page.locator('#chatAttach').innerText(), /clipboard.png/);
+    await page.locator('#chatAttach button[aria-label^="Убрать"]').click();
+    await page.evaluate(() => {
+      const data = new DataTransfer(); data.items.add(new File(['notes'], 'notes.txt', {type:'text/plain'}));
+      document.querySelector('#chat .chatinput').dispatchEvent(new DragEvent('drop', {dataTransfer:data,bubbles:true,cancelable:true}));
+    });
+    await page.locator('#chatAttach .sw-attachment').waitFor();
+    assert.match(await page.locator('#chatAttach').innerText(), /notes.txt/);
+    assert.deepEqual(errors, []);
+    await page.screenshot({path:path.join(out,'attachments.png')});
+    await page.getByRole('button', {name:'Новый чат',exact:true}).click();
+    await page.locator('.sw-composer .sw-attachment button[aria-label^="Убрать"]').click();
+    await page.locator('#newChatPrompt').fill('hi');
+    await page.evaluate(() => { window.__sessionFixture.nextLaunch = { result: {ok:true,launchId:'instant-first',pane:'%88'} }; });
+    await page.getByRole('button', {name:'Начать задачу',exact:true}).click();
+    await page.waitForFunction(() => window.__sessionFixture.calls.some(c => c.name === 'launchSession' && c.args[4].task === 'hi'));
+    await page.evaluate(() => {
+      const f = window.__sessionFixture;
+      const session = {...f.sessions().find(s => s.id === 'local-chat'), id:'instant-chat', title:'hi', tmuxPane:'%88', status:'working'};
+      window.__emptyHistory = session.id;
+      f.emitState([...f.sessions(),session]); f.emitLaunch({launchId:'instant-first',status:'connected',sessionId:session.id});
+    });
+    await page.locator('#chatlog .msg.user.pending').waitFor();
+    await page.waitForFunction(() => document.getElementById('chatlog').getAttribute('aria-busy') === 'false');
+    assert.match(await page.locator('#chatlog').innerText(), /hi/);
+    assert.equal(await page.locator('#chatlog .chatempty').count(), 0);
+    await page.screenshot({path:path.join(out,'first-message-before-sync.png')});
+    await page.locator('#sessionSidebar [data-session-id="build-box:remote-chat"]').click();
+    assert.equal(await page.locator('#chatlog .msg.user.pending').count(), 0);
+    await page.evaluate(() => window.__sessionFixture.emitLaunch({launchId:'instant-first',status:'sent',sessionId:'instant-chat'}));
+    await page.locator('#sessionSidebar [data-session-id="instant-chat"]').click();
+    await page.locator('#chatlog .msg.user.pending').waitFor();
+    assert.match(await page.locator('#chatlog').innerText(), /Отправлено/);
+    await page.evaluate(() => {
+      window.__historyItems = [{role:'user',text:'hi',ts:Date.now()}];
+      for (const cb of window.__sessionFixture.events.onChatAppend || []) cb({sessionId:'instant-chat',items:window.__historyItems});
+    });
+    assert.equal(await page.locator('#chatlog .msg.user.pending').count(), 0);
+    assert.equal(await page.locator('#chatlog .msg.user').count(), 1);
+    await page.locator('#reply').fill('hi');
+    await page.evaluate(() => { window.__resolveSend = null; });
+    await page.locator('#chatSend').click();
+    await page.waitForFunction(() => !!window.__resolveSend);
+    await page.locator('#sessionSidebar [data-session-id="build-box:remote-chat"]').click();
+    await page.evaluate(() => window.__resolveSend({ok:true,queued:true}));
+    await page.locator('#sessionSidebar [data-session-id="instant-chat"]').click();
+    await page.waitForFunction(() => document.getElementById('chatlog').getAttribute('aria-busy') === 'false');
+    assert.equal(await page.locator('#chatlog .msg.user.pending').count(), 1, 'old identical message must not acknowledge a new reply');
+    assert.match(await page.locator('#chatlog .msg.user.pending').innerText(), /В очереди/);
+    await page.evaluate(() => {
+      const item = {role:'user',text:'hi',ts:Date.now()}; window.__historyItems.push(item);
+      for (const cb of window.__sessionFixture.events.onChatAppend || []) cb({sessionId:'instant-chat',items:[item]});
+    });
+    assert.equal(await page.locator('#chatlog .msg.user.pending').count(), 0);
+    assert.equal(await page.locator('#chatlog .msg.user').count(), 2);
+    await page.getByRole('button', {name:'Новый чат',exact:true}).click();
+    await page.locator('#newChatDirectory').fill('/work/main project');
+    await page.reload();
+    await page.locator('#tabSessions').click();
+    await page.evaluate(() => window.__resolveInitial());
+    await page.waitForFunction(() => document.getElementById('newChatDirectory').value === '/work/main project');
+    assert.equal(await page.locator('#newChatMachine').inputValue(), 'local');
+    console.log(JSON.stringify({ok:true,checks:['stable recent buttons','new-chat PDF','immediate startup','launch failure retains file','remote DOCX host routing','immediate send','failure restores text and file','clipboard image','drop document','initial list skeleton','startup stages','history skeleton dark/light narrow','reduced motion','send busy button','project path survives reload','first message before transcript','outgoing survives navigation','transcript echo replaces outgoing','queued reply survives navigation and old identical echo'],errors}));
+  } finally { await browser.close(); server.close(); }
+})().catch(error => { console.error(error); server.close(); process.exitCode = 1; });

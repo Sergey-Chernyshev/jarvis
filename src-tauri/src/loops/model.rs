@@ -42,7 +42,11 @@ pub struct Sandbox {
 
 impl Default for Sandbox {
     fn default() -> Self {
-        Self { repo: String::new(), branch: "loop/{name}-{n}".into(), worktree: true }
+        Self {
+            repo: String::new(),
+            branch: "loop/{name}-{n}".into(),
+            worktree: true,
+        }
     }
 }
 
@@ -70,7 +74,11 @@ pub struct Critic {
 
 impl Default for Critic {
     fn default() -> Self {
-        Self { enabled: true, model: "opus".into(), prompt: String::new() }
+        Self {
+            enabled: true,
+            model: "opus".into(),
+            prompt: String::new(),
+        }
     }
 }
 
@@ -89,7 +97,11 @@ pub struct Exit {
 
 impl Default for Exit {
     fn default() -> Self {
-        Self { gates: Vec::new(), critic: Critic::default(), streak: 2 }
+        Self {
+            gates: Vec::new(),
+            critic: Critic::default(),
+            streak: 2,
+        }
     }
 }
 
@@ -107,7 +119,10 @@ pub struct Memory {
 
 impl Default for Memory {
     fn default() -> Self {
-        Self { enabled: true, file: "notes.md".into() }
+        Self {
+            enabled: true,
+            file: "notes.md".into(),
+        }
     }
 }
 
@@ -137,7 +152,11 @@ pub struct Schedule {
 
 impl Default for Schedule {
     fn default() -> Self {
-        Self { wake: Wake::Manual, resume_after_limit: true, keep_awake: true }
+        Self {
+            wake: Wake::Manual,
+            resume_after_limit: true,
+            keep_awake: true,
+        }
     }
 }
 
@@ -160,7 +179,12 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { tokens: 200_000, iterations: 20, minutes: 480, stop_on_drift: true }
+        Self {
+            tokens: 200_000,
+            iterations: 20,
+            minutes: 480,
+            stop_on_drift: true,
+        }
     }
 }
 
@@ -274,7 +298,11 @@ pub fn slug(name: &str) -> String {
     // Кириллица целиком выпадает из ветки: `loop/--3` — не имя. Пусть будет
     // честный запасной вариант, а не мусор.
     let trimmed = out.trim_matches('-').to_string();
-    if trimmed.is_empty() { "loop".into() } else { trimmed }
+    if trimmed.is_empty() {
+        "loop".into()
+    } else {
+        trimmed
+    }
 }
 
 /// Чем закончилась итерация.
@@ -356,7 +384,10 @@ pub enum StopReason {
 impl StopReason {
     /// Ограничитель — это не поломка: работа цела, продолжение возможно.
     pub fn is_limit(self) -> bool {
-        matches!(self, StopReason::Tokens | StopReason::Iterations | StopReason::Time)
+        matches!(
+            self,
+            StopReason::Tokens | StopReason::Iterations | StopReason::Time
+        )
     }
 }
 
@@ -411,17 +442,29 @@ pub struct Run {
     pub interventions: Vec<String>,
     /// Сколько итераций подряд всё зелёное — по этому и выходим.
     pub streak: u32,
+    /// Persist graph outputs and the exact continuation across questions/restarts.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub pipeline_vars: std::collections::HashMap<String, super::pipeline::Outcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_next: Option<String>,
 }
 
 impl Run {
     /// Итерации, ждущие человеческого взгляда.
     pub fn pending_review(&self) -> usize {
-        self.iterations.iter().filter(|i| i.sampled && !i.reviewed).count()
+        self.iterations
+            .iter()
+            .filter(|i| i.sampled && !i.reviewed)
+            .count()
     }
 
     /// Сколько минут идёт запуск.
     pub fn minutes(&self, now: i64) -> u32 {
-        let end = if self.ended_at > 0 { self.ended_at } else { now };
+        let end = if self.ended_at > 0 {
+            self.ended_at
+        } else {
+            now
+        };
         ((end - self.started_at).max(0) / 60_000) as u32
     }
 
@@ -475,15 +518,25 @@ mod tests {
             steps: vec![Step {
                 id: "правка".into(),
                 name: String::new(),
-                kind: StepKind::Agent { prompt: "делай".into(), model: String::new() },
+                kind: StepKind::Agent {
+                    prompt: "делай".into(),
+                    model: String::new(),
+                },
                 retries: 0,
-                next: vec![Flow { to: String::new(), when: Cond::Always }],
+                next: vec![Flow {
+                    to: String::new(),
+                    when: Cond::Always,
+                }],
             }],
         });
         assert!(l.problems().is_empty(), "{:?}", l.problems());
         // Пустой пайплайн — это дыра, и о ней говорят прямо.
         l.pipeline = Some(Pipeline::default());
-        assert!(l.problems().iter().any(|x| x.contains("ни одного шага")), "{:?}", l.problems());
+        assert!(
+            l.problems().iter().any(|x| x.contains("ни одного шага")),
+            "{:?}",
+            l.problems()
+        );
     }
     use super::*;
 
@@ -497,7 +550,10 @@ mod tests {
 
     #[test]
     fn branch_substitutes_name_and_run() {
-        let mut l = Loop { name: "ночной test-fix".into(), ..Default::default() };
+        let mut l = Loop {
+            name: "ночной test-fix".into(),
+            ..Default::default()
+        };
         l.sandbox.branch = "loop/{name}-{n}".into();
         assert_eq!(l.branch_for(7), "loop/test-fix-7");
     }
@@ -512,33 +568,61 @@ mod tests {
         // Дыра появляется, только когда снято и то и другое.
         let mut blind = Loop::default();
         blind.exit.critic.enabled = false;
-        assert!(blind.problems().iter().any(|p| p.contains("условия выхода")));
+        assert!(blind
+            .problems()
+            .iter()
+            .any(|p| p.contains("условия выхода")));
 
         let mut ok = Loop {
             name: "test-fix".into(),
-            source: Source { goal: "чинить флаки".into(), ..Default::default() },
+            source: Source {
+                goal: "чинить флаки".into(),
+                ..Default::default()
+            },
             ..Default::default()
         };
         ok.sandbox.repo = "/repo".into();
-        ok.exit.gates.push(Gate { name: "тесты".into(), command: "cargo test".into() });
+        ok.exit.gates.push(Gate {
+            name: "тесты".into(),
+            command: "cargo test".into(),
+        });
         assert!(ok.problems().is_empty(), "{:?}", ok.problems());
 
         // Снять все стены разом нельзя: цикл без них крутится до утра и до
         // исчерпания лимита аккаунта.
-        ok.limits = Limits { tokens: 0, iterations: 0, minutes: 0, stop_on_drift: false };
+        ok.limits = Limits {
+            tokens: 0,
+            iterations: 0,
+            minutes: 0,
+            stop_on_drift: false,
+        };
         assert!(ok.problems().iter().any(|p| p.contains("ограничителя")));
     }
 
     #[test]
     fn limits_trip_before_the_iteration_starts() {
-        let limits = Limits { tokens: 200_000, iterations: 20, minutes: 480, stop_on_drift: true };
-        let mut run = Run { started_at: 0, tokens: 199_999, ..Default::default() };
+        let limits = Limits {
+            tokens: 200_000,
+            iterations: 20,
+            minutes: 480,
+            stop_on_drift: true,
+        };
+        let mut run = Run {
+            started_at: 0,
+            tokens: 199_999,
+            ..Default::default()
+        };
         assert_eq!(run.tripped(&limits, 1_000), None);
         run.tokens = 200_000;
         assert_eq!(run.tripped(&limits, 1_000), Some(StopReason::Tokens));
 
         run.tokens = 0;
-        run.iterations = (0..20).map(|n| Iteration { n, ..Default::default() }).collect();
+        run.iterations = (0..20)
+            .map(|n| Iteration {
+                n,
+                ..Default::default()
+            })
+            .collect();
         assert_eq!(run.tripped(&limits, 1_000), Some(StopReason::Iterations));
 
         run.iterations.clear();
@@ -548,18 +632,45 @@ mod tests {
 
     #[test]
     fn zero_limit_means_no_wall() {
-        let limits = Limits { tokens: 0, iterations: 5, minutes: 0, stop_on_drift: false };
-        let run = Run { tokens: u64::MAX, ..Default::default() };
-        assert_eq!(run.tripped(&limits, i64::MAX / 2), None, "нули — это «без ограничения»");
+        let limits = Limits {
+            tokens: 0,
+            iterations: 5,
+            minutes: 0,
+            stop_on_drift: false,
+        };
+        let run = Run {
+            tokens: u64::MAX,
+            ..Default::default()
+        };
+        assert_eq!(
+            run.tripped(&limits, i64::MAX / 2),
+            None,
+            "нули — это «без ограничения»"
+        );
     }
 
     #[test]
     fn pending_review_counts_only_unseen_samples() {
         let run = Run {
             iterations: vec![
-                Iteration { n: 1, sampled: true, reviewed: true, ..Default::default() },
-                Iteration { n: 2, sampled: true, reviewed: false, ..Default::default() },
-                Iteration { n: 3, sampled: false, reviewed: false, ..Default::default() },
+                Iteration {
+                    n: 1,
+                    sampled: true,
+                    reviewed: true,
+                    ..Default::default()
+                },
+                Iteration {
+                    n: 2,
+                    sampled: true,
+                    reviewed: false,
+                    ..Default::default()
+                },
+                Iteration {
+                    n: 3,
+                    sampled: false,
+                    reviewed: false,
+                    ..Default::default()
+                },
             ],
             ..Default::default()
         };
@@ -573,8 +684,14 @@ mod tests {
     fn wake_shape_on_the_wire_is_fixed() {
         let j = |w: Wake| serde_json::to_string(&w).unwrap();
         assert_eq!(j(Wake::Manual), "\"manual\"");
-        assert_eq!(j(Wake::Daily { at: "02:00".into() }), r#"{"daily":{"at":"02:00"}}"#);
-        assert_eq!(j(Wake::Every { minutes: 60 }), r#"{"every":{"minutes":60}}"#);
+        assert_eq!(
+            j(Wake::Daily { at: "02:00".into() }),
+            r#"{"daily":{"at":"02:00"}}"#
+        );
+        assert_eq!(
+            j(Wake::Every { minutes: 60 }),
+            r#"{"every":{"minutes":60}}"#
+        );
     }
 
     /// Панель шлёт форму обратно целиком — вместе с полями снимка, которых в
@@ -587,7 +704,8 @@ mod tests {
             "run": { "n": 3 }, "wakeLabel": "каждый день в 02:00",
             "nextWake": 123, "pendingReview": 2, "problems": ["…"],
         });
-        let parsed: Loop = serde_json::from_value(from_panel).expect("лишние поля не должны мешать");
+        let parsed: Loop =
+            serde_json::from_value(from_panel).expect("лишние поля не должны мешать");
         assert_eq!(parsed.name, "ночной test-fix");
         // Пропущенные поля берут умолчания, а не обнуляются.
         assert_eq!(parsed.limits.tokens, Limits::default().tokens);

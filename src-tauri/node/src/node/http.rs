@@ -20,7 +20,7 @@
 //! слушает ничего, а через SSH-туннель приходит уже доверенный владелец.
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::extract::{DefaultBodyLimit, Path, Request, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::ring::{Recorded, Slice};
-use super::{agent, files, projects, tmux, Node};
+use super::{agent, files, sources, tmux, Node};
 
 /// Потолок long-poll. 25с, а не «до последнего»: SSH-туннель и NAT рвут
 /// молчащее соединение без предупреждения, и лучше отдать пустой ответ, чем
@@ -52,8 +52,12 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/keys", post(keys))
         .route("/kill", post(kill))
         .route("/projects", get(projects))
+        .route("/sources", get(provider_sources))
+        .route("/sources/repair", post(repair_source))
+        .route("/sessions", get(sessions))
         .route("/launch", post(launch))
         .route("/screen", get(screen))
+        .route("/terminal/{action}", post(terminal).layer(DefaultBodyLimit::max(5 * 1024 * 1024)))
         .route("/usage", get(usage))
         // POST на любой прочий путь — конверт от хука. jarvis-hook бьёт в
         // /event, но привязываться к одному пути не за что: у демона ровно так же.
@@ -67,6 +71,10 @@ async fn hello(State(node): State<Arc<Node>>) -> Response {
     let s = node.stats();
     json_ok(&json!({
         "node": "jarvis-node",
+        "protocol": 2,
+        "capabilities": ["events.instance", "events.timestamp", "files.bounded", "sources", "sources.trustRepair", "sessions", "projects.multiSource", "terminal.reply", "terminal.keys", "terminal.screen", "terminal.kill", "terminal.stream.v1"],
+        "sources": sources::discover(&super::home_dir(), &super::jarvis_dir()).iter().map(|source| source.json()).collect::<Vec<_>>(),
+        "instance": node.instance(),
         "version": env!("CARGO_PKG_VERSION"),
         "host": node.host(),
         "uptime_ms": node.uptime_ms(),
@@ -77,10 +85,24 @@ async fn hello(State(node): State<Arc<Node>>) -> Response {
     }))
 }
 
+/// Control-mode streams stay inside the authenticated Unix-socket transport.
+async fn terminal(Path(action): Path<String>, body: Bytes) -> Response {
+    let payload = match serde_json::from_slice::<Value>(&body) {
+        Ok(value) if value.is_object() => value,
+        _ => return json_err(StatusCode::BAD_REQUEST, "terminal request must be a JSON object"),
+    };
+    json_ok(&crate::terminal_stream::dispatch(&action, &payload).await)
+}
+
 /// GET /events?since=N — события с курсора; ждём до 25с, если ничего нет.
 async fn events(State(node): State<Arc<Node>>, req: Request) -> Response {
     let q = params(req.uri().query());
     let since = q.get("since").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    // A restarted node may already have passed the old numerical cursor.
+    // Explicit instance identity prevents silently skipping its early events.
+    if q.get("instance").is_some_and(|id| !id.is_empty() && id != node.instance()) {
+        return json_ok(&json!({ "gap": true, "cursor": 0, "instance": node.instance() }));
+    }
     let deadline = tokio::time::Instant::now() + POLL_WINDOW;
     // Подписываемся ДО первого чтения буфера: иначе событие, пришедшее в зазор
     // между чтением и ожиданием, пролежало бы у нас все 25 секунд.
@@ -88,17 +110,17 @@ async fn events(State(node): State<Arc<Node>>, req: Request) -> Response {
     loop {
         match node.slice(since) {
             // честная дырка: ноут перечитает транскрипты целиком
-            Slice::Gap { cursor } => return json_ok(&json!({ "gap": true, "cursor": cursor })),
+            Slice::Gap { cursor } => return json_ok(&json!({ "gap": true, "cursor": cursor, "instance": node.instance() })),
             Slice::Events { cursor, events } => {
                 if !events.is_empty() {
                     let events: Vec<Value> = events.iter().map(Recorded::to_json).collect();
-                    return json_ok(&json!({ "cursor": cursor, "events": events }));
+                    return json_ok(&json!({ "cursor": cursor, "events": events, "instance": node.instance() }));
                 }
                 match tokio::time::timeout_at(deadline, bell.changed()).await {
                     Ok(Ok(())) => {} // звонок — перечитываем буфер
                     // окно вышло (или звонок сломался) — отдаём пустой ответ с
                     // тем же курсором, ноут тут же придёт снова
-                    _ => return json_ok(&json!({ "cursor": cursor, "events": [] })),
+                    _ => return json_ok(&json!({ "cursor": cursor, "events": [], "instance": node.instance() })),
                 }
             }
         }
@@ -108,7 +130,7 @@ async fn events(State(node): State<Arc<Node>>, req: Request) -> Response {
 /// GET /file?path=P&from=OFF — кусок транскрипта. `next` в ответе — смещение
 /// для следующего запроса; `from` меньше запрошенного означает, что файл
 /// переписали и читать надо заново.
-async fn file(State(node): State<Arc<Node>>, req: Request) -> Response {
+async fn file(req: Request) -> Response {
     let q = params(req.uri().query());
     let path = q.get("path").map(String::as_str).unwrap_or("");
     let from = q.get("from").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
@@ -118,7 +140,7 @@ async fn file(State(node): State<Arc<Node>>, req: Request) -> Response {
     // Это по-прежнему проверка на стороне узла, а не доверие клиенту: «каталог,
     // где прямо сейчас работает агент» узел выясняет сам у tmux. Пропадёт
     // пана — пропадёт и доступ.
-    let mut roots = node.roots().to_vec();
+    let mut roots = files::transcript_roots(&super::home_dir());
     roots.extend(tmux::live_cwds().await);
     let real = match files::resolve(path, &roots) {
         Ok(p) => p,
@@ -210,8 +232,28 @@ async fn kill(body: Bytes) -> Response {
 /// GET /projects — где на этой машине работали. Только оглавление: ноут сам
 /// решит, что показать и что из этого прочитать через `/file`.
 async fn projects() -> Response {
-    let home = super::home_dir();
-    json_ok(&json!({ "projects": projects::list(&home) }))
+    let roots = sources::discover(&super::home_dir(), &super::jarvis_dir());
+    match tokio::task::spawn_blocking(move || sources::projects(&roots)).await {
+        Ok(value) => json_ok(&value), Err(_) => json_err(StatusCode::INTERNAL_SERVER_ERROR, "Не удалось прочитать каталог проектов")
+    }
+}
+
+async fn provider_sources() -> Response {
+    json_ok(&json!({"sources": sources::discover(&super::home_dir(), &super::jarvis_dir()).iter().map(|source| source.json()).collect::<Vec<_>>(), "protocol":2}))
+}
+async fn repair_source(body: Bytes) -> Response {
+    let Ok(value) = serde_json::from_slice::<Value>(&body) else { return json_err(StatusCode::BAD_REQUEST, "Ожидаю sourceId"); };
+    let Some(id) = value["sourceId"].as_str().filter(|id| !id.is_empty() && id.len() <= 128) else { return json_err(StatusCode::BAD_REQUEST, "Ожидаю sourceId"); };
+    match super::hooks::repair_source(id).await {
+        Ok(value) => json_ok(&value),
+        Err(error) => json_err(StatusCode::BAD_REQUEST, &error),
+    }
+}
+async fn sessions() -> Response {
+    let roots = sources::discover(&super::home_dir(), &super::jarvis_dir());
+    match tokio::task::spawn_blocking(move || sources::sessions(&roots)).await {
+        Ok(value) => json_ok(&value), Err(_) => json_err(StatusCode::INTERNAL_SERVER_ERROR, "Не удалось прочитать каталог сессий")
+    }
 }
 
 /// POST /launch — {cwd, cmd}: поднять сессию агента в `tmux -L jarvis`.
@@ -229,6 +271,16 @@ async fn launch(body: Bytes) -> Response {
     if !cwd.starts_with('/') || cmd.is_empty() {
         return json_err(StatusCode::BAD_REQUEST, "нужен абсолютный cwd и непустая команда");
     }
+    let command;
+    let cmd = if let Some(id) = v.get("sourceId").and_then(Value::as_str).filter(|id| !id.is_empty()) {
+        let roots = sources::discover(&super::home_dir(), &super::jarvis_dir());
+        let Some(source) = roots.iter().find(|source| source.id == id) else {
+            return json_err(StatusCode::BAD_REQUEST, "Источник агента не найден на узле");
+        };
+        let env = if source.agent == "codex" { "CODEX_HOME" } else { "CLAUDE_CONFIG_DIR" };
+        command = format!("export {env}={} JARVIS_PROVIDER_INSTANCE_ID={}\n{cmd}", tmux::sh_quote(&source.home.to_string_lossy()), tmux::sh_quote(&source.id));
+        command.as_str()
+    } else { cmd };
     match tmux::launch(cwd, cmd, v.get("name").and_then(Value::as_str)).await {
         // Пану возвращаем сразу: сессия агента ещё не зарегистрирована, и это
         // единственная ниточка, по которой запустивший может увидеть, что там
@@ -240,8 +292,13 @@ async fn launch(body: Bytes) -> Response {
 
 /// GET /usage — лимиты аккаунта. `?fresh=1` минует кэш.
 async fn usage(req: Request) -> Response {
-    let fresh = params(req.uri().query()).get("fresh").is_some_and(|v| v == "1");
-    json_ok(&agent::usage(fresh).await)
+    let query = params(req.uri().query());
+    let fresh = query.get("fresh").is_some_and(|v| v == "1");
+    if let Some(id) = query.get("sourceId").filter(|id| !id.is_empty()) {
+        let roots = sources::discover(&super::home_dir(), &super::jarvis_dir());
+        let Some(source) = roots.iter().find(|source| &source.id == id) else { return json_err(StatusCode::BAD_REQUEST,"Источник агента не найден"); };
+        json_ok(&agent::usage_for(fresh, Some(source)).await)
+    } else { json_ok(&agent::usage(fresh).await) }
 }
 
 /// GET /screen?pane=%N — что видно в пане прямо сейчас.

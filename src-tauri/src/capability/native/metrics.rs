@@ -12,6 +12,21 @@ use crate::daemon::Daemon;
 pub fn register(reg: &mut DaemonRegistry) {
     reg.register(
         CapabilityMeta {
+            id: "analytics.query",
+            class: RiskClass::Read,
+            provenance: Provenance::Untrusted,
+            description: "Локальная аналитика Claude/Codex: качество наблюдаемого процесса и харнеса, ошибки инструментов, модели, Git и записанные результаты. Оценки не доказывают качество кода или причинную экономию.",
+            input_schema: json!({"type":"object","properties":{
+                "period":{"type":"string","enum":["today","week","month","all"]},
+                "project":{"type":"string"},"refresh":{"type":"boolean"}},"additionalProperties":false}),
+        },
+        make_handler(|d: Arc<Daemon>, args: Value| async move {
+            crate::analytics::report(d, args).await
+        }),
+    );
+
+    reg.register(
+        CapabilityMeta {
             id: "metrics.query",
             class: RiskClass::Read,
             provenance: Provenance::Trusted,

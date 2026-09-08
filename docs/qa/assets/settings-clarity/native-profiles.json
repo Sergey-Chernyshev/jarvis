@@ -1,0 +1,33 @@
+{
+  "ok": true,
+  "steps": [
+    {
+      "name": "Discover real Personal and Work profiles separately",
+      "ok": true,
+      "elapsedMs": 280
+    },
+    {
+      "name": "Production importer finds this actual large Desktop chat",
+      "ok": true,
+      "elapsedMs": 15855
+    },
+    {
+      "name": "Real chat is visible in the native chat list with its profile",
+      "ok": true,
+      "elapsedMs": 166
+    },
+    {
+      "name": "New task exposes the selected profile’s actual model catalog without launching an agent",
+      "ok": true,
+      "elapsedMs": 52
+    },
+    {
+      "name": "Profile settings render in WKWebView and respond",
+      "ok": true,
+      "elapsedMs": 293
+    }
+  ],
+  "errors": [],
+  "failure": null,
+  "elapsedMs": 16646
+}

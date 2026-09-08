@@ -1,0 +1,20 @@
+{
+  "ok": true,
+  "pid": 91552,
+  "exe": "/Users/se.chernyshev/jarvis/src-tauri/target/release/bundle/macos/Jarvis.app/Contents/MacOS/jarvis",
+  "sha256": "6adc76f88d5760040eea7c3722abc1eec61dc550e6810a66936eb94734ecbc11",
+  "sessions": 249,
+  "profiles": [
+    "codex-personal",
+    "codex-work"
+  ],
+  "current": {
+    "id": "codex:codex-v1-97dd919f2905aa1e:01a06e5a-e84b-7d72-98d7-f33e6ee938d2",
+    "providerSessionId": "01a06e5a-e84b-7d72-98d7-f33e6ee938d2",
+    "instanceId": "codex-v1-97dd919f2905aa1e",
+    "instanceLabel": "codex-personal",
+    "status": "working",
+    "controlMode": "external",
+    "transcript": "/Users/se.chernyshev/work/sup/codex-dual-account/personal/codex-home/sessions/2026/09/05/rollout-2026-09-05T00-37-26-01a06e5a-e84b-7d72-98d7-f33e6ee938d2.jsonl"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "ok": true,
+  "foregroundChild": true,
+  "unixSocketForward": true,
+  "remoteExitStatus": 23,
+  "metadata": "Lima-provided config; no shared ControlMaster ownership"
+}

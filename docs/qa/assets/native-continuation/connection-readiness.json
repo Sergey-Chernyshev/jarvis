@@ -1,0 +1,34 @@
+{
+  "date": "2026-09-05",
+  "transport": "Teleport tsh",
+  "login": "root",
+  "scope": "One temporary authenticated loopback tunnel; GET /hello only; process closed afterwards",
+  "observedReadySeconds": 29.25,
+  "observedHelloCompletedSeconds": 34.56,
+  "helloVersion": "0.3.3",
+  "previousReadinessTimeoutSeconds": 15,
+  "newTeleportReadinessTimeoutSeconds": 45,
+  "sshReadinessTimeoutSeconds": 15,
+  "credentialsModified": false,
+  "servicesRestarted": false,
+  "productionPid": 67422,
+  "productionSha256": "782b91900b07dc8718fdb83cdcb1f526fafff086d9972cb8ae24d0133ba77140",
+  "postRestartHealth": {
+    "root": {
+      "ok": true,
+      "helloSeconds": 0.11,
+      "sources": 2
+    },
+    "coder": {
+      "ok": true,
+      "helloSeconds": 0.11,
+      "sources": 2
+    }
+  },
+  "liveSessionCount": 478,
+  "remoteTests": {
+    "passed": 83,
+    "failed": 0,
+    "ignored": 2
+  }
+}

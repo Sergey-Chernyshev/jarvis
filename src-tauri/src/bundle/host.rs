@@ -14,6 +14,7 @@ pub enum Host {
     Local,
     /// Узел: имя (для реестра сессий) и ssh-хост (для исполнения).
     Ssh { machine: String, host: String },
+    ConfiguredSsh { machine: String, connection: crate::install::remote::Connection },
 }
 
 impl Host {
@@ -21,6 +22,7 @@ impl Host {
         match self {
             Host::Local => "local",
             Host::Ssh { machine, .. } => machine,
+            Host::ConfiguredSsh { machine, .. } => machine,
         }
     }
 
@@ -34,6 +36,11 @@ impl Host {
             Host::Ssh { host, .. } => {
                 let full = format!("cd {} && {{ {cmd}\n}}", crate::util::shell_quote(cwd));
                 ssh(host, &full, timeout).await
+            }
+            Host::ConfiguredSsh { connection, .. } => {
+                let full = format!("cd {} && {{ {cmd}\n}}", crate::util::shell_quote(cwd));
+                let (code,out,err) = configured_ssh_split(connection,&full,timeout).await;
+                (code,merge(out,err))
             }
         }
     }
@@ -63,6 +70,11 @@ impl Host {
                     full.push_str(&crate::util::shell_quote(a));
                 }
                 ssh_split(host, &full, Duration::from_secs(120)).await
+            }
+            Host::ConfiguredSsh { connection, .. } => {
+                let mut full = format!("git -C {}", crate::util::shell_quote(dir));
+                for arg in args { full.push(' '); full.push_str(&crate::util::shell_quote(arg)); }
+                configured_ssh_split(connection,&full,Duration::from_secs(120)).await
             }
         }
     }
@@ -114,6 +126,14 @@ async fn ssh_split(host: &str, script: &str, timeout: Duration) -> (i32, String,
     collect_split(cmd, timeout).await
 }
 
+async fn configured_ssh_split(connection: &crate::install::remote::Connection, script: &str, timeout: Duration) -> (i32,String,String) {
+    let full = format!("export JARVIS_IGNORE=1 LC_ALL=C\nbash -lc {}",crate::util::shell_quote(script));
+    let command = match connection.command_with_script(&full) { Ok(command) => command, Err(error) => return (-1,String::new(),error) };
+    let mut cmd = tokio::process::Command::from(command);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    collect_split(cmd,timeout).await
+}
+
 /// Слить потоки в один текст — для диагностики: у git и гейтов она в stderr,
 /// и терять её нельзя.
 fn merge(mut out: String, err: String) -> String {
@@ -163,6 +183,10 @@ impl Host {
                 let full = format!("cd {} && {{ {cmd}\n}}", crate::util::shell_quote(cwd));
                 ssh_split(host, &full, timeout).await
             }
+            Host::ConfiguredSsh { connection, .. } => {
+                let full = format!("cd {} && {{ {cmd}\n}}",crate::util::shell_quote(cwd));
+                configured_ssh_split(connection,&full,timeout).await
+            }
         };
         if code == 0 {
             Ok(out)
@@ -175,7 +199,7 @@ impl Host {
     pub async fn home(&self) -> Result<String, String> {
         match self {
             Host::Local => std::env::var("HOME").map_err(|_| "не знаю $HOME".into()),
-            Host::Ssh { .. } => {
+            Host::Ssh { .. } | Host::ConfiguredSsh { .. } => {
                 let out = self.sh_data("/", "printf %s \"$HOME\"", Duration::from_secs(15)).await?;
                 // Первая строка stdout и ничего больше: любые приветствия из
                 // rc-файлов не должны становиться частью пути.
@@ -208,7 +232,7 @@ impl Host {
                 out.sort();
                 Ok(out)
             }
-            Host::Ssh { .. } => {
+            Host::Ssh { .. } | Host::ConfiguredSsh { .. } => {
                 // POSIX-набор, без GNU-расширений: узлы бывают разными.
                 // Данные — только stdout: ворчание bash в stderr иначе
                 // превращалось в псевдокаталоги списка.

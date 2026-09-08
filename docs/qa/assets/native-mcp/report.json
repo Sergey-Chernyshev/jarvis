@@ -1,0 +1,40 @@
+{
+  "ok": true,
+  "scope": "Actual debug Tauri daemon, MCP stdio, capability registry and gate in isolated profile; empty meeting archive. No recording, provider request or authorized mutation.",
+  "records": [
+    {
+      "name": "actual stdio initialize",
+      "ok": true
+    },
+    {
+      "name": "actual registry and agent grant filter",
+      "ok": true,
+      "tools": 17
+    },
+    {
+      "name": "actual meeting archive read and provenance",
+      "ok": true
+    },
+    {
+      "name": "missing meeting returns a tool error",
+      "ok": true
+    },
+    {
+      "name": "invalid meeting input rejected",
+      "ok": true
+    },
+    {
+      "name": "actual settings gate denies non-allowlisted mutation without writing",
+      "ok": true
+    },
+    {
+      "name": "missing caller token rejected by actual daemon",
+      "ok": true
+    }
+  ],
+  "outcome": {
+    "code": 0,
+    "signal": null
+  },
+  "profile": "/var/folders/sz/1yzw2zzs64x5kcr0c9hqhnr40000gq/T/jarvis-native-smoke-59SQbR"
+}

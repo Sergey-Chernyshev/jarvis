@@ -37,6 +37,9 @@ function makeDom() {
       },
       appendChild(k) { node.children.push(k); k.parent = node; return k; },
       addEventListener(ev, fn) { (node.listeners[ev] ||= []).push(fn); },
+      getAttribute(k) { return node.attrs[k] ?? null; },
+      removeAttribute(k) { delete node.attrs[k]; },
+      contains(other) { return node === other || node.children.some(c => c.contains?.(other)); },
       setAttribute(k, v) {
         // Настоящий DOM бросает InvalidCharacterError на имя, начинающееся с
         // цифры. Без этой строгости подставной DOM проглотил бы ту самую
@@ -260,4 +263,32 @@ test('описание словами заполняет форму, но нич
   assert.ok(text.includes('прогонит гейт'), 'объяснение не увидело заполненные поля');
   // Ключевое: заполнение — это черновик, а не сохранение.
   assert.ok(!calls.some((c) => c[0] === 'save'), 'форма сохранилась сама, без подтверждения');
+});
+
+test('rejected save and failed transport stay visible and keep the draft editable', async () => {
+  const { root, window } = await loadLoops({ loops: [], templates: TEMPLATES });
+  await find(root, n => n.textContent === '+ Новый цикл')[0].listeners.click[0]({});
+  window.jarvis.loopsSave = async () => { throw new Error('Связь прервана'); };
+  await find(root, n => n.textContent === 'Создать цикл')[0].listeners.click[0]({});
+  assert.match(textOf(root), /Связь прервана/);
+  assert.ok(find(root, n => n.textContent === 'Создать цикл').length);
+  window.jarvis.loopsSave = async () => ({ ok: false, error: 'Не удалось записать файл' });
+  await find(root, n => n.textContent === 'Создать цикл')[0].listeners.click[0]({});
+  assert.match(textOf(root), /Не удалось записать файл/);
+});
+
+test('Escape closes the catalog first and retains the unfinished new automation', async () => {
+  const { root, window } = await loadLoops({ loops: [], templates: TEMPLATES });
+  await find(root, n => n.textContent === '+ Новый цикл')[0].listeners.click[0]({});
+  const name = find(root, n => n.tag === 'input')[0];
+  name.value = 'Мой черновик'; await name.listeners.input[0]({ target: name });
+  await find(root, n => n.textContent === 'из каталога')[0].listeners.click[0]({});
+  assert.ok(find(root, n => n.classList.contains('lp-shade')).length);
+  assert.equal(window.jarvisModuleBack.loops(), true);
+  assert.equal(find(root, n => n.classList.contains('lp-shade')).length, 0);
+  assert.ok(find(root, n => n.textContent === 'Создать цикл').length);
+  assert.equal(window.jarvisModuleBack.loops(), true);
+  assert.match(textOf(root), /Библиотека шаблонов/);
+  await find(root, n => n.textContent === '+ Новый цикл')[0].listeners.click[0]({});
+  assert.equal(find(root, n => n.tag === 'input')[0].attrs.value, 'Мой черновик');
 });

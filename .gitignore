@@ -2,6 +2,7 @@ node_modules/
 .DS_Store
 .idea/
 target/
+src-tauri/node-binaries/
 dist/
 src-tauri/gen/
 .worktrees/
@@ -19,3 +20,6 @@ __pycache__/
 
 # Ворктри параллельных сессий Claude
 .claude/worktrees/
+
+# Local Claude credentials
+.claude/settings1.json

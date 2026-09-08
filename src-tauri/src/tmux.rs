@@ -52,7 +52,8 @@ fn focus_args<'a>(command: &'a str, pane: &'a str) -> [&'a str; 5] {
 /// `tmux -L jarvis <args>`: stdout при успехе, текст ошибки при провале.
 pub async fn tmux_j(args: &[&str]) -> Result<String, String> {
     let mut cmd = tokio::process::Command::new("tmux");
-    cmd.arg("-L")
+    // Preserve UTF-8 and tab-delimited metadata under launchd/SSH's C locale.
+    cmd.arg("-u").arg("-L")
         .arg("jarvis")
         .args(args)
         .stdin(Stdio::null())
@@ -88,6 +89,23 @@ pub enum Target {
 }
 
 impl Target {
+    /// Read the visible terminal on its owning machine. A remote pane must
+    /// never fall back to a local pane with the same numeric id.
+    pub async fn screen(&self, pane: &str) -> Result<String, String> {
+        match self {
+            Target::Local => tmux_j(&["capture-pane", "-t", pane, "-p"]).await,
+            Target::Remote(n) => n.client()?.screen(pane).await,
+        }
+    }
+
+    pub async fn terminal_key(&self, pane: &str, key: TerminalKey) -> Result<(), String> {
+        let keys = [Key::Named(key.tmux_name().to_string())];
+        match self {
+            Target::Local => play_keys(pane, &keys).await,
+            Target::Remote(n) => n.client()?.keys(pane, keys.iter().map(Key::to_json).collect()).await,
+        }
+    }
+
     pub async fn pane_alive(&self, pane: &str) -> bool {
         match self {
             Target::Local => pane_alive(pane).await,
@@ -137,6 +155,10 @@ impl Target {
         texts: &[Option<String>],
     ) -> Result<(), String> {
         let keys = answer_keys(agent, q, answers, texts);
+        self.question_keys(pane, &keys).await
+    }
+
+    pub async fn question_keys(&self, pane: &str, keys: &[Key]) -> Result<(), String> {
         match self {
             Target::Local => play_keys(pane, &keys).await,
             Target::Remote(n) => {
@@ -144,6 +166,143 @@ impl Target {
                     .keys(pane, keys.iter().map(Key::to_json).collect())
                     .await
             }
+        }
+    }
+
+    /// Each page is verified on the owning machine before any key is sent.
+    /// No complete blind key macro across asynchronously rendered question tabs.
+    pub async fn answer_question_checked(
+        &self, pane: &str, agent: crate::backend::Agent, q: &crate::model::Question,
+        answers: &[Vec<u32>], texts: &[Option<String>],
+    ) -> Result<(), String> {
+        for (index, item) in q.questions.iter().enumerate() {
+            let mut screen = None;
+            for attempt in 0..16 {
+                let captured = self.screen(pane).await?;
+                if let Some(parsed) = crate::screen_prompt::parse_capture(&captured) {
+                    if screen_matches_item(&parsed, item) { screen = Some(parsed); break; }
+                }
+                if attempt < 15 { sleep(Duration::from_millis(120)).await; }
+            }
+            let screen = screen.ok_or("Экран вопроса изменился или не читается. Ответь в терминале; повторный ввод остановлен.")?;
+            if index == 0 && q.screen.as_ref().is_some_and(|expected| expected.fingerprint != screen.state.fingerprint) {
+                return Err("В терминале уже другой вопрос".into());
+            }
+            let keys = question_item_keys(agent, q, index, &answers[index], texts.get(index).and_then(|t| t.as_deref()), &screen)?;
+            self.question_keys(pane, &keys).await?;
+        }
+        let needs_review = q.from_screen || q.questions.len() > 1 || (q.questions[0].multi_select && texts.first().and_then(|t| t.as_deref()).is_none());
+        if agent == crate::backend::Agent::Claude && needs_review {
+            // Claude's review is a distinct UI page. Never send its digit into
+            // a still-rendering question or an ordinary shell prompt.
+            for attempt in 0..20 {
+                let screen = self.screen(pane).await?;
+                if screen.contains("Submit answers") {
+                    self.question_keys(pane, &[Key::named(CLAUDE_SUBMIT_CONFIRM)]).await?;
+                    return Ok(());
+                }
+                // Screen fallback owns only the currently visible page. A
+                // subsequent tab is acknowledged and detected as a new request.
+                if q.from_screen {
+                    match crate::screen_prompt::parse_capture(&screen) {
+                        Some(next) if q.screen.as_ref().is_some_and(|before| before.fingerprint != next.state.fingerprint) => return Ok(()),
+                        None if crate::screen_prompt::is_idle_screen(&screen) => return Ok(()),
+                        _ => {}
+                    }
+                }
+                if attempt < 19 { sleep(Duration::from_millis(120)).await; }
+            }
+            return Err("Агент не показал подтверждение ответов. Проверь терминал.".into());
+        }
+        Ok(())
+    }
+}
+
+pub fn screen_matches_item(screen: &crate::screen_prompt::ScreenPrompt, item: &crate::model::QuestionItem) -> bool {
+    let normalize = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalize(&screen.title) != normalize(&item.question) { return false; }
+    screen.options.len() == item.options.len() && screen.options.iter().zip(&item.options)
+        .all(|(actual, expected)| normalize(actual) == normalize(&expected.label))
+}
+
+pub fn question_item_keys(
+    agent: crate::backend::Agent, q: &crate::model::Question, index: usize,
+    picks: &[u32], text: Option<&str>, screen: &crate::screen_prompt::ScreenPrompt,
+) -> Result<Vec<Key>, String> {
+    let item = &q.questions[index];
+    let state = &screen.state;
+    if state.editing { return Err("В терминале уже открыт черновик ответа. Заверши его там или закрой поле перед отправкой из Jarvis.".into()); }
+    if !item.options.is_empty() && state.cursor == 0 {
+        return Err("Не удалось определить выделенный вариант в терминале".into());
+    }
+    let mut keys = Vec::new();
+    let mut cursor = state.cursor;
+    let move_to = |keys: &mut Vec<Key>, cursor: &mut u32, target: u32| {
+        let direction = if target < *cursor { "Up" } else { "Down" };
+        for _ in 0..target.abs_diff(*cursor) { keys.push(Key::named(direction)); }
+        *cursor = target;
+    };
+    let positions: Vec<u32> = picks.iter().map(|n| state.option_numbers.get(*n as usize - 1).copied().ok_or("Вариант отсутствует на экране")).collect::<Result<_,_>>()?;
+    if item.multi_select {
+        let desired: std::collections::HashSet<u32> = positions.iter().copied().collect();
+        let before: std::collections::HashSet<u32> = state.selected.iter().copied().collect();
+        let mut changes: Vec<u32> = desired.symmetric_difference(&before).copied().collect();
+        changes.sort_unstable();
+        for number in changes { move_to(&mut keys, &mut cursor, number); keys.push(Key::named("Space")); }
+    } else if let Some(number) = positions.first() { move_to(&mut keys, &mut cursor, *number); }
+
+    if let Some(text) = text {
+        if item.custom_mode != "notes" {
+            if let Some(other) = state.custom_index { move_to(&mut keys, &mut cursor, other); }
+            else if !item.options.is_empty() { return Err("На экране нет поля для своего ответа".into()); }
+        }
+        if state.picker == "codex-input" && !item.options.is_empty() { keys.push(Key::named("Tab")); }
+        keys.push(Key::Text(text.to_owned()));
+        keys.push(Key::named("Enter"));
+    } else if agent == crate::backend::Agent::Claude && item.multi_select {
+        keys.push(Key::named(if q.questions.len() == 1 && !q.from_screen { CLAUDE_SUBMIT_RIGHT } else { CLAUDE_ADVANCE }));
+    } else { keys.push(Key::named("Enter")); }
+    Ok(keys)
+}
+
+/// Explicit panel buttons, not an arbitrary send-keys or shell interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalKey {
+    Enter,
+    Escape,
+    Interrupt,
+}
+
+impl TerminalKey {
+    pub fn parse(key: &str) -> Option<Self> {
+        match key {
+            "Enter" => Some(Self::Enter),
+            "Escape" => Some(Self::Escape),
+            "Ctrl-C" => Some(Self::Interrupt),
+            _ => None,
+        }
+    }
+
+    fn tmux_name(self) -> &'static str {
+        match self {
+            Self::Enter => "Enter",
+            Self::Escape => "Escape",
+            Self::Interrupt => "C-c",
+        }
+    }
+}
+
+#[cfg(test)]
+mod terminal_key_tests {
+    use super::*;
+
+    #[test]
+    fn only_explicit_panel_keys_can_reach_tmux() {
+        for (input, expected) in [("Enter", "Enter"), ("Escape", "Escape"), ("Ctrl-C", "C-c")] {
+            assert_eq!(TerminalKey::parse(input).unwrap().tmux_name(), expected);
+        }
+        for input in ["", "C-c", "Enter\n", "Enter;kill-pane", "-l", "rm -rf /", "C-d"] {
+            assert!(TerminalKey::parse(input).is_none(), "{input}");
         }
     }
 }
@@ -232,6 +391,7 @@ pub struct PaneInfo {
 pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
     let mut cmd = tokio::process::Command::new("tmux");
     cmd.args([
+        "-u",
         "-L",
         "jarvis",
         "list-panes",
@@ -508,10 +668,12 @@ mod answer_keys_tests {
             multi_select: multi,
             options: (0..n)
                 .map(|i| QuestionOption {
+                    id: String::new(),
                     label: format!("o{i}"),
                     description: String::new(),
                 })
                 .collect(),
+            ..QuestionItem::default()
         }
     }
     fn q(items: Vec<QuestionItem>) -> Question {
@@ -519,7 +681,58 @@ mod answer_keys_tests {
             at: 0,
             from_screen: false,
             questions: items,
+            ..Question::default()
         }
+    }
+
+    #[test]
+    fn live_cursor_and_checked_options_determine_only_required_toggles() {
+        let screen = crate::screen_prompt::parse_capture("q\n  1. [x] o0\n❯ 2. [ ] o1\n  3. [ ] o2\nEnter to confirm").unwrap();
+        let question = q(vec![item(true, 3)]);
+        let keys = question_item_keys(Agent::Claude, &question, 0, &[1,3], None, &screen).unwrap();
+        assert_eq!(keys, seq(&["Down","Space","Right"]));
+    }
+
+    #[test]
+    fn codex_custom_text_goes_to_actual_other_row_from_current_cursor() {
+        let screen = crate::screen_prompt::parse_capture("Question 1/1\nq\n  1. o0\n› 2. o1\n  3. None of the above\nenter to submit answer | tab to add notes").unwrap();
+        let question = q(vec![item(false,2)]);
+        assert_eq!(question_item_keys(Agent::Codex,&question,0,&[],Some("Строка 1\nСтрока 2"),&screen).unwrap(),
+            seq(&["Down","Tab","~Строка 1\nСтрока 2","Enter"]));
+    }
+
+    #[test]
+    fn question_delivery_rejects_unobservable_cursor() {
+        let screen = crate::screen_prompt::parse_capture("q\n  1. o0\n  2. o1\nEnter to select").unwrap();
+        assert!(question_item_keys(Agent::Codex,&q(vec![item(false,2)]),0,&[2],None,&screen).is_err());
+    }
+
+    /// Opt-in bridge for scripts/qa/codex-question-fixture.py. Produces the real
+    /// planner's keys for an owned synthetic capture; never opens a terminal.
+    #[test]
+    #[ignore]
+    fn isolated_codex_tui_plan_probe() {
+        let root = std::path::PathBuf::from(std::env::var("JARVIS_QA_QUESTION_FIXTURE").expect("owned /tmp/jq-* fixture required"));
+        assert!(root.to_string_lossy().starts_with("/tmp/jq-") && root.parent() == Some(std::path::Path::new("/tmp")));
+        let request: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("plan-request.json")).unwrap()).unwrap();
+        let screen = crate::screen_prompt::parse_capture(request["screen"].as_str().unwrap()).expect("real Codex screen parsed");
+        let mut question = Question { from_screen: true, screen: Some(screen.state.clone()), questions: vec![QuestionItem {
+            question: screen.title.clone(), multi_select: screen.multi, custom_allowed: Some(true),
+            custom_mode: if screen.state.custom_index.is_some() { "alternative" } else { "notes" }.into(),
+            options: screen.options.iter().map(|label| QuestionOption { label: label.clone(), ..QuestionOption::default() }).collect(),
+            ..QuestionItem::default()
+        }], ..Question::default() };
+        crate::question_delivery::identify(&mut question, Some("qa-codex-real-tui"));
+        let picks: Vec<u32> = request["picks"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect();
+        let text = request.get("text").and_then(serde_json::Value::as_str);
+        let agent = Agent::from_opt(request.get("agent").and_then(serde_json::Value::as_str).or(Some("codex")));
+        let count = request.get("questionCount").and_then(serde_json::Value::as_u64).unwrap_or(1) as usize;
+        assert!((1..=4).contains(&count));
+        question.questions.resize(count, question.questions[0].clone());
+        let index = request.get("questionIndex").and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
+        assert!(index < count);
+        let keys = question_item_keys(agent,&question,index,&picks,text,&screen).unwrap();
+        std::fs::write(root.join("plan.json"), serde_json::to_vec_pretty(&serde_json::json!({"question":question,"keys":keys.iter().map(Key::to_json).collect::<Vec<_>>()})).unwrap()).unwrap();
     }
     // ожидаемая раскладка: имена клавиш как есть, `~текст` — вставка текста
     fn seq(keys: &[&str]) -> Vec<Key> {

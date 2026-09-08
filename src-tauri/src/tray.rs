@@ -132,7 +132,8 @@ fn autostart_enabled(d: &Arc<Daemon>) -> bool {
 fn build_menu(d: &Arc<Daemon>) -> tauri::Result<Menu<Wry>> {
     let app = &d.app;
     let menu = Menu::new(app)?;
-    menu.append(&MenuItem::with_id(app, "show-panel", "Показать панель", true, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, "show-workspace", "Открыть рабочее окно", true, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, "show-panel", "Быстрый доступ", true, None::<&str>)?)?;
     menu.append(&MenuItem::with_id(app, "agent-chat", "Чат с агентом…", true, None::<&str>)?)?;
     menu.append(&MenuItem::with_id(app, "test-notify", "Тестовое уведомление", true, None::<&str>)?)?;
 
@@ -199,6 +200,7 @@ fn append_items(d: &Arc<Daemon>, menu: &Menu<Wry>, items: &[TrayItem]) -> tauri:
 fn on_menu(d: &Arc<Daemon>, id: &str) {
     match id {
         "show-panel" => windows::show_panel(d),
+        "show-workspace" => windows::show_workspace(d),
         "agent-chat" => {
             let _ = windows::create_agent_chat(&d.app);
         }

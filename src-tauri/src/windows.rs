@@ -1,11 +1,12 @@
-//! Окна Jarvis: панель (raycast-стиль) и стек тостов.
+//! Окна Jarvis: быстрый доступ, независимые рабочие окна и стек тостов.
 //!
 //! Оба окна создаются на старте скрытыми и живут весь срок демона:
 //! закрытие панели (⌘W, крестик) — это hide, не destroy.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
+use std::hash::{Hash, Hasher};
 use tauri::utils::config::WindowEffectsConfig;
 use tauri::window::{Effect, EffectState};
 use tauri::{AppHandle, Emitter, Manager, Theme, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -13,28 +14,36 @@ use tauri::{AppHandle, Emitter, Manager, Theme, WebviewUrl, WebviewWindow, Webvi
 use crate::daemon::Daemon;
 use crate::platform;
 
+// HTML file inputs open native dialogs, which temporarily take focus from the
+// quick panel. Keep that panel alive until selection or cancellation completes.
+static FILE_DIALOGS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+pub fn file_dialog_open(label: &str) -> bool { FILE_DIALOGS.lock().unwrap().contains(label) }
+#[tauri::command]
+pub fn file_dialog_state(window: WebviewWindow, active: bool) {
+    let mut dialogs = FILE_DIALOGS.lock().unwrap();
+    if active { dialogs.insert(window.label().to_owned()); }
+    else if dialogs.remove(window.label()) {
+        drop(dialogs);
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 pub const PANEL_W: f64 = 820.0;
 pub const PANEL_H: f64 = 620.0;
 pub const TOAST_W: f64 = 440.0;
 pub const TOAST_MAX_H: f64 = 480.0;
-pub const ONBOARD_W: f64 = 480.0;
-pub const ONBOARD_H: f64 = 600.0;
+pub const ONBOARD_W: f64 = 560.0;
+pub const ONBOARD_H: f64 = 660.0;
 pub const AGENT_W: f64 = 460.0;
 pub const AGENT_H: f64 = 600.0;
 
 /// Оконный режим (макет 14h): список слева 264px + диалог справа.
 pub const WINDOW_W: f64 = 1120.0;
-pub const WINDOW_H: f64 = 640.0;
-pub const WINDOW_MIN_W: f64 = 720.0;
-pub const WINDOW_MIN_H: f64 = 420.0;
-
-/// Настройка `mode`: `true` — обычное окно, `false` — накладка ⌘J.
-/// try_state, а не Daemon::get: окна строятся до регистрации стейта.
-pub fn is_window_mode(app: &AppHandle) -> bool {
-    app.try_state::<Arc<Daemon>>()
-        .map(|d| d.settings.string("mode") == "window")
-        .unwrap_or(false)
-}
+pub const WINDOW_H: f64 = 740.0;
+pub const WINDOW_MIN_W: f64 = 760.0;
+pub const WINDOW_MIN_H: f64 = 500.0;
 
 /// Запомненный размер окна (или размер из макета, если ещё не меняли).
 fn window_size(app: &AppHandle) -> (f64, f64) {
@@ -67,93 +76,145 @@ fn window_theme(app: &AppHandle) -> Option<Theme> {
     }
 }
 
-/// Главное окно. В накладке — раскладка Raycast (поверх всего, без дока,
-/// не тянется); в оконном режиме — обычное окно: тянется, сворачивается,
-/// живёт на своём уровне. Разметка одна и та же, её перестраивает CSS
-/// по `data-mode` (см. `ui/theme.js`).
+/// Постоянная компактная панель поверх приложений. Рабочие окна создаются отдельно.
 pub fn create_panel(app: &AppHandle) -> tauri::Result<WebviewWindow> {
-    let window_mode = is_window_mode(app);
-    let (w, h) = if window_mode {
-        window_size(app)
-    } else {
-        (PANEL_W, PANEL_H)
-    };
-    let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-        .title("Jarvis")
-        .inner_size(w, h)
-        .min_inner_size(WINDOW_MIN_W, WINDOW_MIN_H)
+    let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        .disable_drag_drop_handler()
+        .title("Jarvis · Быстрый доступ")
+        .incognito(crate::native_smoke::enabled())
+        .initialization_script("window.__JARVIS_SURFACE__ = 'quick';")
+        .initialization_script(crate::native_smoke::initialization_script())
+        .on_page_load(crate::native_smoke::page_loaded)
+        .inner_size(PANEL_W, PANEL_H)
         .visible(false)
-        // светофор рисуем сами (14h), поэтому системных декораций нет в обоих режимах
+        // У быстрого доступа нет системного заголовка.
         .decorations(false)
-        // настоящий блюр подложки: нативный NSVisualEffectView, не CSS
+        // One surface, without a second native material behind rounded CSS.
         .transparent(true)
-        .effects(WindowEffectsConfig {
-            effects: vec![Effect::UnderWindowBackground],
-            state: Some(EffectState::Active), // блюр не гаснет у неактивного окна (тихий показ)
-            radius: Some(16.0),
-            color: None,
-        })
-        .resizable(window_mode)
-        .minimizable(window_mode)
-        .maximizable(window_mode)
-        .skip_taskbar(!window_mode)
+        .resizable(false)
+        .minimizable(false)
+        .maximizable(false)
+        .skip_taskbar(true)
         .shadow(true)
         .theme(window_theme(app)) // материал под тему из настроек (см. window_theme)
-        .accept_first_mouse(true)
-        .build()?;
-    if window_mode {
-        platform::float_normal(&win);
+        .accept_first_mouse(true);
+    // An isolated test window may be occluded by the user's active app. Keep
+    // its real WebKit scenario progressing without changing production policy.
+    let builder = if crate::native_smoke::enabled() {
+        builder.background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
     } else {
-        platform::float_above_everything(&win);
-    }
+        builder
+    };
+    let win = builder.build()?;
+    platform::clip_panel_surface(&win, 16.0);
+    platform::float_above_everything(&win);
     Ok(win)
 }
 
-/// Переключение режима на лету: окно уже создано, поэтому меняем его свойства,
-/// а не пересоздаём (иначе улетели бы открытый чат и позиция). Иконка в доке
-/// (ActivationPolicy) ставится на старте — она подхватится со следующего запуска.
-pub fn apply_mode(d: &Arc<Daemon>) {
-    let Some(win) = d.app.get_webview_window("main") else {
-        return;
-    };
-    let window_mode = d.settings.string("mode") == "window";
-    // Место в доке — часть режима, а не косметика: без иконки окно нельзя
-    // вернуть ни ⌘Tab, ни кликом, и оно выглядит «пропавшим». Раньше политика
-    // ставилась только на старте, поэтому переключение режима на лету
-    // оставляло окно без дока до перезапуска.
-    #[cfg(target_os = "macos")]
-    {
-        let _ = d.app.set_activation_policy(if window_mode {
-            tauri::ActivationPolicy::Regular
-        } else {
-            tauri::ActivationPolicy::Accessory
-        });
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceRoute {
+    pub session_id: Option<String>,
+    pub project: Option<String>,
+    pub remote: Option<String>,
+    pub detached: bool,
+}
+
+impl WorkspaceRoute {
+    fn validate(&self) -> Result<(), String> {
+        for value in [&self.session_id, &self.project, &self.remote].into_iter().flatten() {
+            if value.len() > 4096 || value.chars().any(char::is_control) {
+                return Err("Недопустимый адрес чата или проекта".into());
+            }
+        }
+        Ok(())
     }
-    let _ = win.set_resizable(window_mode);
-    let _ = win.set_maximizable(window_mode);
-    let _ = win.set_minimizable(window_mode);
-    let _ = win.set_skip_taskbar(!window_mode);
-    if window_mode {
-        platform::float_normal(&win);
-        let (w, h) = window_size(&d.app);
-        let _ = win.set_size(tauri::LogicalSize::new(w, h));
-        let _ = win.center();
-        let _ = win.show();
-        let _ = win.set_focus();
+    fn label(&self) -> String {
+        if !self.detached { return "workspace".into(); }
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        if let Some(session) = &self.session_id {
+            ("chat", session, &self.remote).hash(&mut hash);
+        } else {
+            ("project", &self.project, &self.remote).hash(&mut hash);
+        }
+        format!("workspace-{:016x}", hash.finish())
+    }
+}
+
+pub fn is_workspace(label: &str) -> bool {
+    label == "workspace" || label.starts_with("workspace-")
+}
+
+/// Dedicated normal windows share the daemon and keep their own navigation.
+pub fn open_workspace(app: &AppHandle, route: WorkspaceRoute) -> Result<serde_json::Value, String> {
+    route.validate()?;
+    let label = route.label();
+    if let Some(win) = app.get_webview_window(&label) {
+        if route.session_id.is_some() || route.project.is_some() {
+            win.emit("workspace-route", &route).map_err(|e| e.to_string())?;
+        }
+        hide_panel(&Daemon::get(app));
+        let _ = win.unminimize();
+        win.show().map_err(|e| e.to_string())?;
+        win.set_focus().map_err(|e| e.to_string())?;
+        return Ok(json!({"ok":true,"label":label}));
+    }
+    if app.webview_windows().keys().filter(|name| is_workspace(name)).count() >= 16 {
+        return Err("Открыто 16 рабочих окон. Закрой одно из них и попробуй снова.".into());
+    }
+    let context = serde_json::to_string(&route).map_err(|e| e.to_string())?;
+    let (w, h) = window_size(app);
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    let win = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("index.html".into()))
+        .disable_drag_drop_handler()
+        .title("Jarvis")
+        .initialization_script(format!("window.__JARVIS_SURFACE__='workspace'; window.__JARVIS_WORKSPACE__={context};"))
+        .incognito(crate::native_smoke::enabled())
+        .inner_size(w, h)
+        .min_inner_size(WINDOW_MIN_W, WINDOW_MIN_H)
+        .decorations(true)
+        .transparent(false)
+        .resizable(true)
+        .minimizable(true)
+        .maximizable(true)
+        .skip_taskbar(false)
+        .shadow(true)
+        .theme(window_theme(app))
+        .center()
+        .visible(true)
+        .build().map_err(|e| e.to_string())?;
+    platform::float_normal(&win);
+    hide_panel(&Daemon::get(app));
+    let _ = win.set_focus();
+    Ok(json!({"ok":true,"label":label}))
+}
+
+/// Menu, launch and settings callbacks can arrive off the AppKit thread.
+pub fn show_workspace(d: &Arc<Daemon>) {
+    let app = d.app.clone();
+    let _ = d.app.run_on_main_thread(move || {
+        if let Err(error) = open_workspace(&app, WorkspaceRoute::default()) {
+            crate::log::line(&format!("[workspace] {error}"));
+        }
+    });
+}
+
+/// Выбрать начальную поверхность, сохранив существующие рабочие окна.
+pub fn apply_mode(d: &Arc<Daemon>) {
+    // The preference chooses the launch surface, never changes an existing
+    // workspace into an overlay or discards its conversation state.
+    if d.settings.string("mode") == "window" {
+        hide_panel(d);
+        show_workspace(d);
     } else {
-        // из фуллскрина накладку не построишь — выходим до смены геометрии
-        let _ = win.set_fullscreen(false);
-        platform::float_above_everything(&win);
-        let _ = win.set_size(tauri::LogicalSize::new(PANEL_W, PANEL_H));
-        position_panel(d);
+        show_panel_focused(d);
     }
 }
 
 /// Запомнить размер окна, чтобы следующий запуск открылся таким же.
 pub fn remember_window_size(d: &Arc<Daemon>, w: f64, h: f64) {
-    if d.settings.string("mode") != "window" {
-        return; // накладка не тянется — её размер считает place_panel
-    }
+    if !w.is_finite() || !h.is_finite() || w < WINDOW_MIN_W || h < WINDOW_MIN_H { return; }
     let mut patch = serde_json::Map::new();
     patch.insert("windowW".into(), json!(w.round()));
     patch.insert("windowH".into(), json!(h.round()));
@@ -178,7 +239,7 @@ pub fn create_onboarding(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             .effects(WindowEffectsConfig {
                 effects: vec![Effect::UnderWindowBackground],
                 state: Some(EffectState::Active),
-                radius: Some(16.0),
+                radius: Some(22.0),
                 color: None,
             })
             .resizable(false)
@@ -292,6 +353,7 @@ pub fn create_toast(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .title("Jarvis · уведомление")
         .inner_size(TOAST_W, 120.0)
         .visible(false)
+        .focused(false)
         .decorations(false)
         .transparent(true)
         .resizable(false)
@@ -303,6 +365,9 @@ pub fn create_toast(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .accept_first_mouse(true)
         .theme(window_theme(app))
         .build()?;
+    #[cfg(target_os = "macos")]
+    platform::prepare_toast(&win);
+    #[cfg(not(target_os = "macos"))]
     platform::float_above_everything(&win);
     Ok(win)
 }
@@ -311,6 +376,12 @@ pub fn create_toast(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 
 pub fn emit_to_panel<P: Serialize + Clone>(app: &AppHandle, event: &str, payload: &P) {
     let _ = app.emit_to("main", event, payload.clone());
+    // Broadcast data, not navigation, to detached windows.
+    if !matches!(event, "open-session" | "panel-shown" | "goto-voicehist" | "goto-settings") {
+        for (label, win) in app.webview_windows() {
+            if is_workspace(&label) { let _ = win.emit(event, payload.clone()); }
+        }
+    }
 }
 
 /// Вид сменили — разослать всем окнам, чтобы панель, тосты, чат и онбординг
@@ -329,8 +400,11 @@ pub fn broadcast_appearance(d: &Arc<Daemon>) {
         "radius": get("radius"),
         "scale": get("scale"),
     });
-    for label in ["main", "toast", "agent-chat", "onboarding"] {
-        let _ = d.app.emit_to(label, "appearance", payload.clone());
+    for (label, win) in d.app.webview_windows() {
+        if matches!(label.as_str(), "main" | "toast" | "agent-chat" | "onboarding") || is_workspace(&label) {
+            let _ = win.emit("appearance", payload.clone());
+            let _ = win.set_theme(window_theme(&d.app));
+        }
     }
 }
 
@@ -438,10 +512,6 @@ pub fn position_panel(d: &Arc<Daemon>) {
     let Some(panel) = d.app.get_webview_window("main") else {
         return;
     };
-    // окно пользователь ставит сам — не таскаем его под курсор на каждый показ
-    if d.settings.string("mode") == "window" {
-        return;
-    }
     let corner = d.settings.string("position") == "corner";
     platform::place_panel(&panel, PANEL_W, PANEL_H, corner);
 }
@@ -450,7 +520,7 @@ pub fn position_panel(d: &Arc<Daemon>) {
 /// у кино/терминала.
 pub fn show_panel(d: &Arc<Daemon>) {
     // пока интеграция не установлена — основное приложение «заперто»: ведём к онбордингу
-    if !crate::install::integration_health().ok() {
+    if !crate::native_smoke::enabled() && !crate::install::integration_health().ok() {
         let _ = create_onboarding(&d.app);
         return;
     }
@@ -459,17 +529,33 @@ pub fn show_panel(d: &Arc<Daemon>) {
     };
     position_panel(d);
     emit_to_panel(&d.app, "panel-shown", &json!(null));
-    if d.settings.string("mode") == "window" {
-        let _ = panel.show();
-    } else {
-        platform::show_inactive(&panel);
-    }
+    platform::show_inactive(&panel);
     d.push();
+}
+
+/// Launch/Dock opens the chosen surface; the hotkey always opens quick access.
+pub fn show_application(d: &Arc<Daemon>) {
+    // Dock/activation should return to an existing workspace, even when the
+    // launch preference is quick access. Never cover it with the quick panel.
+    let existing = d.app.get_webview_window("workspace").or_else(||
+        d.app.webview_windows().into_iter().find(|(label, _)| is_workspace(label)).map(|(_, win)| win));
+    if let Some(win) = existing {
+        hide_panel(d);
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+        return;
+    }
+    if d.settings.string("mode") != "window" {
+        show_panel(d);
+    } else {
+        show_workspace(d);
+    }
 }
 
 /// Raycast-режим: хоткей — с фокусом, потеря фокуса спрячет панель.
 pub fn show_panel_focused(d: &Arc<Daemon>) {
-    if !crate::install::integration_health().ok() {
+    if !crate::native_smoke::enabled() && !crate::install::integration_health().ok() {
         let _ = create_onboarding(&d.app);
         return;
     }
@@ -503,7 +589,7 @@ pub fn toggle_panel(d: &Arc<Daemon>) {
         // Та же логика, что у хоткея: окно обычно стоит под чужими окнами,
         // и клик по трею по нему — это «покажи», а не «спрячь». Прячем лишь
         // когда оно уже в фокусе, то есть человек видит его прямо сейчас.
-        if window_mode(d) && !panel_focused(d) {
+        if !panel_focused(d) {
             show_panel_focused(d);
             return;
         }
@@ -511,11 +597,6 @@ pub fn toggle_panel(d: &Arc<Daemon>) {
     } else {
         show_panel(d);
     }
-}
-
-/// Оконный режим по настройкам.
-fn window_mode(d: &Arc<Daemon>) -> bool {
-    d.settings.string("mode") == "window"
 }
 
 /// Окно сейчас в фокусе?
@@ -530,7 +611,7 @@ pub fn toggle_hotkey_panel(d: &Arc<Daemon>) {
     if panel_visible(d) {
         // Окно живёт под другими окнами: ⌘J по нему должен поднимать, а не прятать.
         // Прячем только когда оно уже в фокусе — тогда хоткей читается как «убрать».
-        if window_mode(d) && !panel_focused(d) {
+        if !panel_focused(d) {
             show_panel_focused(d);
             return;
         }
@@ -544,24 +625,50 @@ pub fn toggle_hotkey_panel(d: &Arc<Daemon>) {
 
 /// Рендерер тостов сообщает нужную высоту стека; 0 — спрятаться.
 /// Низ прибит к краю экрана — окно растёт вверх.
-pub fn toast_resize(d: &Arc<Daemon>, h: f64) {
+pub async fn toast_resize(d: &Arc<Daemon>, h: f64) -> Result<(), String> {
+    if !h.is_finite() { return Err("invalid notification height".into()); }
     let Some(toast) = d.app.get_webview_window("toast") else {
-        return;
+        return Err("notification window is unavailable".into());
     };
-    if h <= 0.0 {
-        let _ = toast.hide();
-        return;
-    }
-    let height = h.round().clamp(1.0, TOAST_MAX_H);
-    platform::place_toast(&toast, TOAST_W, height);
-    if !toast.is_visible().unwrap_or(false) {
-        platform::show_inactive(&toast);
+    let height = if h <= 0.0 { 0.0 } else { h.round().clamp(1.0, TOAST_MAX_H) };
+    #[cfg(target_os = "macos")]
+    return platform::place_toast(&toast, TOAST_W, height).await;
+    #[cfg(not(target_os = "macos"))]
+    {
+        if height == 0.0 { return toast.hide().map_err(|error| error.to_string()); }
+        platform::place_toast(&toast, TOAST_W, height);
+        if !toast.is_visible().unwrap_or(false) { platform::show_inactive(&toast); }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detached_windows_keep_identity_and_separate_remote_projects() {
+        let mut route = WorkspaceRoute { session_id: Some("chat-1".into()), detached: true, ..Default::default() };
+        let chat = route.label();
+        route.project = Some("/another-project-context".into());
+        assert_eq!(chat, route.label(), "a chat has one detached window");
+        route.session_id = None;
+        let local = route.label();
+        route.remote = Some("vm".into());
+        assert_ne!(local, route.label(), "same path on a VM is a different project");
+        assert!(is_workspace(&chat));
+        route.detached = false;
+        assert_eq!(route.label(), "workspace");
+    }
+
+    #[test]
+    fn workspace_routes_reject_control_characters_and_unknown_options() {
+        let bad = WorkspaceRoute { project: Some("/repo\nrun command".into()), ..Default::default() };
+        assert!(bad.validate().is_err());
+        assert!(serde_json::from_value::<WorkspaceRoute>(json!({"url":"https://example.com"})).is_err());
+        let literal = WorkspaceRoute { project: Some("/repo/$(literal)".into()), ..Default::default() };
+        assert!(literal.validate().is_ok());
+    }
 
     /// Превью — про своё приложение. Чужой адрес из webview открывать нельзя,
     /// и отказ обязан объяснить, почему.

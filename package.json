@@ -5,6 +5,7 @@
   "description": "Menu-bar/tray mission control for Claude Code and Codex sessions: status panel, notifications, voice (Rust + Tauri). macOS and Linux.",
   "license": "MIT",
   "scripts": {
+    "prepare:node": "node scripts/prepare-node-bundle.mjs",
     "start": "JARVIS_DEV_SIGN=1 cargo build --release --manifest-path src-tauri/Cargo.toml --features wakeword-ort,whisper-native,stt-vad --bin jarvis && codesign --force --sign - --entitlements src-tauri/entitlements.plist src-tauri/target/release/jarvis && JARVIS_DIR=\"$HOME/.jarvis-dev\" JARVIS_DEV=1 src-tauri/target/release/jarvis",
     "start:prod": "JARVIS_DEV_SIGN=1 cargo build --release --manifest-path src-tauri/Cargo.toml --features wakeword-ort,whisper-native,stt-vad --bin jarvis && codesign --force --sign - --entitlements src-tauri/entitlements.plist src-tauri/target/release/jarvis && src-tauri/target/release/jarvis",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
@@ -15,10 +16,19 @@
     "tauri": "tauri",
     "bundle": "tauri build --features wakeword-ort,whisper-native,stt-vad",
     "start:linux": "cargo build --release --manifest-path src-tauri/Cargo.toml --features whisper-native --bin jarvis && JARVIS_DIR=\"$HOME/.jarvis-dev\" JARVIS_DEV=1 src-tauri/target/release/jarvis",
-    "bundle:linux": "tauri build --features whisper-native --bundles deb,appimage,rpm"
+    "bundle:linux": "tauri build --features whisper-native --bundles deb,appimage,rpm",
+    "icons:sync": "node scripts/sync-icons.mjs",
+    "vendor:terminal": "node scripts/vendor-terminal.mjs",
+    "check:terminal": "node scripts/vendor-terminal.mjs --check"
   },
   "devDependencies": {
+    "@phosphor-icons/web": "^2.1.2",
     "@tauri-apps/cli": "^2.11.2",
     "linkedom": "^0.18.13"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/addon-search": "0.16.0",
+    "@xterm/xterm": "6.0.0"
   }
 }

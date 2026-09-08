@@ -70,8 +70,8 @@ impl Voice {
     ) -> Arc<Self> {
         // Silero — единственный движок: поднимаем сайдкар и берём его base.
         let speaker = if cfg.speaker.is_empty() { "xenia".to_string() } else { cfg.speaker.clone() };
-        let sidecar = Arc::new(sidecar::Sidecar::new(silero_dir, speaker.clone(), "v4_ru".into(), SILERO_PORT));
-        sidecar.ensure_started();
+        let sidecar = Arc::new(sidecar::Sidecar::new(silero_dir, speaker.clone(), "v4_ru".into(), crate::native_smoke::sidecar_port(SILERO_PORT)));
+        if !crate::native_smoke::enabled() { sidecar.ensure_started(); }
         let engine = build_engine(sidecar.base());
         let v = Arc::new(Voice {
             composer: Box::new(TemplateComposer),

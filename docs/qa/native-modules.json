@@ -1,0 +1,168 @@
+{
+  "ok": true,
+  "steps": [
+    {
+      "name": "Root is a usable list of eight modules",
+      "ok": true,
+      "elapsedMs": 258
+    },
+    {
+      "name": "Native input-device discovery responds without microphone capture",
+      "ok": true,
+      "elapsedMs": 60
+    },
+    {
+      "name": "Root search and Escape restore navigation state",
+      "ok": true,
+      "elapsedMs": 64
+    },
+    {
+      "name": "Module list opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 89
+    },
+    {
+      "name": "Module history opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 273
+    },
+    {
+      "name": "Module voicehist opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 282
+    },
+    {
+      "name": "Module meetings opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 269
+    },
+    {
+      "name": "Module loops opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 328
+    },
+    {
+      "name": "Module bundlePane opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 276
+    },
+    {
+      "name": "Module stats opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 290
+    },
+    {
+      "name": "Module settings opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 337
+    },
+    {
+      "name": "Settings general settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 109
+    },
+    {
+      "name": "Settings look settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 321
+    },
+    {
+      "name": "Settings remotes settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 320
+    },
+    {
+      "name": "Settings agents settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 306
+    },
+    {
+      "name": "Settings stt settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 324
+    },
+    {
+      "name": "Settings voice settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 310
+    },
+    {
+      "name": "Settings wake settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 314
+    },
+    {
+      "name": "Settings notify settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 326
+    },
+    {
+      "name": "Settings awake settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 308
+    },
+    {
+      "name": "Settings keys settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 299
+    },
+    {
+      "name": "Settings launch settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 305
+    },
+    {
+      "name": "Settings service settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 318
+    },
+    {
+      "name": "Settings integration settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 313
+    },
+    {
+      "name": "Settings about settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 466
+    },
+    {
+      "name": "A settings toggle persists through actual IPC and reopening",
+      "ok": true,
+      "elapsedMs": 46.00000000000091
+    },
+    {
+      "name": "Missing speech model reports its real backend failure",
+      "ok": true,
+      "elapsedMs": 356.9999999999991
+    },
+    {
+      "name": "Settings search opens the actual parameter and scopes errors",
+      "ok": true,
+      "elapsedMs": 351
+    },
+    {
+      "name": "Light appearance and root restore",
+      "ok": true,
+      "elapsedMs": 253.9999999999991
+    }
+  ],
+  "errors": [],
+  "failure": null,
+  "elapsedMs": 8116.999999999999,
+  "runtime": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+    "url": "tauri://localhost",
+    "viewport": {
+      "width": 1120,
+      "height": 780,
+      "dpr": 2
+    }
+  },
+  "scope": "Full-feature debug build; actual WKWebView and Tauri IPC with an isolated profile. Real settings writes/reopen, model rejection and every module/pane. Finite animations are finished only for static snapshots while occluded.",
+  "deviceProbe": {
+    "count": 1,
+    "elapsedMs": 60
+  },
+  "profile": "/var/folders/sz/1yzw2zzs64x5kcr0c9hqhnr40000gq/T/jarvis-native-smoke-s4Txzt"
+}

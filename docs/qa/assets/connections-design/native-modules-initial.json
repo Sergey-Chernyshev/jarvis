@@ -1,0 +1,165 @@
+{
+  "ok": false,
+  "runtime": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+    "url": "tauri://localhost",
+    "viewport": {
+      "width": 988,
+      "height": 747,
+      "dpr": 2
+    }
+  },
+  "steps": [
+    {
+      "name": "Root is a usable list of nine modules",
+      "ok": true,
+      "elapsedMs": 146
+    },
+    {
+      "name": "Native input-device discovery responds without microphone capture",
+      "ok": true,
+      "elapsedMs": 82
+    },
+    {
+      "name": "Root search and Escape restore navigation state",
+      "ok": true,
+      "elapsedMs": 65
+    },
+    {
+      "name": "Module list opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 111
+    },
+    {
+      "name": "Module history opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 248
+    },
+    {
+      "name": "Module machines opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 296
+    },
+    {
+      "name": "Module voicehist opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 247
+    },
+    {
+      "name": "Module meetings opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 235
+    },
+    {
+      "name": "Module loops opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 255
+    },
+    {
+      "name": "Module bundlePane opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 232.00000000000023
+    },
+    {
+      "name": "Module stats opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 249.00000000000023
+    },
+    {
+      "name": "Module settings opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 283.99999999999955
+    },
+    {
+      "name": "Machines shortcut and Escape preserve the previous Settings pane",
+      "ok": true,
+      "elapsedMs": 171
+    },
+    {
+      "name": "Settings general settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 289
+    },
+    {
+      "name": "Settings look settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 284
+    },
+    {
+      "name": "Settings keys settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 283
+    },
+    {
+      "name": "Settings notify settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 290
+    },
+    {
+      "name": "Settings agents settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 279.99999999999955
+    },
+    {
+      "name": "Settings launch settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 277
+    },
+    {
+      "name": "Settings integration settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 283
+    },
+    {
+      "name": "Settings stt settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 268
+    },
+    {
+      "name": "Settings voice settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 284
+    },
+    {
+      "name": "Settings wake settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 453
+    },
+    {
+      "name": "Settings awake settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 292
+    },
+    {
+      "name": "Settings service settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 640
+    },
+    {
+      "name": "Settings about settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 557
+    },
+    {
+      "name": "A settings toggle persists through actual IPC and reopening",
+      "ok": false,
+      "elapsedMs": 301,
+      "error": "Toggle did not settle after saving\nassert@user-script:16:12:86\n@user-script:16:181:11"
+    }
+  ],
+  "errors": [],
+  "failure": "Toggle did not settle after saving\nassert@user-script:16:12:86\n@user-script:16:181:11",
+  "generatedAt": "2026-09-05T20:00:32.377331+00:00",
+  "scope": "Real WKWebView and bridge, isolated native-smoke profile. Module navigation and isolated settings changes; no live microphone, agent launch, installation, or permission request.",
+  "sourceProfile": "/var/folders/sz/1yzw2zzs64x5kcr0c9hqhnr40000gq/T/jarvis-native-smoke-uDwPKi",
+  "sourceReport": "/var/folders/sz/1yzw2zzs64x5kcr0c9hqhnr40000gq/T/jarvis-native-smoke-uDwPKi/report.json",
+  "build": {
+    "configuration": "debug",
+    "app": "/private/tmp/jarvis-machines-qa-bundle/Jarvis.app",
+    "executableSha256": "f3cbb88bebbf7e81aba30275f0b985621da8b6907b8a55c014be4db4d9f578f3",
+    "codesign": "verified --deep --strict"
+  },
+  "evidence": {
+    "screenshotsRetainedAt": "/var/folders/sz/1yzw2zzs64x5kcr0c9hqhnr40000gq/T/jarvis-native-smoke-uDwPKi"
+  }
+}

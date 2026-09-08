@@ -1,0 +1,378 @@
+{
+  "ok": false,
+  "failure": "WindowServer moved the owned fullscreen surface away from its active display\nassert@user-script:15:12:86\nassertFullscreen@user-script:15:53:11\n@user-script:15:62:21",
+  "errors": [],
+  "steps": [
+    {
+      "name": "The owned AppKit editor enters a real fullscreen Space",
+      "ok": true,
+      "elapsedMs": 2315
+    },
+    {
+      "name": "Fullscreen cycle 1: production HUD listening preserves the Space and input",
+      "ok": false,
+      "elapsedMs": 1393,
+      "error": "WindowServer moved the owned fullscreen surface away from its active display\nassert@user-script:15:12:86\nassertFullscreen@user-script:15:53:11\n@user-script:15:62:21"
+    }
+  ],
+  "evidence": {
+    "jarvisActivationPolicy": {
+      "policy": "regular",
+      "provenance": "Existing debug baseline startup sets NSApplicationActivationPolicyRegular"
+    },
+    "fullscreenBaseline": {
+      "editor": {
+        "key": true,
+        "expectedWindowServerFrame": {
+          "y": 33,
+          "x": 0,
+          "width": 1728,
+          "height": 1084
+        },
+        "screenFrame": {
+          "y": 0,
+          "x": 0,
+          "width": 1728,
+          "height": 1117
+        },
+        "windowServerFrameStable": true,
+        "frame": {
+          "y": 0,
+          "x": 0,
+          "width": 1728,
+          "height": 1084
+        },
+        "monitoring": true,
+        "violations": [],
+        "foregroundPid": 43536,
+        "fullscreen": true,
+        "screenSafeAreaFrame": {
+          "y": 0,
+          "x": 0,
+          "width": 1728,
+          "height": 1085
+        },
+        "fullscreenEntered": true,
+        "fullscreenEvents": [
+          "will-enter",
+          "did-enter"
+        ],
+        "ownedOnScreenWindows": [
+          {
+            "number": 4599,
+            "layer": 26,
+            "alpha": 0,
+            "frontToBackOrder": 1,
+            "pid": 43536,
+            "bounds": {
+              "X": 0,
+              "Height": 33,
+              "Y": 0,
+              "Width": 1728
+            }
+          },
+          {
+            "number": 4593,
+            "layer": 0,
+            "alpha": 0,
+            "frontToBackOrder": 3,
+            "pid": 43536,
+            "bounds": {
+              "X": 0,
+              "Height": 32,
+              "Y": 33,
+              "Width": 1728
+            }
+          },
+          {
+            "number": 4585,
+            "layer": 0,
+            "alpha": 1,
+            "frontToBackOrder": 4,
+            "pid": 43536,
+            "bounds": {
+              "X": 0,
+              "Height": 1084,
+              "Y": 33,
+              "Width": 1728
+            }
+          }
+        ],
+        "monitoredSamples": 3,
+        "windowNumber": 4585,
+        "command": "monitor-on",
+        "fullscreenTransition": "",
+        "pid": 43536,
+        "focused": true,
+        "onActiveSpace": true,
+        "a": "",
+        "b": ""
+      },
+      "focus": {
+        "available": true,
+        "trusted": true,
+        "ownsForeground": true,
+        "operation": "capture",
+        "provenance": "production AXUIElementCopyAttributeValue; scratch app only"
+      },
+      "permissionsBefore": {
+        "microphone": "authorized",
+        "accessibility": true,
+        "provenance": "native authorization status; no request made"
+      }
+    },
+    "fullscreenBeforeCleanup": {
+      "key": true,
+      "expectedWindowServerFrame": {
+        "y": 33,
+        "x": 0,
+        "width": 1728,
+        "height": 1084
+      },
+      "screenFrame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1117
+      },
+      "windowServerFrameStable": false,
+      "frame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1084
+      },
+      "monitoring": true,
+      "violations": [
+        {
+          "bounds": {
+            "X": 79,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          },
+          "sample": 32,
+          "reason": "owned fullscreen WindowServer surface moved or disappeared"
+        },
+        {
+          "bounds": {
+            "X": 277,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          },
+          "sample": 33,
+          "reason": "owned fullscreen WindowServer surface moved or disappeared"
+        }
+      ],
+      "foregroundPid": 43536,
+      "fullscreen": true,
+      "screenSafeAreaFrame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1085
+      },
+      "fullscreenEntered": true,
+      "fullscreenEvents": [
+        "will-enter",
+        "did-enter"
+      ],
+      "ownedOnScreenWindows": [
+        {
+          "number": 4552,
+          "layer": 1000,
+          "alpha": 1,
+          "frontToBackOrder": 1,
+          "pid": 43384,
+          "bounds": {
+            "X": -9831,
+            "Height": 100,
+            "Y": 1003,
+            "Width": 440
+          }
+        },
+        {
+          "number": 4599,
+          "layer": 26,
+          "alpha": 0,
+          "frontToBackOrder": 2,
+          "pid": 43536,
+          "bounds": {
+            "X": 277,
+            "Height": 33,
+            "Y": 0,
+            "Width": 1728
+          }
+        },
+        {
+          "number": 4593,
+          "layer": 0,
+          "alpha": 0,
+          "frontToBackOrder": 16,
+          "pid": 43536,
+          "bounds": {
+            "X": 277,
+            "Height": 32,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        {
+          "number": 4585,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 17,
+          "pid": 43536,
+          "bounds": {
+            "X": 277,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          }
+        },
+        {
+          "number": 4551,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 18,
+          "pid": 43384,
+          "bounds": {
+            "X": -10171,
+            "Height": 780,
+            "Y": 109,
+            "Width": 1120
+          }
+        }
+      ],
+      "monitoredSamples": 33,
+      "windowNumber": 4585,
+      "command": "monitor-on",
+      "fullscreenTransition": "",
+      "pid": 43536,
+      "focused": true,
+      "onActiveSpace": true,
+      "a": "",
+      "b": ""
+    },
+    "fullscreenCleanup": {
+      "key": true,
+      "expectedWindowServerFrame": {
+        "y": 186,
+        "x": 544,
+        "width": 640,
+        "height": 472
+      },
+      "screenFrame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1117
+      },
+      "windowServerFrameStable": false,
+      "frame": {
+        "y": 459,
+        "x": 544,
+        "width": 640,
+        "height": 472
+      },
+      "monitoring": false,
+      "violations": [
+        {
+          "bounds": {
+            "X": 79,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          },
+          "sample": 32,
+          "reason": "owned fullscreen WindowServer surface moved or disappeared"
+        },
+        {
+          "bounds": {
+            "X": 277,
+            "Height": 1084,
+            "Y": 33,
+            "Width": 1728
+          },
+          "sample": 33,
+          "reason": "owned fullscreen WindowServer surface moved or disappeared"
+        }
+      ],
+      "foregroundPid": 43536,
+      "fullscreen": false,
+      "screenSafeAreaFrame": {
+        "y": 0,
+        "x": 0,
+        "width": 1728,
+        "height": 1085
+      },
+      "fullscreenEntered": false,
+      "fullscreenEvents": [
+        "will-enter",
+        "did-enter",
+        "will-exit",
+        "failed-exit",
+        "did-exit"
+      ],
+      "ownedOnScreenWindows": [
+        {
+          "number": 4552,
+          "layer": 1000,
+          "alpha": 1,
+          "frontToBackOrder": 1,
+          "pid": 43384,
+          "bounds": {
+            "X": -9130,
+            "Height": 100,
+            "Y": 1003,
+            "Width": 440
+          }
+        },
+        {
+          "number": 4585,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 15,
+          "pid": 43536,
+          "bounds": {
+            "X": 1522,
+            "Height": 472,
+            "Y": 186,
+            "Width": 640
+          }
+        },
+        {
+          "number": 4551,
+          "layer": 0,
+          "alpha": 1,
+          "frontToBackOrder": 16,
+          "pid": 43384,
+          "bounds": {
+            "X": -9470,
+            "Height": 780,
+            "Y": 109,
+            "Width": 1120
+          }
+        }
+      ],
+      "monitoredSamples": 33,
+      "windowNumber": 4585,
+      "command": "exit-fullscreen",
+      "fullscreenTransition": "",
+      "pid": 43536,
+      "focused": true,
+      "onActiveSpace": true,
+      "a": "",
+      "b": ""
+    }
+  },
+  "elapsedMs": 4407,
+  "provenance": {
+    "purpose": "Pre-fix regression: production HUD hosted in the ordinary Tao NSWindow",
+    "fixture": "scripts/qa/native-fullscreen.js with only activation-policy probe omitted for the old debug binary; the baseline debug startup uses Regular",
+    "observations": "Owned helper actual AppKit fullscreen lifecycle, NSWorkspace foreground, retained production AX, and native WindowServer surface displacement",
+    "expectedResult": "Failure when showing listening HUD; this is baseline evidence, not a passing check",
+    "safety": "Disposable debug profile and owned helper only; no audio capture, no user application control, no screen pixels captured"
+  }
+}

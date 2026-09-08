@@ -131,6 +131,9 @@ async fn handle_capability(
 fn handle_event(d: &Arc<Daemon>, body: Bytes) -> Response {
     match serde_json::from_slice::<serde_json::Value>(&body) {
         Ok(evt) => {
+            if crate::backend::events::HookEvent::parse(&evt).is_none() {
+                return StatusCode::BAD_REQUEST.into_response();
+            }
             d.reduce(&evt);
             StatusCode::NO_CONTENT.into_response()
         }

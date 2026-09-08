@@ -1,0 +1,315 @@
+./rustup-init: OK
+error: $HOME differs from euid-obtained home directory: you may be using sudo
+error: $HOME directory: /tmp/jarvis-linux-qa-EblB9d/tools-home
+error: euid-obtained home directory: /home/se_chernyshev.guest
+info: profile set to minimal
+info: default host tuple is aarch64-unknown-linux-gnu
+info: syncing channel updates for 1.96.0-aarch64-unknown-linux-gnu
+info: latest update on 2026-05-28 for version 1.96.0 (ac68faa20 2026-05-25)
+info: downloading 3 components
+
+info: default toolchain set to 1.96.0-aarch64-unknown-linux-gnu
+  1.96.0-aarch64-unknown-linux-gnu installed - rustc 1.96.0 (ac68faa20 2026-05-25)
+
+
+Rust is installed now. Great!
+
+To get started you need Cargo's bin directory
+(/tmp/jarvis-linux-qa-EblB9d/cargo/bin) in your PATH
+environment variable. This has not been done automatically.
+
+To configure your current shell, you need to source
+the corresponding env file under /tmp/jarvis-linux-qa-EblB9d/cargo.
+
+Consider running the right command for your shell (note the leading DOT):
+. "/tmp/jarvis-linux-qa-EblB9d/cargo/env" # For sh/ash/dash/pdksh
+cargo:rerun-if-env-changed=CC_aarch64-unknown-linux-gnu
+CC_aarch64-unknown-linux-gnu = None
+cargo:rerun-if-env-changed=CC_aarch64_unknown_linux_gnu
+CC_aarch64_unknown_linux_gnu = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_aarch64_unknown_linux_gnu
+CFLAGS_aarch64_unknown_linux_gnu = None
+cargo:rerun-if-env-changed=CFLAGS_aarch64-unknown-linux-gnu
+CFLAGS_aarch64-unknown-linux-gnu = None
+    Updating crates.io index
+     Locking 54 packages to latest compatible versions
+      Adding matchit v0.8.4 (available: v0.8.6)
+ Downloading crates ...
+  Downloaded atomic-waker v1.1.2
+  Downloaded axum v0.8.9
+  Downloaded axum-core v0.5.6
+  Downloaded errno v0.3.14
+  Downloaded bytes v1.12.1
+  Downloaded form_urlencoded v1.2.2
+  Downloaded futures-channel v0.3.34
+  Downloaded futures-core v0.3.34
+  Downloaded futures-task v0.3.34
+  Downloaded futures-util v0.3.34
+  Downloaded http-body v1.1.0
+  Downloaded http-body-util v0.1.5
+  Downloaded http v1.5.0
+  Downloaded httparse v1.10.1
+  Downloaded httpdate v1.0.3
+  Downloaded hyper v1.11.1
+  Downloaded itoa v1.0.18
+  Downloaded hyper-util v0.1.20
+  Downloaded log v0.4.34
+  Downloaded matchit v0.8.4
+  Downloaded memchr v2.8.3
+  Downloaded mime v0.3.17
+  Downloaded libc v0.2.189
+  Downloaded mio v1.2.3
+  Downloaded once_cell v1.21.4
+  Downloaded percent-encoding v2.3.2
+  Downloaded pin-project-lite v0.2.17
+  Downloaded proc-macro2 v1.0.107
+  Downloaded quote v1.0.47
+  Downloaded ryu v1.0.23
+  Downloaded serde v1.0.229
+  Downloaded serde_core v1.0.229
+  Downloaded serde_path_to_error v0.1.20
+  Downloaded serde_urlencoded v0.7.1
+  Downloaded signal-hook-registry v1.4.8
+  Downloaded serde_json v1.0.151
+  Downloaded slab v0.4.12
+  Downloaded smallvec v1.16.0
+  Downloaded socket2 v0.6.5
+  Downloaded sync_wrapper v1.0.2
+  Downloaded syn v3.0.5
+  Downloaded tokio-macros v2.7.2
+  Downloaded tower v0.5.3
+  Downloaded tower-layer v0.3.3
+  Downloaded tower-service v0.3.3
+  Downloaded tokio v1.53.1
+  Downloaded tracing-core v0.1.36
+  Downloaded unicode-ident v1.0.24
+  Downloaded tracing v0.1.44
+  Downloaded zmij v1.0.23
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling itoa v1.0.18
+   Compiling pin-project-lite v0.2.17
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling bytes v1.12.1
+   Compiling futures-core v0.3.34
+   Compiling serde_core v1.0.229
+   Compiling once_cell v1.21.4
+   Compiling httparse v1.10.1
+   Compiling tracing-core v0.1.36
+   Compiling http v1.5.0
+   Compiling log v0.4.34
+   Compiling syn v3.0.5
+   Compiling zmij v1.0.23
+   Compiling tower-service v0.3.3
+   Compiling serde v1.0.229
+   Compiling errno v0.3.14
+   Compiling http-body v1.1.0
+   Compiling signal-hook-registry v1.4.8
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.3
+   Compiling tracing v0.1.44
+   Compiling futures-channel v0.3.34
+   Compiling tower-layer v0.3.3
+   Compiling sync_wrapper v1.0.2
+   Compiling smallvec v1.16.0
+   Compiling slab v0.4.12
+   Compiling serde_json v1.0.151
+   Compiling httpdate v1.0.3
+   Compiling atomic-waker v1.1.2
+   Compiling percent-encoding v2.3.2
+   Compiling futures-task v0.3.34
+   Compiling futures-util v0.3.34
+   Compiling form_urlencoded v1.2.2
+   Compiling http-body-util v0.1.5
+   Compiling ryu v1.0.23
+   Compiling mime v0.3.17
+   Compiling memchr v2.8.3
+   Compiling serde_path_to_error v0.1.20
+   Compiling serde_urlencoded v0.7.1
+   Compiling axum-core v0.5.6
+   Compiling matchit v0.8.4
+   Compiling tokio-macros v2.7.2
+   Compiling tokio v1.53.1
+   Compiling hyper v1.11.1
+   Compiling tower v0.5.3
+   Compiling hyper-util v0.1.20
+   Compiling axum v0.8.9
+   Compiling jarvis-node v0.3.3 (/tmp/jarvis-linux-qa-EblB9d/portable)
+warning: function `list` is never used
+  --> src/node/projects.rs:95:8
+   |
+95 | pub fn list(home: &Path) -> Vec<Value> {
+   |        ^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `jarvis-node` (bin "jarvis-node" test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.85s
+     Running unittests src/main.rs (portable/target/debug/deps/jarvis_node-970f2d4c9a385a00)
+
+running 45 tests
+test codex_hooks::tests::real_cli_trust_setup_preserves_foreign_hooks_and_permissions ... ignored, requires an explicitly selected installed Codex CLI; uses only a disposable home
+test node::files::tests::decode_defers_split_utf8_to_next_chunk ... ok
+test codex_hooks::tests::disabled_hooks_are_not_reenabled_and_partial_setup_is_not_healthy ... ok
+test node::files::tests::decode_does_not_stall_on_broken_bytes ... ok
+test node::files::tests::resolve_distinguishes_missing_inside_root_from_outside ... ok
+test node::files::tests::chunk_clamps_offset_past_eof ... ok
+test codex_hooks::tests::exact_owned_source_and_command_only ... ok
+test node::files::tests::chunk_waits_when_writer_has_only_started_a_utf8_character ... ok
+test node::files::tests::resolve_allows_file_under_root ... ok
+test node::files::tests::resolve_rejects_sibling_with_shared_prefix ... ok
+test node::http::tests::params_decode_path_and_offset ... ok
+test node::http::tests::pane_and_requires_both_fields_nonempty ... ok
+test node::files::tests::resolve_rejects_dotdot_escape ... ok
+test node::files::tests::resolve_rejects_symlink_escape ... ok
+test node::http::tests::params_tolerate_flags_without_value ... ok
+test node::http::tests::percent_decode_keeps_utf8_and_spaces ... ok
+test node::projects::tests::broken_first_lines_do_not_hide_the_cwd ... ok
+test node::projects::tests::codex_index_ignores_non_metadata_paths_and_does_not_follow_directory_symlinks ... ok
+test node::projects::tests::cwd_comes_from_the_file_not_from_the_folder_name ... ok
+test node::ring::tests::cursor_from_the_future_is_a_gap ... ok
+test node::files::tests::chunk_is_capped_and_resumable ... ok
+test node::ring::tests::fresh_buffer_has_no_gap ... ok
+test node::projects::tests::codex_projects_use_rollout_metadata_and_coexist_with_claude ... ok
+test node::ring::tests::envelope_is_nested_not_flattened ... ok
+test node::ring::tests::cursor_is_monotonic_and_slice_starts_at_requested ... ok
+test node::ring::tests::overflow_drops_oldest_and_keeps_capacity ... ok
+test node::ring::tests::request_before_oldest_is_a_gap ... ok
+test node::ring::tests::zero_capacity_is_clamped_to_one ... ok
+test node::sources::tests::ids_match_desktop_registry_vectors ... ok
+test node::tests::capacity_reads_env_and_survives_garbage ... ok
+test node::tests::only_loopback_counts_as_loopback ... ok
+test node::tests::duplicate_node_cannot_claim_or_remove_live_socket ... ok
+test node::sources::tests::profiles_keep_same_session_ids_separate_without_exposing_auth ... ok
+test node::tmux::tests::buffer_names_are_unique_and_tmux_safe ... ok
+test node::tests::bell_wakes_a_waiting_poller ... ok
+test node::tmux::tests::confirm_is_detected_only_near_the_bottom ... ok
+test node::tests::push_returns_growing_cursor ... ok
+test node::tmux::tests::launch_command_carries_agent_paths ... ok
+test node::tmux::tests::panes_parse_keeps_paths_with_spaces ... ok
+test node::tmux::tests::parse_keys_accepts_named_and_text_steps ... ok
+test node::tmux::tests::parse_keys_rejects_unknown_step ... ok
+test node::tmux::tests::paste_args_match_the_daemon_byte_for_byte ... ok
+test node::tmux::tests::trust_prompt_is_recognised_but_not_guessed ... ok
+test node::tmux::tests::session_name_is_readable_and_unique ... ok
+test node::projects::tests::projects_are_listed_freshest_first_and_empty_dirs_skipped ... ok
+
+test result: ok. 44 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Compiling jarvis-node v0.3.3 (/tmp/jarvis-linux-qa-EblB9d/portable)
+warning: constant `CWD_PROBE` is never used
+  --> src/node/projects.rs:16:7
+   |
+16 | const CWD_PROBE: usize = 8 * 1024;
+   |       ^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `MAX_SESSIONS` is never used
+  --> src/node/projects.rs:20:7
+   |
+20 | const MAX_SESSIONS: usize = 50;
+   |       ^^^^^^^^^^^^
+
+warning: function `mtime_ms` is never used
+  --> src/node/projects.rs:22:4
+   |
+22 | fn mtime_ms(p: &Path) -> i64 {
+   |    ^^^^^^^^
+
+warning: function `cwd_from` is never used
+  --> src/node/projects.rs:36:4
+   |
+36 | fn cwd_from(file: &Path) -> Option<String> {
+   |    ^^^^^^^^
+
+warning: function `scan_project` is never used
+  --> src/node/projects.rs:54:4
+   |
+54 | fn scan_project(dir: &Path) -> Option<Value> {
+   |    ^^^^^^^^^^^^
+
+warning: function `list` is never used
+  --> src/node/projects.rs:95:8
+   |
+95 | pub fn list(home: &Path) -> Vec<Value> {
+   |        ^^^^
+
+warning: function `list_roots` is never used
+   --> src/node/projects.rs:101:4
+    |
+101 | fn list_roots(home: &Path, codex: &Path) -> Vec<Value> {
+    |    ^^^^^^^^^^
+
+warning: function `list_claude` is never used
+   --> src/node/projects.rs:108:4
+    |
+108 | fn list_claude(home: &Path) -> Vec<Value> {
+    |    ^^^^^^^^^^^
+
+warning: function `codex_header` is never used
+   --> src/node/projects.rs:125:4
+    |
+125 | fn codex_header(file: &Path) -> Option<(String, String)> {
+    |    ^^^^^^^^^^^^
+
+warning: function `codex_files` is never used
+   --> src/node/projects.rs:142:4
+    |
+142 | fn codex_files(root: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    |    ^^^^^^^^^^^
+
+warning: function `list_codex` is never used
+   --> src/node/projects.rs:152:4
+    |
+152 | fn list_codex(codex: &Path) -> Vec<Value> {
+    |    ^^^^^^^^^^
+
+warning: function `reconcile` is never used
+  --> src/codex_hooks.rs:35:14
+   |
+35 | pub async fn reconcile(program: &Path, home: &Path, hook_bin: &Path, trust: bool) -> Result<Value, String> {
+   |              ^^^^^^^^^
+
+warning: `jarvis-node` (bin "jarvis-node") generated 12 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.08s
+
+added 2 packages in 49s
+npm notice
+npm notice New major version of npm available! 11.16.0 -> 12.0.2
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.0.2
+npm notice To update run: npm install -g npm@12.0.2
+npm notice
+{"scenario": "running protocol advertises per-source capabilities", "passed": true, "details": null}
+{"scenario": "two Codex homes have distinct stable identities", "passed": true, "details": null}
+{"scenario": "same raw session ID remains distinct across homes", "passed": true, "details": null}
+{"scenario": "project history preserves source identities", "passed": true, "details": null}
+{"scenario": "provider auth file is outside transcript read boundary", "passed": true, "details": null}
+{"scenario": "configured nondefault transcript is readable", "passed": true, "details": null}
+{"scenario": "actual installed hook reaches node with canonical instance identity", "passed": true, "details": null}
+{"scenario": "source-targeted launch receives a real pane", "passed": true, "details": null}
+{"scenario": "launch selects requested account instead of inherited account", "passed": true, "details": null}
+{"scenario": "live remote terminal screen is available", "passed": true, "details": null}
+{"scenario": "written answer has acknowledgement and arrives literally", "passed": true, "details": null}
+{"scenario": "remote key plan is acknowledged only after literal delivery", "passed": true, "details": null}
+{"scenario": "managed remote shim replaces stale socket and account on existing server", "passed": true, "details": null}
+{"scenario": "interactive shim session actually delivers its hook to the node", "passed": true, "details": null}
+{"scenario": "unknown account cannot silently launch the default", "passed": true, "details": null}
+{"scenario": "unsupported Codex official quota is explicit, never another account", "passed": true, "details": null}
+{"scenario": "trust repair cannot select an unregistered home or command", "passed": true, "details": null}
+{"scenario": "real Codex RPC trusts the selected remote source only", "passed": true, "details": null}
+{"scenario": "remote trust preserves approvals and sandbox configuration", "passed": true, "details": null}
+{"scenario": "remote trust repair is idempotent", "passed": true, "details": null}
+Report: fixture-report.json

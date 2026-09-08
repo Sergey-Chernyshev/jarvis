@@ -7,9 +7,12 @@
 //!
 //! Всё fail-safe: любой шаг пишет в лог и возвращается без паники.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use tauri::Manager;
 
 use super::hub::{AudioHub, CaptureSession};
+use super::insert::InsertionTarget;
 use super::SttService;
 
 /// PTT-потребитель диктовки. Живёт в Arc внутри Daemon.
@@ -21,7 +24,10 @@ pub struct Dictation {
     /// Активная сессия захвата аудио + момент старта (None = не пишем). Метка
     /// времени нужна watchdog'у `abort_if_stuck`: если key-up PTT потерялся,
     /// сессия висела бы вечно и держала микрофон.
-    capturing: Mutex<Option<(CaptureSession, std::time::Instant)>>,
+    capturing: Mutex<Option<(CaptureSession, std::time::Instant, InsertionTarget)>>,
+    /// One dictation finishes before the next can overwrite its clipboard/HUD.
+    processing: Arc<AtomicBool>,
+    insertion: Arc<super::insert::InsertionControl>,
     /// AppHandle для HUD-фаз («Слушаю…/Анализирую…/Услышал») и истории реплик.
     /// None в юнит-тестах — тогда HUD/история становятся no-op.
     app: Option<tauri::AppHandle>,
@@ -33,6 +39,8 @@ impl Dictation {
             service,
             hub,
             capturing: Mutex::new(None),
+            processing: Arc::new(AtomicBool::new(false)),
+            insertion: Arc::new(super::insert::InsertionControl::default()),
             app: Some(app),
         })
     }
@@ -44,6 +52,8 @@ impl Dictation {
             service,
             hub,
             capturing: Mutex::new(None),
+            processing: Arc::new(AtomicBool::new(false)),
+            insertion: Arc::new(super::insert::InsertionControl::default()),
             app: None,
         })
     }
@@ -53,10 +63,55 @@ impl Dictation {
         self.app.as_ref().map(crate::daemon::Daemon::get)
     }
 
+    pub fn cancel_insertion(&self, attempt_id: u64) -> bool {
+        self.insertion.cancel(attempt_id)
+    }
+
     /// Начать захват аудио при нажатии хоткея. Идемпотентно: если захват уже
     /// идёт (двойное срабатывание или авто-повтор клавиши) — пропуск.
     pub fn on_press(&self) {
+        // Auto-repeat must not make extra AX requests while the session runs.
+        if self.is_capturing() || self.processing.load(Ordering::Acquire) {
+            return;
+        }
+        if self.hub.is_muted() {
+            if let Some(d) = self.daemon() {
+                crate::route::hud::emit(
+                    &d,
+                    crate::route::hud::Phase::Error {
+                        msg: "Микрофон выключен. Включите его, затем начните диктовку.".into(),
+                    },
+                );
+            }
+            return;
+        }
+        if let Err(msg) = super::mic_permission::require_authorized() {
+            if let Some(d) = self.daemon() {
+                crate::route::hud::emit(&d, crate::route::hud::Phase::Error { msg });
+            }
+            return;
+        }
+        // Capture before entering the microphone gate: this can dispatch to
+        // AppKit, whose thread must remain free to stop/start a meeting.
+        let target = InsertionTarget::capture(self.app.as_ref());
         {
+            let _microphone = crate::meetings::microphone_operation_lock();
+            if self
+                .app
+                .as_ref()
+                .and_then(|app| app.try_state::<Arc<crate::meetings::Meetings>>())
+                .is_some_and(|meetings| meetings.is_recording())
+            {
+                if let Some(d) = self.daemon() {
+                    crate::route::hud::emit(
+                        &d,
+                        crate::route::hud::Phase::Error {
+                            msg: "Сначала останови запись встречи, затем начни диктовку.".into(),
+                        },
+                    );
+                }
+                return;
+            }
             let mut guard = match self.capturing.lock() {
                 Ok(g) => g,
                 Err(e) => {
@@ -64,12 +119,17 @@ impl Dictation {
                     return;
                 }
             };
-            if guard.is_some() {
+            if guard.is_some() || self.processing.load(Ordering::Acquire) {
                 // Уже пишем — идемпотентный пропуск.
                 return;
             }
             // Захват через общий хаб (без преролла — PTT пишет с момента нажатия).
-            *guard = Some((self.hub.open_capture(false), std::time::Instant::now()));
+            self.insertion.begin();
+            *guard = Some((
+                self.hub.open_capture(false),
+                std::time::Instant::now(),
+                target,
+            ));
         } // лок захвата отпущен ДО прогрева (spawn питона его не держит)
           // Греем STT-модель ПОКА человек говорит: к отпусканию клавиши она уже
           // загружена (прячет cold-start после idle-stop). Неблокирующий вызов.
@@ -97,27 +157,36 @@ impl Dictation {
                     return;
                 }
             };
-            guard.take().map(|(s, _started)| s)
+            guard.take().map(|(s, _started, target)| {
+                self.processing.store(true, Ordering::Release);
+                (s, target)
+            })
         };
 
-        let Some(session) = session else {
+        let Some((session, target)) = session else {
             // Нет активного захвата — no-op.
             return;
         };
-        self.finish_session(session);
+        self.finish_session(session, target);
     }
 
     /// Общий финал диктовки: транскрибировать накопленное и вставить текст.
     /// Зовётся из on_release (обычный путь) и из watchdog'а залипшего PTT —
     /// принудительное завершение тоже отдаёт человеку его текст, а не тишину.
-    fn finish_session(&self, session: CaptureSession) {
+    fn finish_session(&self, session: CaptureSession, target: InsertionTarget) {
         let service = self.service.clone();
         let daemon = self.daemon();
+        let processing = self.processing.clone();
+        let insertion = self.insertion.clone();
+        let attempt_id = insertion.current();
         std::thread::spawn(move || {
             // Взаимодействие завершится при выходе из потока (ЛЮБОЙ путь, включая
             // ранние return) — RAII-гард снимает счётчик и сливает отложенные
             // уведомления ровно один раз. Парный enter был в on_press.
-            struct LeaveGuard(Option<std::sync::Arc<crate::daemon::Daemon>>);
+            struct LeaveGuard(
+                Option<std::sync::Arc<crate::daemon::Daemon>>,
+                Arc<AtomicBool>,
+            );
             impl Drop for LeaveGuard {
                 fn drop(&mut self) {
                     if let Some(d) = &self.0 {
@@ -125,9 +194,10 @@ impl Dictation {
                         d.unduck_media_for_capture();
                         d.interaction_leave_and_flush();
                     }
+                    self.1.store(false, Ordering::Release);
                 }
             }
-            let _leave = LeaveGuard(daemon.clone());
+            let _leave = LeaveGuard(daemon.clone(), processing);
             // видимая фаза «Анализирую…» — пока идёт finish + транскрипция
             if let Some(d) = &daemon {
                 crate::route::hud::emit(d, crate::route::hud::Phase::Analyzing);
@@ -175,8 +245,8 @@ impl Dictation {
 
             // ── transcribe() → text ──────────────────────────────────────────
             let opts = service.options();
-            let text = match service.transcribe(&pcm, &opts) {
-                Ok(r) => r.text,
+            let (text, raw_text) = match service.transcribe_with_raw(&pcm, &opts) {
+                Ok((r, raw)) => (r.text, raw),
                 Err(e) => {
                     crate::log::line(&format!("[dictation] transcribe: {e}"));
                     if let Some(d) = &daemon {
@@ -207,13 +277,13 @@ impl Dictation {
                 "[dictation] транскрипция готова: chars={}",
                 text.chars().count()
             ));
-            // ── умные промпты: если включён «умный режим» — один Haiku-проход САМ
-            // классифицирует и преобразует надиктованное (коммит/промпт/чистовик).
+            // Optional formatting uses one configured service-LLM pass. Semantic
+            // rewrites (commit/prompt/translation) require a manual history action.
             // Fail-safe: на сбой/таймаут остаётся исходный текст без применения.
             let (text, applied) = match &daemon {
                 Some(d) if d.prompts.smart() => {
                     let p = crate::stt::prompts::smart_transform_prompt(&text);
-                    match tauri::async_runtime::block_on(crate::claude_bin::run_service_llm(
+                    match tauri::async_runtime::block_on(crate::claude_bin::run_service_text_transform(
                         &p,
                         std::time::Duration::from_secs(12),
                     )) {
@@ -233,10 +303,10 @@ impl Dictation {
             };
 
             // история «что я говорил» (с пометкой стиля)
-            if let Some(d) = &daemon {
-                let id = d
-                    .transcripts
-                    .push_styled(&text, "dictation", applied.as_deref(), true);
+            let saved = if let Some(d) = &daemon {
+                let (id, saved) =
+                    d.transcripts
+                        .push_dictated(&text, &raw_text, applied.as_deref(), true);
                 // сохранить СЖАТОЕ аудио диктовки → можно перегенерировать
                 // распознавание, если анализ дал ошибку/мусор. Best-effort.
                 if id != 0 {
@@ -244,39 +314,51 @@ impl Dictation {
                         crate::log::line(&format!("[dictation] сохранение аудио: {e}"));
                     }
                 }
-            }
+                saved
+            } else {
+                false
+            };
 
             // ── insert_text() → ⌘V ──────────────────────────────────────────
             let app = daemon.as_ref().map(|d| &d.app);
-            let inserted = match super::insert::insert_text(&text, app) {
-                Ok(v) => v == super::insert::InsertVerdict::Confirmed,
-                Err(e) => {
-                    crate::log::line(&format!("[dictation] insert_text: {e}"));
-                    false
-                }
-            };
+            let delivery = super::insert::insert_text_cancellable(&text, app, &target, &|| {
+                insertion.is_cancelled(attempt_id)
+            });
+            let inserted = delivery.verdict == super::insert::InsertVerdict::Confirmed;
+            if let Some(e) = &delivery.error {
+                crate::log::line(&format!("[dictation] insert_text: {e}"));
+            }
             crate::log::line(&format!(
                 "[dictation] вставка {}",
                 if inserted {
                     "подтверждена (тост 2с)"
                 } else {
-                    "не подтверждена (тост 5с)"
+                    "не подтверждена (доступно восстановление текста)"
                 }
             ));
-            // Авто-копия в буфер (остаётся поверх restore) — вставить ещё раз вручную.
-            if let Err(e) = super::insert::copy_to_clipboard(&text) {
-                crate::log::line(&format!("[dictation] copy_to_clipboard: {e}"));
-            }
             // «Услышал …» — ПОСЛЕ вставки: тост знает её исход и живёт короче,
             // если текст уже на месте (inserted). Задержка эмита ~0.2с не заметна.
             if let Some(d) = &daemon {
-                crate::route::hud::emit(
-                    d,
-                    crate::route::hud::Phase::Heard {
+                let mut payload =
+                    crate::route::hud::hud_payload(crate::route::hud::Phase::Dictated {
                         text: text.clone(),
                         inserted,
-                    },
-                );
+                        copied: delivery.copied,
+                        saved,
+                        paste_sent: delivery.paste_sent,
+                        insertion_error: delivery.error,
+                    });
+                payload["insertionBlocked"] = if delivery.permission_required {
+                    serde_json::json!("accessibility")
+                } else {
+                    serde_json::Value::Null
+                };
+                payload["insertionAttemptId"] = serde_json::json!(attempt_id);
+                payload["insertionCancelled"] = serde_json::json!(delivery.cancelled);
+                payload["rawText"] = serde_json::json!(raw_text);
+                payload["formatted"] = serde_json::json!(text != raw_text);
+                payload["formatStyle"] = serde_json::json!(applied);
+                crate::windows::hud_emit(d, payload);
             }
         });
     }
@@ -299,18 +381,23 @@ impl Dictation {
                 }
             };
             match guard.as_ref() {
-                Some((_, started)) if started.elapsed() >= max => guard.take().map(|(s, _)| s),
+                Some((_, started, _)) if started.elapsed() >= max => {
+                    guard.take().map(|(s, _, target)| {
+                        self.processing.store(true, Ordering::Release);
+                        (s, target)
+                    })
+                }
                 _ => None,
             }
         }; // лок захвата отпущен ДО finish (Drop сессии) — без взаимоблокировки
-        let Some(session) = stuck else {
+        let Some((session, target)) = stuck else {
             return false;
         };
         crate::log::line(&format!(
             "[dictation] PTT дольше {}с — принудительное завершение диктовки",
             max.as_secs()
         ));
-        self.finish_session(session);
+        self.finish_session(session, target);
         true
     }
 
@@ -357,6 +444,17 @@ mod tests {
     fn initial_state_not_capturing() {
         let d = make_dictation();
         assert!(!d.is_capturing());
+    }
+
+    #[test]
+    fn press_during_transcription_cannot_start_an_overlapping_session() {
+        let d = make_dictation();
+        d.processing.store(true, Ordering::Release);
+        d.on_press();
+        assert!(!d.is_capturing());
+        d.processing.store(false, Ordering::Release);
+        d.on_press();
+        assert!(d.is_capturing());
     }
 
     // Залипший PTT (потерянный key-up): сессия старше порога — авто-освобождение.

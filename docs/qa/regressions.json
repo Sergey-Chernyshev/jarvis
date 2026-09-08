@@ -1,0 +1,41 @@
+{
+  "date": "2026-09-05",
+  "scope": "Final full production-feature workspace and JavaScript regression suites. Integration reruns have separate evidence and are not added to these counts.",
+  "rust": {
+    "command": "cargo test --manifest-path src-tauri/Cargo.toml --features wakeword-ort,whisper-native,stt-vad --workspace",
+    "passed": 1028,
+    "failed": 0,
+    "ignored": 6,
+    "packages": {
+      "jarvis": {
+        "passed": 915,
+        "failed": 0,
+        "ignored": 5
+      },
+      "jarvis-mcp": {
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0
+      },
+      "jarvis-setup": {
+        "passed": 67,
+        "failed": 0,
+        "ignored": 1
+      },
+      "jarvis-node": {
+        "passed": 38,
+        "failed": 0,
+        "ignored": 0
+      }
+    }
+  },
+  "ui": {
+    "command": "node --test ui/*.test.mjs",
+    "passed": 165,
+    "failed": 0
+  },
+  "targetedUsageRegression": {
+    "passed": 10,
+    "overlapsWorkspace": true
+  }
+}

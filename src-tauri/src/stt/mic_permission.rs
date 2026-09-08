@@ -26,9 +26,17 @@ impl MicAuth {
             MicAuth::Authorized => "authorized",
         }
     }
-    /// Можно ли открывать захват без явного отказа.
+    /// AudioUnits must not open while the permission dialog is undecided.
     pub fn may_capture(self) -> bool {
-        matches!(self, MicAuth::Authorized | MicAuth::NotDetermined)
+        matches!(self, MicAuth::Authorized)
+    }
+
+    pub fn capture_error(self) -> Option<&'static str> {
+        match self {
+            MicAuth::Authorized => None,
+            MicAuth::NotDetermined => Some("Разрешите Jarvis доступ к микрофону в системном диалоге, затем начните запись ещё раз."),
+            MicAuth::Denied | MicAuth::Restricted => Some("Нет доступа к микрофону. Разрешите Jarvis доступ в Системных настройках → Конфиденциальность → Микрофон."),
+        }
     }
 }
 
@@ -37,6 +45,9 @@ mod imp {
     use super::MicAuth;
     use objc2::runtime::AnyObject;
     use objc2::{class, msg_send};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static REQUEST_PENDING: AtomicBool = AtomicBool::new(false);
 
     // AVMediaTypeAudio — NSString-константа из AVFoundation (@"soun").
     #[link(name = "AVFoundation", kind = "framework")]
@@ -67,10 +78,15 @@ mod imp {
     pub fn request() {
         use block2::RcBlock;
         use objc2::runtime::Bool;
+        if status() != MicAuth::NotDetermined || REQUEST_PENDING.swap(true, Ordering::SeqCst) {
+            return;
+        }
         unsafe {
             let cls = class!(AVCaptureDevice);
             let media: *const AnyObject = AVMediaTypeAudio;
-            let handler = RcBlock::new(|_granted: Bool| {});
+            let handler = RcBlock::new(|_granted: Bool| {
+                REQUEST_PENDING.store(false, Ordering::SeqCst);
+            });
             let _: () =
                 msg_send![cls, requestAccessForMediaType: media, completionHandler: &*handler];
         }
@@ -95,7 +111,24 @@ pub fn status() -> MicAuth {
 
 /// Запросить доступ к микрофону (системный диалог при `NotDetermined`).
 pub fn request() {
+    if crate::native_smoke::enabled() {
+        return;
+    }
     imp::request()
+}
+
+/// Explicit recording actions can request access, but must be retried after the
+/// decision. They never open a delayed recording after the user released PTT.
+pub fn require_authorized() -> Result<(), String> {
+    if crate::native_smoke::enabled() {
+        return Err("Запись живого аудио отключена в изолированном режиме проверки".into());
+    }
+    let auth = status();
+    if auth == MicAuth::NotDetermined {
+        request();
+    }
+    auth.capture_error()
+        .map_or(Ok(()), |error| Err(error.into()))
 }
 
 #[cfg(test)]
@@ -111,8 +144,21 @@ mod tests {
     #[test]
     fn may_capture_semantics() {
         assert!(MicAuth::Authorized.may_capture());
-        assert!(MicAuth::NotDetermined.may_capture());
+        assert!(!MicAuth::NotDetermined.may_capture());
         assert!(!MicAuth::Denied.may_capture());
         assert!(!MicAuth::Restricted.may_capture());
+    }
+
+    #[test]
+    fn pending_permission_has_actionable_error_without_capture_permission() {
+        assert!(MicAuth::NotDetermined
+            .capture_error()
+            .unwrap()
+            .contains("ещё раз"));
+        assert!(MicAuth::Denied
+            .capture_error()
+            .unwrap()
+            .contains("Системных настройках"));
+        assert!(MicAuth::Authorized.capture_error().is_none());
     }
 }

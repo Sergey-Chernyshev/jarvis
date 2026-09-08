@@ -1,0 +1,205 @@
+{
+  "scope": "Actual production WKWebView frontend in disposable native-smoke app; all Jarvis bridge methods replaced by strict fixtures or fail-closed stubs after startup. No backend continuation, authentication, real shell, real account, or SSH claim.",
+  "capturedAt": "2026-09-05T20:03:47.043Z",
+  "ok": true,
+  "steps": [
+    {
+      "name": "Isolated WebKit page receives one external chat and a strict synthetic bridge",
+      "ok": true,
+      "elapsedMs": 449
+    },
+    {
+      "name": "Continue exposes the launch terminal while the source composer stays hidden",
+      "ok": true,
+      "elapsedMs": 189
+    },
+    {
+      "name": "Ready event waits for the exact child state, then opens its writable chat",
+      "ok": true,
+      "elapsedMs": 129
+    },
+    {
+      "name": "External source remains separate and no real bridge operation escaped the fixture",
+      "ok": true,
+      "elapsedMs": 0
+    }
+  ],
+  "errors": [],
+  "failure": null,
+  "runtime": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+    "url": "tauri://localhost",
+    "viewport": {
+      "width": 988,
+      "height": 747,
+      "dpr": 2
+    }
+  },
+  "fixtureCalls": [
+    {
+      "action": "chat-open",
+      "id": "fixture-external-codex"
+    },
+    {
+      "action": "continue",
+      "id": "fixture-external-codex"
+    },
+    {
+      "action": "open",
+      "id": "fixture-launch"
+    },
+    {
+      "action": "poll",
+      "id": "fixture-launch",
+      "streamId": "continuation-stream-1"
+    },
+    {
+      "action": "close",
+      "id": "fixture-launch",
+      "streamId": "continuation-stream-1"
+    },
+    {
+      "action": "chat-open",
+      "id": "fixture-managed-child"
+    },
+    {
+      "action": "open",
+      "id": "fixture-managed-child"
+    },
+    {
+      "action": "poll",
+      "id": "fixture-managed-child",
+      "streamId": "continuation-stream-2"
+    },
+    {
+      "action": "close",
+      "id": "fixture-managed-child",
+      "streamId": "continuation-stream-2"
+    }
+  ],
+  "blockedBridgeCalls": [],
+  "startupFit": {
+    "root": {
+      "x": 0,
+      "y": 403.390625,
+      "width": 988,
+      "height": 343.609375,
+      "top": 403.390625,
+      "right": 988,
+      "bottom": 747,
+      "left": 0
+    },
+    "viewport": {
+      "x": 0,
+      "y": 448.390625,
+      "width": 988,
+      "height": 269.609375,
+      "top": 448.390625,
+      "right": 988,
+      "bottom": 718,
+      "left": 0
+    },
+    "markerRow": 2,
+    "markerTop": 495.390625,
+    "markerBottom": 513.890625
+  },
+  "managedFit": {
+    "root": {
+      "x": 0,
+      "y": 403.390625,
+      "width": 988,
+      "height": 343.609375,
+      "top": 403.390625,
+      "right": 988,
+      "bottom": 747,
+      "left": 0
+    },
+    "viewport": {
+      "x": 0,
+      "y": 448.390625,
+      "width": 988,
+      "height": 269.609375,
+      "top": 448.390625,
+      "right": 988,
+      "bottom": 718,
+      "left": 0
+    },
+    "markerRow": 2,
+    "markerTop": 495.390625,
+    "markerBottom": 513.890625
+  },
+  "originalSource": {
+    "id": "fixture-external-codex",
+    "title": "Внешний чат для продолжения",
+    "project": "Continuation QA",
+    "cwd": "/fixture/native-continuation",
+    "agent": "codex",
+    "instanceId": "fixture-personal",
+    "instanceLabel": "Fixture Personal",
+    "model": "gpt-5",
+    "status": "idle",
+    "controlMode": "external",
+    "tmuxPane": null,
+    "createdAt": 1788638544514,
+    "updatedAt": 1788638544514
+  },
+  "screenshots": [
+    "continuation-external-before.png",
+    "continuation-startup-terminal.png",
+    "continuation-managed-ready.png"
+  ],
+  "sourceSnapshotAfterRun": {
+    "scripts/qa/native-continuation.js": {
+      "sha256": "087979b629c89b95dd240648321fba8b07c6c25dc7350c0dd4ebb794431b7b16",
+      "modifiedAt": "2026-09-05T19:57:19.761Z"
+    },
+    "scripts/native-smoke.mjs": {
+      "sha256": "b8bf59757caf3a55543329987a17046a619a3a1adee2ab98c738c167700d4a0b",
+      "modifiedAt": "2026-09-05T01:13:49.666Z"
+    },
+    "ui/session-workspace.js": {
+      "sha256": "623fe1439cf097ef2c6219d2d732128b8e16330a9b287da16e5f7cce78c9aa74",
+      "modifiedAt": "2026-09-05T19:58:31.484Z"
+    },
+    "ui/session-workspace.css": {
+      "sha256": "33f7b85f8f4e28afca0c62388dd81819bf458963263094d7122c324941c99d26",
+      "modifiedAt": "2026-09-05T19:57:05.656Z"
+    },
+    "ui/terminal-workspace.js": {
+      "sha256": "c339b1967a5c23d2f71f56af1c1aa559a9c487da2566ad81c3641e950203815a",
+      "modifiedAt": "2026-09-05T19:10:54.720Z"
+    },
+    "ui/terminal-workspace.css": {
+      "sha256": "c2051997fa7875a616d7c48c7038830224aac27a6f2cdab9878f21038da86edd",
+      "modifiedAt": "2026-09-05T17:49:14.750Z"
+    },
+    "ui/renderer.js": {
+      "sha256": "83dc11a2ad6971eb7055d7b31894a626056e31e5558e66eab14d78a12666eafa",
+      "modifiedAt": "2026-09-05T19:56:53.443Z"
+    },
+    "ui/bridge.js": {
+      "sha256": "1c43e2f81781de2b8c6f793c879ff758c0550379171cd46659e8e888f6b6c4d7",
+      "modifiedAt": "2026-09-05T19:50:58.097Z"
+    },
+    "debugBinary": {
+      "sha256": "f3cbb88bebbf7e81aba30275f0b985621da8b6907b8a55c014be4db4d9f578f3",
+      "modifiedAt": "2026-09-05T19:59:04.441Z"
+    },
+    "isolatedSignedBinary": {
+      "sha256": "eecae78232a9359284245f6a2feaa3483e21a3785f80cd3a05989e07f5f0e9a8",
+      "modifiedAt": "2026-09-05T20:02:22.680Z"
+    },
+    "executedScenario": {
+      "sha256": "087979b629c89b95dd240648321fba8b07c6c25dc7350c0dd4ebb794431b7b16",
+      "modifiedAt": "2026-09-05T20:02:22.078Z"
+    }
+  },
+  "visualReview": {
+    "images": [
+      "continuation-startup-terminal.png",
+      "continuation-managed-ready.png"
+    ],
+    "result": "Inspected after native execution: STARTUP-READY and MANAGED-READY are visibly rendered within the terminal viewport; source composer is absent during startup, managed child composer is visible; no blank terminal viewport or clipped terminal toolbar observed.",
+    "scope": "Static native screenshots only; no animation-smoothness claim."
+  }
+}

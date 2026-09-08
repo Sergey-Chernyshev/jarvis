@@ -1,0 +1,22 @@
+/* VM inventory keeps actions visible and runtime explanations secondary. */
+:is(#settings2, #machines2) .s2-vm-area { min-width: 0; margin-top: 26px; }
+:is(#settings2, #machines2) .s2-vm-area .s2-machine-head { margin-bottom: 10px; }
+:is(#settings2, #machines2) .s2-vm-area .s2-machine-head .dsection { color: var(--ink); font-size: 14px; font-weight: 600; }
+:is(#settings2, #machines2) .s2-vm-area .s2-vm-list { margin-bottom: 6px; }
+:is(#settings2, #machines2) .s2-vm-area .s2-vm-list > .drow { align-items: flex-start; gap: 18px; padding: 16px 0; }
+:is(#settings2, #machines2) .s2-vm-area .dctl { gap: 12px; padding-top: 1px; flex-wrap: wrap; justify-content: flex-end; }
+:is(#settings2, #machines2) .s2-vm-status { display: inline-flex; align-items: center; flex: none; border-radius: 7px; padding: 5px 8px; color: var(--ink-mute); background: var(--fill-2); font-size: 11px; font-weight: 500; line-height: 1.4; white-space: nowrap; }
+:is(#settings2, #machines2) .s2-vm-status[data-state='running'] { color: var(--success-text, var(--accent-text)); background: var(--success-soft, var(--accent-soft)); }
+:is(#settings2, #machines2) .s2-vm-status[data-state='stopped'] { color: var(--info-text); background: var(--info-soft); }
+:is(#settings2, #machines2) .s2-vm-status[data-state='unknown'], :is(#settings2, #machines2) .s2-vm-status[data-state='missing'] { color: var(--warning-text); background: var(--warning-soft); }
+:is(#settings2, #machines2) .s2-vm-area .s2-vm-details { margin-top: 12px; }
+:is(#settings2, #machines2) .s2-vm-area .s2-vm-details > summary { padding-top: 10px; font-size: 12px; }
+:is(#settings2, #machines2) .s2-vm-area .s2-vm-details .s2-vm-mount { padding: 10px 0 0; }
+:is(#settings2, #machines2) .s2-vm-runtime { padding: 0 14px 14px; font-size: 12px; line-height: 1.6; color: var(--ink-mute); max-width: 68ch; }
+:is(#settings2, #machines2) .s2-vm-runtime strong { color: var(--ink-2); font-size: 12px; font-weight: 500; }
+:is(#settings2, #machines2) .s2-vm-runtime p { margin-top: 8px; }
+:is(#settings2, #machines2) .s2-vm-warning { padding: 11px 13px; border-radius: 10px; margin: 6px 0; color: var(--warning-text); background: var(--warning-soft); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+@media (max-width: 950px) {
+  :is(#settings2, #machines2) .s2-vm-area .s2-vm-list > .drow { flex-wrap: wrap; }
+  :is(#settings2, #machines2) .s2-vm-area .dctl { width: 100%; margin-left: 0; justify-content: flex-start; }
+}

@@ -79,7 +79,7 @@ impl SttSidecar {
 
     /// PID живого сайдкара (для метрик).
     pub fn pid(&self) -> Option<u32> {
-        self.child.lock().unwrap().as_ref().map(|c| c.id())
+        self.child.try_lock().ok()?.as_ref().map(|c| c.id())
     }
 
     pub fn base(&self) -> String {
@@ -89,6 +89,9 @@ impl SttSidecar {
     /// Запустить, если установлен и ещё не запущен. Не блокирует на загрузке
     /// модели — health-check движка сам подождёт готовности.
     pub fn ensure_started(&self) -> Result<(), String> {
+        if crate::native_smoke::enabled() {
+            return Err("Сайдкары отключены в изолированной нативной проверке".into());
+        }
         if !self.installed() {
             return Err(format!(
                 "[stt] сайдкар не установлен (py={:?}, script={:?})",
@@ -187,7 +190,8 @@ impl SttSidecar {
     /// Остановить сайдкар и снять флаг active (явная остановка/idle-stop/выход).
     pub fn stop(&self) {
         self.active.store(false, Ordering::SeqCst);
-        if let Some(mut c) = self.child.lock().unwrap().take() {
+        let child = self.child.lock().unwrap().take();
+        if let Some(mut c) = child {
             let _ = c.kill();
             let _ = c.wait();
         }
@@ -197,6 +201,13 @@ impl SttSidecar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_does_not_wait_for_a_process_transition() {
+        let sidecar = SttSidecar::new("/nope", "qwen3-0.6b", 8732);
+        let _transition = sidecar.child.lock().unwrap();
+        assert_eq!(sidecar.pid(), None);
+    }
 
     #[test]
     fn not_installed_when_paths_missing() {

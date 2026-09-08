@@ -1,0 +1,5 @@
+{
+  "vm": "jarvis-227cb228cd9d",
+  "fixture": "/tmp/jarvis-remote-qa-Gty1cS2Z",
+  "scope": "Actual Linux node build/unit suite/tmux/HTTP over loopback inside Lima; SSH commands originate on macOS. Synthetic payloads only."
+}

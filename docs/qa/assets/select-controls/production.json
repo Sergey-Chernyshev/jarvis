@@ -1,0 +1,10 @@
+{
+  "executable": "/Users/se.chernyshev/jarvis/src-tauri/target/release/bundle/macos/Jarvis.app/Contents/MacOS/jarvis",
+  "sha256": "abb4df679b09a6ff4654124e742b09332333ffd406bd8112d341d9f20bd1cca8",
+  "pid": 77197,
+  "signature": "verified",
+  "state": {
+    "responsive": true,
+    "sessions": 221
+  }
+}

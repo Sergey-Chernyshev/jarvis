@@ -20,7 +20,10 @@ async fn ok(host: &Host, dir: &str, args: &[&str]) -> Result<String, String> {
         Ok(out)
     } else {
         let why = format!("{} {}", out.trim(), err.trim());
-        Err(crate::util::ellipsize(&crate::util::one_line(why.trim()), 300))
+        Err(crate::util::ellipsize(
+            &crate::util::one_line(why.trim()),
+            300,
+        ))
     }
 }
 
@@ -31,7 +34,15 @@ pub async fn is_repo(host: &Host, dir: &str) -> bool {
 /// Базовая ветка: main, master — что есть.
 pub async fn base_branch(host: &Host, repo: &str) -> Result<String, String> {
     for cand in ["main", "master"] {
-        if host.git(repo, &["show-ref", "--verify", &format!("refs/heads/{cand}")]).await.0 == 0 {
+        if host
+            .git(
+                repo,
+                &["show-ref", "--verify", &format!("refs/heads/{cand}")],
+            )
+            .await
+            .0
+            == 0
+        {
             return Ok(cand.into());
         }
     }
@@ -47,13 +58,16 @@ pub async fn base_branch(host: &Host, repo: &str) -> Result<String, String> {
 pub async fn ensure_repo(host: &Host, dir: &str) -> Result<String, String> {
     let (code, out) = host
         .sh(
-            &super::host::parent_of(dir),
+            if dir.starts_with('/') { "/" } else { "." },
             &format!("mkdir -p {}", crate::util::shell_quote(dir)),
             Duration::from_secs(20),
         )
         .await;
     if code != 0 {
-        return Err(format!("не создал каталог: {}", crate::util::one_line(&out)));
+        return Err(format!(
+            "не создал каталог: {}",
+            crate::util::one_line(&out)
+        ));
     }
     if !is_repo(host, dir).await {
         ok(host, dir, &["init", "-q"]).await?;
@@ -66,8 +80,15 @@ pub async fn ensure_repo(host: &Host, dir: &str) -> Result<String, String> {
             host,
             dir,
             &[
-                "-c", "user.email=jarvis@local", "-c", "user.name=jarvis",
-                "commit", "-q", "--allow-empty", "-m", "начало связки",
+                "-c",
+                "user.email=jarvis@local",
+                "-c",
+                "user.name=jarvis",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "начало связки",
             ],
         )
         .await?;
@@ -76,17 +97,33 @@ pub async fn ensure_repo(host: &Host, dir: &str) -> Result<String, String> {
 }
 
 /// Поднять worktree руки на своей ветке от базовой.
-pub async fn add_worktree(host: &Host, repo: &str, dir: &str, branch: &str, base: &str) -> Result<(), String> {
-    ok(host, repo, &["worktree", "add", "-b", branch, dir, base]).await.map(|_| ())
+pub async fn add_worktree(
+    host: &Host,
+    repo: &str,
+    dir: &str,
+    branch: &str,
+    base: &str,
+) -> Result<(), String> {
+    ok(host, repo, &["worktree", "add", "-b", branch, dir, base])
+        .await
+        .map(|_| ())
 }
 
 pub async fn head_sha(host: &Host, dir: &str) -> Result<String, String> {
-    ok(host, dir, &["rev-parse", "HEAD"]).await.map(|s| s.trim().to_string())
+    ok(host, dir, &["rev-parse", "HEAD"])
+        .await
+        .map(|s| s.trim().to_string())
 }
 
 /// В дереве есть незакоммиченное (включая неучтённые файлы).
 pub async fn dirty(host: &Host, dir: &str) -> bool {
-    match ok(host, dir, &["status", "--porcelain", "--untracked-files=all"]).await {
+    match ok(
+        host,
+        dir,
+        &["status", "--porcelain", "--untracked-files=all"],
+    )
+    .await
+    {
         Ok(out) => !out.trim().is_empty(),
         Err(_) => true, // не смогли спросить — считаем грязным: осторожность дешевле
     }
@@ -94,24 +131,41 @@ pub async fn dirty(host: &Host, dir: &str) -> bool {
 
 /// Насколько ветка впереди базы.
 pub async fn ahead(host: &Host, repo: &str, base: &str, branch: &str) -> u32 {
-    ok(host, repo, &["rev-list", "--count", &format!("{base}..{branch}")])
-        .await
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0)
+    ok(
+        host,
+        repo,
+        &["rev-list", "--count", &format!("{base}..{branch}")],
+    )
+    .await
+    .ok()
+    .and_then(|s| s.trim().parse().ok())
+    .unwrap_or(0)
 }
 
 /// Ветка уже стоит на актуальной базе (база — предок ветки).
 pub async fn rebased(host: &Host, repo: &str, base: &str, branch: &str) -> bool {
-    host.git(repo, &["merge-base", "--is-ancestor", base, branch]).await.0 == 0
+    host.git(repo, &["merge-base", "--is-ancestor", base, branch])
+        .await
+        .0
+        == 0
 }
 
 /// Файлы, которых рука коснулась относительно базы.
 pub async fn changed_files(host: &Host, repo: &str, base: &str, branch: &str) -> Vec<String> {
-    ok(host, repo, &["diff", "--name-only", &format!("{base}...{branch}")])
-        .await
-        .map(|out| out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).take(200).collect())
-        .unwrap_or_default()
+    ok(
+        host,
+        repo,
+        &["diff", "--name-only", &format!("{base}...{branch}")],
+    )
+    .await
+    .map(|out| {
+        out.lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .take(200)
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Итог попытки авторебейза.
@@ -134,7 +188,12 @@ pub async fn try_rebase(host: &Host, worktree: &str, base: &str) -> Result<Rebas
     }
     let files = ok(host, worktree, &["diff", "--name-only", "--diff-filter=U"])
         .await
-        .map(|o| o.lines().map(str::to_string).filter(|l| !l.is_empty()).collect::<Vec<_>>())
+        .map(|o| {
+            o.lines()
+                .map(str::to_string)
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     let (abort_code, abort_out) = host.git(worktree, &["rebase", "--abort"]).await;
     if abort_code != 0 {
@@ -150,7 +209,9 @@ pub async fn try_rebase(host: &Host, worktree: &str, base: &str) -> Result<Rebas
 
 /// Где база сейчас выписана: (каталог, чистое ли дерево).
 async fn base_checkout(host: &Host, repo: &str, base: &str) -> Option<(String, bool)> {
-    let out = ok(host, repo, &["worktree", "list", "--porcelain"]).await.ok()?;
+    let out = ok(host, repo, &["worktree", "list", "--porcelain"])
+        .await
+        .ok()?;
     let mut path: Option<String> = None;
     for line in out.lines() {
         if let Some(p) = line.strip_prefix("worktree ") {
@@ -177,13 +238,24 @@ pub async fn ff_advance(host: &Host, repo: &str, base: &str, branch: &str) -> Re
         return Err("ветка не на актуальной базе — сначала ребейз".into());
     }
     match base_checkout(host, repo, base).await {
-        Some((path, true)) => ok(host, &path, &["merge", "--ff-only", branch]).await.map(|_| ()),
+        Some((path, true)) => ok(host, &path, &["merge", "--ff-only", branch])
+            .await
+            .map(|_| ()),
         Some((path, false)) => Err(format!(
             "{base} выписана в {path} с незакоммиченной правкой — закоммить или спрячь, тогда волью"
         )),
         None => {
-            let sha = ok(host, repo, &["rev-parse", branch]).await?.trim().to_string();
-            ok(host, repo, &["update-ref", &format!("refs/heads/{base}"), &sha]).await.map(|_| ())
+            let sha = ok(host, repo, &["rev-parse", branch])
+                .await?
+                .trim()
+                .to_string();
+            ok(
+                host,
+                repo,
+                &["update-ref", &format!("refs/heads/{base}"), &sha],
+            )
+            .await
+            .map(|_| ())
         }
     }
 }
@@ -214,7 +286,43 @@ mod tests {
     }
 
     fn sibling(dir: &str, name: &str) -> String {
-        format!("{}/{}-{}", super::super::host::parent_of(dir), name, std::process::id())
+        format!(
+            "{}/{}-{}",
+            super::super::host::parent_of(dir),
+            name,
+            std::process::id()
+        )
+    }
+
+    #[tokio::test]
+    async fn nested_new_directory_and_dirty_worktree_cleanup_preserve_data() {
+        let root =
+            std::env::temp_dir().join(format!("jarvis-bundle-nested-{}", std::process::id()));
+        let dir = root.join("new/deep/repo");
+        let base = ensure_repo(H, &dir.to_string_lossy()).await.unwrap();
+        let wt = root.join("wt");
+        add_worktree(
+            H,
+            &dir.to_string_lossy(),
+            &wt.to_string_lossy(),
+            "team/keep",
+            &base,
+        )
+        .await
+        .unwrap();
+        std::fs::write(wt.join("unsaved.txt"), "human draft").unwrap();
+        let (code, _) = H
+            .git(
+                &dir.to_string_lossy(),
+                &["worktree", "remove", &wt.to_string_lossy()],
+            )
+            .await;
+        assert_ne!(code, 0);
+        assert_eq!(
+            std::fs::read_to_string(wt.join("unsaved.txt")).unwrap(),
+            "human draft"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -230,7 +338,8 @@ mod tests {
         assert!(["main", "master"].contains(&base.as_str()), "{base}");
         let wt = sibling(&dir, "wt-fresh");
         let _ = std::fs::remove_dir_all(&wt);
-        add_worktree(H, &dir, &wt, "team/fresh", &base).await
+        add_worktree(H, &dir, &wt, "team/fresh", &base)
+            .await
             .expect("worktree от свежеинициализированной базы");
         // Повторный вызов ничего не ломает.
         assert_eq!(ensure_repo(H, &dir).await.unwrap(), base);
@@ -246,10 +355,17 @@ mod tests {
             .into_owned();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(std::path::Path::new(&dir).join("старое.txt"), "лежало тут\n").unwrap();
+        std::fs::write(
+            std::path::Path::new(&dir).join("старое.txt"),
+            "лежало тут\n",
+        )
+        .unwrap();
         ensure_repo(H, &dir).await.unwrap();
         // Файлы, что лежали в каталоге, вошли в первый коммит, дерево чистое.
-        assert!(!dirty(H, &dir).await, "существующие файлы должны быть закоммичены");
+        assert!(
+            !dirty(H, &dir).await,
+            "существующие файлы должны быть закоммичены"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -265,10 +381,17 @@ mod tests {
 
         assert_eq!(ahead(H, &r, "main", "team/auth").await, 1);
         assert!(rebased(H, &r, "main", "team/auth").await);
-        assert_eq!(changed_files(H, &r, "main", "team/auth").await, vec!["auth.txt".to_string()]);
+        assert_eq!(
+            changed_files(H, &r, "main", "team/auth").await,
+            vec!["auth.txt".to_string()]
+        );
 
         ff_advance(H, &r, "main", "team/auth").await.unwrap();
-        assert_eq!(ahead(H, &r, "main", "team/auth").await, 0, "после вливания рука не впереди");
+        assert_eq!(
+            ahead(H, &r, "main", "team/auth").await,
+            0,
+            "после вливания рука не впереди"
+        );
 
         let _ = std::fs::remove_dir_all(&wt);
         let _ = std::fs::remove_dir_all(&r);
@@ -279,19 +402,27 @@ mod tests {
         let r = repo("conflict").await;
         let wt = sibling(&r, "wt-conf");
         let _ = std::fs::remove_dir_all(&wt);
-        add_worktree(H, &r, &wt, "team/billing", "main").await.unwrap();
+        add_worktree(H, &r, &wt, "team/billing", "main")
+            .await
+            .unwrap();
 
         commit(&wt, "a.txt", "платёжка\n", "поле в типах").await;
         commit(&r, "a.txt", "auth\n", "переименование в типах").await;
 
-        assert!(!rebased(H, &r, "main", "team/billing").await, "main уехал вперёд");
+        assert!(
+            !rebased(H, &r, "main", "team/billing").await,
+            "main уехал вперёд"
+        );
         let sha_before = head_sha(H, &wt).await.unwrap();
         match try_rebase(H, &wt, "main").await.unwrap() {
             Rebase::Conflict(files) => assert_eq!(files, vec!["a.txt".to_string()]),
             other => panic!("ожидал конфликт, а вышло {other:?}"),
         }
         assert_eq!(head_sha(H, &wt).await.unwrap(), sha_before);
-        assert!(!dirty(H, &wt).await, "после отката не должно остаться конфликтных меток");
+        assert!(
+            !dirty(H, &wt).await,
+            "после отката не должно остаться конфликтных меток"
+        );
 
         let _ = std::fs::remove_dir_all(&wt);
         let _ = std::fs::remove_dir_all(&r);
@@ -309,7 +440,10 @@ mod tests {
 
         assert!(!rebased(H, &r, "main", "team/docs").await);
         assert_eq!(try_rebase(H, &wt, "main").await.unwrap(), Rebase::Clean);
-        assert!(rebased(H, &r, "main", "team/docs").await, "после ребейза рука на свежей базе");
+        assert!(
+            rebased(H, &r, "main", "team/docs").await,
+            "после ребейза рука на свежей базе"
+        );
 
         ff_advance(H, &r, "main", "team/docs").await.unwrap();
         assert_eq!(ahead(H, &r, "main", "team/docs").await, 0);

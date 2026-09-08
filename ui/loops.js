@@ -30,13 +30,26 @@
         if (v == null || v === false) continue;
         if (k === 'text') n.textContent = v;
         else if (k === 'html') n.innerHTML = v;
-        else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+        else if (k.startsWith('on')) n.addEventListener(k.slice(2), async e => {
+          if (n.getAttribute('aria-busy') === 'true') return;
+          try {
+            const result = v(e);
+            if (result && typeof result.then === 'function') { n.setAttribute('aria-busy', 'true'); await result; }
+          } catch (error) { note(String(error), true); }
+          finally { n.removeAttribute('aria-busy'); }
+        });
         else n.setAttribute(k, v === true ? '' : v);
       }
     } else if (attrs != null) {
       kids.unshift(attrs);
     }
     for (const kid of kids.flat(Infinity)) if (kid) n.appendChild(kid);
+    if (name === 'div' && isProps && typeof attrs.onclick === 'function') {
+      n.setAttribute('role', 'button'); n.setAttribute('tabindex', '0');
+      n.addEventListener('keydown', e => {
+        if (e.target === n && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); n.click(); }
+      });
+    }
     return n;
   };
 
@@ -50,6 +63,19 @@
    * Иначе каждое нажатие клавиши уезжало бы на диск и обратно, а поле ввода
    * дёргалось бы на каждом снимке от демона. */
   let draft = null;
+  let pendingDraft = null, dismissDialog = null, message = null;
+  window.jarvisModuleBack = window.jarvisModuleBack || {};
+  window.jarvisModuleBack.loops = () => {
+    if (dismissDialog) { dismissDialog(); return true; }
+    if (!open) return false;
+    if (open.screen === 'new') {
+      pendingDraft = draft; draft = null; open = null;
+    } else if (['iteration', 'builder'].includes(open.screen)) {
+      if (draft) pendingDraft = draft;
+      draft = null; open = { id: open.id, screen: 'console' };
+    } else open = null;
+    render(); return true;
+  };
 
   const byId = (id) => state.loops.find((l) => l.id === id);
 
@@ -86,17 +112,25 @@
   /* ---------- обмен с демоном ---------- */
 
   async function pull() {
-    const res = await window.jarvis.loopsGet();
-    if (res && res.ok) { state = res; render(); }
+    try {
+      const res = await window.jarvis.loopsGet();
+      if (!res?.ok) throw new Error(res?.error || 'Не удалось загрузить автоматизацию.');
+      state = res; render(); return true;
+    } catch (error) { note(String(error), true); return false; }
   }
 
   function apply(res) {
-    if (res && res.ok) { state = res; render(); }
+    if (res && res.ok) {
+      state = res;
+      // Live status must not destroy an unfinished form or the input caret.
+      if (!(draft || root?.contains(document.activeElement) && document.activeElement?.matches('input,textarea,select,[role="combobox"]') || root?.querySelector('[role="combobox"][aria-expanded="true"]'))) render();
+    }
   }
 
   /* Ошибку показываем на месте, а не глотаем: цикл не запустился — человек
    * обязан узнать почему, иначе он будет ждать результата всю ночь. */
   function note(msg, bad) {
+    message = msg ? { text: msg, bad: !!bad } : null;
     const bar = root && root.querySelector('.lp-note');
     if (!bar) return;
     bar.textContent = msg || '';
@@ -105,11 +139,12 @@
   }
 
   async function call(fn, okMsg) {
-    const res = await fn();
-    if (res && res.ok === false) { note(res.error || 'не вышло', true); return false; }
-    if (okMsg) note(okMsg, false);
-    await pull();
-    return true;
+    try {
+      const res = await fn();
+      if (!res || res.ok === false) throw new Error(res?.error || 'Не удалось выполнить действие.');
+      await pull();
+      note(okMsg || '', false); return true;
+    } catch (error) { note(String(error), true); return false; }
   }
 
   /* ---------- список циклов слева ---------- */
@@ -159,6 +194,9 @@
    * писало пустой цикл на диск, и передумавший на первом же поле человек
    * оставлял в списке «без имени» навсегда. */
   async function createFrom(template) {
+    if (!template && pendingDraft && !pendingDraft.id) {
+      draft = pendingDraft; pendingDraft = null; open = { id: null, screen: 'new' }; render(); return;
+    }
     const res = await window.jarvis.loopsDraft(template || null);
     if (!res || !res.ok) { note((res && res.error) || 'не удалось собрать заготовку', true); return; }
     draft = res.item;
@@ -243,12 +281,25 @@
    * приезжает сам.
    */
   function openCatalog(slot, onPick) {
+    const previousFocus = document.activeElement;
     const overlay = el('div.lp-shade');
     const close = () => {
       overlay.remove();
+      if (dismissDialog === close) dismissDialog = null;
       if (document.removeEventListener) document.removeEventListener('keydown', onKey);
+      if (previousFocus?.isConnected) previousFocus.focus();
     };
+    dismissDialog = close;
     const onKey = (e) => { if (e.key === 'Escape') close(); };
+    overlay.addEventListener('keydown', e => {
+      if (e.key !== 'Tab') return;
+      const items = [...overlay.querySelectorAll('button:not(:disabled),input,select,textarea,[tabindex="0"]')]
+        .filter(item => !item.disabled && item.getAttribute('tabindex') !== '-1' && !item.closest('[hidden],[aria-hidden="true"]'));
+      if (!items.length) return;
+      const index = items.indexOf(document.activeElement);
+      if (e.shiftKey && index <= 0) { e.preventDefault(); items[items.length - 1].focus(); }
+      else if (!e.shiftKey && index === items.length - 1) { e.preventDefault(); items[0].focus(); }
+    });
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
     if (document.addEventListener) document.addEventListener('keydown', onKey);
 
@@ -263,6 +314,7 @@
       search, chips, grid,
     );
     overlay.appendChild(box);
+    box.setAttribute('role', 'dialog'); box.setAttribute('aria-modal', 'true'); box.setAttribute('aria-label', slot === 'source' ? 'Источники задач' : 'Гейты-проверки');
     root.appendChild(overlay);
 
     let activeCat = null; // раздел; null — все
@@ -413,7 +465,7 @@
   }
 
   function builder(l, isNew) {
-    const d = draft || (draft = JSON.parse(JSON.stringify(l)));
+    const d = draft || (draft = JSON.parse(JSON.stringify(pendingDraft?.id === l.id ? pendingDraft : l)));
     const step = (n, title, sub, ...body) =>
       el('section.lp-step',
         el('div.lp-step-h', el('span.lp-step-n', { text: String(n) }), el('span.lp-step-t', { text: title }),
@@ -658,7 +710,7 @@
             })
           : el('button.j-btn.lp-ghost', {
               text: 'Удалить цикл',
-              onclick: async () => { draft = null; await call(() => window.jarvis.loopsRemove(l.id)); open = null; render(); },
+              onclick: async () => { if (await call(() => window.jarvis.loopsRemove(l.id))) { draft = null; open = null; render(); } },
             }),
       ),
     );
@@ -906,6 +958,7 @@
     }
 
     root.appendChild(el('div.lp-wrap', side, el('main.lp-main', note_, body)));
+    if (message) note(message.text, message.bad);
   }
 
   /* ---------- вход ---------- */

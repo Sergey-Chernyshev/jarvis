@@ -54,9 +54,15 @@ pub fn decode(gz: &[u8]) -> Result<Vec<f32>, String> {
     let mut wav = Vec::new();
     dec.read_to_end(&mut wav).map_err(|e| format!("gunzip: {e}"))?;
     let r = hound::WavReader::new(std::io::Cursor::new(wav)).map_err(|e| format!("wav reader: {e}"))?;
-    Ok(r.into_samples::<i16>()
-        .map(|s| s.unwrap_or(0) as f32 / i16::MAX as f32)
-        .collect())
+    let spec = r.spec();
+    if spec.channels != 1 || spec.sample_rate != RATE || spec.bits_per_sample != 16
+        || spec.sample_format != hound::SampleFormat::Int {
+        return Err("Аудио диктовки должно быть моно PCM 16 бит, 16000 Гц".into());
+    }
+    r.into_samples::<i16>()
+        .map(|sample| sample.map(|sample| sample as f32 / i16::MAX as f32)
+            .map_err(|error| format!("Повреждённое аудио диктовки: {error}")))
+        .collect()
 }
 
 /// Сохранить аудио диктовки по id (best-effort). Чистит выпавшее из окна `RETAIN`.
@@ -127,6 +133,31 @@ mod tests {
     #[test]
     fn decode_garbage_errors_not_panics() {
         assert!(decode(b"not a gzip").is_err(), "битый ввод — Err, не паника");
+    }
+
+    fn gzip_bytes(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn truncated_sample_data_is_an_error_instead_of_synthetic_silence() {
+        let encoded = encode(&[0.1, 0.2, 0.3]).unwrap();
+        let mut wav = Vec::new();
+        flate2::read::GzDecoder::new(encoded.as_slice()).read_to_end(&mut wav).unwrap();
+        wav.truncate(wav.len() - 2); // Preserve the declared sample count/header.
+        assert!(decode(&gzip_bytes(&wav)).is_err());
+    }
+
+    #[test]
+    fn wrong_audio_rate_cannot_be_silently_reinterpreted() {
+        let encoded = encode(&[0.1, 0.2]).unwrap();
+        let mut wav = Vec::new();
+        flate2::read::GzDecoder::new(encoded.as_slice()).read_to_end(&mut wav).unwrap();
+        // Standard PCM fmt chunk: alter its sample rate while keeping valid WAV.
+        wav[24..28].copy_from_slice(&48000u32.to_le_bytes());
+        assert!(decode(&gzip_bytes(&wav)).is_err());
     }
 
     #[test]

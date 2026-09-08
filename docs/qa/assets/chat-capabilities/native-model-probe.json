@@ -1,0 +1,23 @@
+{
+  "binary": "/Applications/ChatGPT.app/Contents/Resources/codex",
+  "ok": true,
+  "draftRefused": true,
+  "requests": [
+    {
+      "path": "/v1/responses",
+      "model": "gpt-5.6-sol",
+      "tools": [],
+      "functionOutputs": []
+    },
+    {
+      "path": "/v1/responses",
+      "model": "gpt-5.6-sol",
+      "tools": [],
+      "functionOutputs": []
+    }
+  ],
+  "initialScreen": "╭─────────────────────────────────────────────╮\n│ >_ OpenAI Codex (v0.153.1)                  │\n│                                             │\n│ model:     gpt-5.6-terra   /model to change │\n│ directory: /tmp/jq-32nq03oz/work            │\n╰─────────────────────────────────────────────╯\n\n  Tip: New Build faster with the Desktop app. Run 'codex app' or visit https://chatgpt.com/codex?app-landing-page=true\n\n\n› Ask Codex to do anything\n\n  gpt-5.6-terra default · /tmp/jq-32nq03oz/work\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+  "selectedScreen": "╭─────────────────────────────────────────────╮\n│ >_ OpenAI Codex (v0.153.1)                  │\n│                                             │\n│ model:     gpt-5.6-terra   /model to change │\n│ directory: /tmp/jq-32nq03oz/work            │\n╰─────────────────────────────────────────────╯\n\n  Tip: New Build faster with the Desktop app. Run 'codex app' or visit https://chatgpt.com/codex?app-landing-page=true\n\n• Model changed to gpt-5.6-sol high\n\n\n› Ask Codex to do anything\n\n  gpt-5.6-sol high · /tmp/jq-32nq03oz/work\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+  "finalScreen": "╭─────────────────────────────────────────────╮\n│ >_ OpenAI Codex (v0.153.1)                  │\n│                                             │\n│ model:     gpt-5.6-terra   /model to change │\n│ directory: /tmp/jq-32nq03oz/work            │\n╰─────────────────────────────────────────────╯\n\n  Tip: New Build faster with the Desktop app. Run 'codex app' or visit https://chatgpt.com/codex?app-landing-page=true\n\n• Model changed to gpt-5.6-sol high\n\n\n› Synthetic local model verification\n\n\n• Synthetic answers accepted.\n\n\n› Ask Codex to do anything\n\n  gpt-5.6-sol high · /tmp/jq-32nq03oz/work\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+  "probeOutput": "\nrunning 1 test\ntest ipc::model_picker::tests::isolated_codex_model_probe ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1155 filtered out; finished in 1.30s\n\n"
+}

@@ -1,0 +1,83 @@
+{
+  "scope": "Real Chromium rendering and browser animations; synthetic native IPC and synthetic voice payloads. Full-screen Spaces are tested separately in AppKit.",
+  "checks": [
+    "enter waits for actual native resize completion",
+    "listening bars visibly animate rather than remaining a static icon",
+    "listening to processing reuses visible shell with content crossfade",
+    "pill grows continuously into result; shell stays opaque; recovery copy still works",
+    "hover keeps compact rounded shadow and fully transparent canvas gutters",
+    "rapid updates and restart during exit cannot duplicate or remove current HUD",
+    "native hide occurs after exit animation and DOM removal",
+    "reduced motion settles immediately and terminal Close does not abort again",
+    "every outer-edge screenshot pixel has alpha zero, including hovered result"
+  ],
+  "errors": [],
+  "midpoint": {
+    "width": 372.59375,
+    "from": 225,
+    "to": 392,
+    "opacity": "1"
+  },
+  "surfaces": {
+    "backgrounds": [
+      "rgba(0, 0, 0, 0)",
+      "rgba(0, 0, 0, 0)",
+      "rgba(0, 0, 0, 0)"
+    ],
+    "shadow": "rgba(0, 0, 0, 0.333) 0px 6px 16px -6px, rgba(0, 0, 0, 0.133) 0px 1px 3px 0px, rgba(164, 201, 181, 0.267) 0px 0px 0px 1px",
+    "backdrop": "none",
+    "gutter": [
+      "24px",
+      "24px",
+      "28px",
+      "24px"
+    ]
+  },
+  "wave": {
+    "before": "matrix(1, 0, 0, 0.554178, 0, 0)",
+    "after": "matrix(1, 0, 0, 0.658076, 0, 0)",
+    "name": "hud-listening"
+  },
+  "alpha": [
+    {
+      "image": "empty.png",
+      "maxCanvasEdgeAlpha": 0,
+      "paintedBounds": [
+        10,
+        362,
+        430,
+        472
+      ]
+    },
+    {
+      "image": "listening.png",
+      "maxCanvasEdgeAlpha": 0,
+      "paintedBounds": [
+        96,
+        396,
+        345,
+        472
+      ]
+    },
+    {
+      "image": "result-hover.png",
+      "maxCanvasEdgeAlpha": 0,
+      "paintedBounds": [
+        9,
+        297,
+        431,
+        473
+      ]
+    },
+    {
+      "image": "result-morph.png",
+      "maxCanvasEdgeAlpha": 0,
+      "paintedBounds": [
+        20,
+        310,
+        420,
+        472
+      ]
+    }
+  ]
+}

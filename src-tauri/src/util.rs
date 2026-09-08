@@ -26,6 +26,13 @@ pub fn codex_dir() -> std::path::PathBuf {
     }
 }
 
+/// Account-sensitive operations must fail when the configured instance is
+/// missing/disabled instead of silently using another account from the process.
+pub fn selected_codex_dir() -> Result<std::path::PathBuf, String> {
+    let registry = crate::agent_instances::load_registry(&jarvis_dir())?;
+    Ok(registry.resolve(None)?.canonical_home.clone())
+}
+
 pub fn home_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()))
 }

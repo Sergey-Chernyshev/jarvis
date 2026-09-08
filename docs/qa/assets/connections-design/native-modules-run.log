@@ -1,0 +1,164 @@
+Native smoke PID 43675; profile /var/folders/sz/1yzw2zzs64x5kcr0c9hqhnr40000gq/T/jarvis-native-smoke-O9svFO
+{
+  "profile": "/var/folders/sz/1yzw2zzs64x5kcr0c9hqhnr40000gq/T/jarvis-native-smoke-O9svFO",
+  "report": "/var/folders/sz/1yzw2zzs64x5kcr0c9hqhnr40000gq/T/jarvis-native-smoke-O9svFO/report.json",
+  "ok": true,
+  "steps": [
+    {
+      "name": "Root is a usable list of nine modules",
+      "ok": true,
+      "elapsedMs": 144
+    },
+    {
+      "name": "Native input-device discovery responds without microphone capture",
+      "ok": true,
+      "elapsedMs": 58
+    },
+    {
+      "name": "Root search and Escape restore navigation state",
+      "ok": true,
+      "elapsedMs": 62
+    },
+    {
+      "name": "Module list opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 95.00000000000006
+    },
+    {
+      "name": "Module history opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 233.99999999999991
+    },
+    {
+      "name": "Module machines opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 287
+    },
+    {
+      "name": "Module voicehist opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 242
+    },
+    {
+      "name": "Module meetings opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 239
+    },
+    {
+      "name": "Module loops opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 248
+    },
+    {
+      "name": "Module bundlePane opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 234
+    },
+    {
+      "name": "Module stats opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 246
+    },
+    {
+      "name": "Module settings opens, lays out, and goes back",
+      "ok": true,
+      "elapsedMs": 303
+    },
+    {
+      "name": "Machines shortcut and Escape preserve the previous Settings pane",
+      "ok": true,
+      "elapsedMs": 172
+    },
+    {
+      "name": "Settings general settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 292
+    },
+    {
+      "name": "Settings look settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 282
+    },
+    {
+      "name": "Settings keys settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 284
+    },
+    {
+      "name": "Settings notify settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 291.00000000000045
+    },
+    {
+      "name": "Settings agents settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 277.00000000000045
+    },
+    {
+      "name": "Settings launch settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 282
+    },
+    {
+      "name": "Settings integration settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 283.9999999999991
+    },
+    {
+      "name": "Settings stt settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 284
+    },
+    {
+      "name": "Settings voice settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 283.0000000000009
+    },
+    {
+      "name": "Settings wake settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 279.9999999999991
+    },
+    {
+      "name": "Settings awake settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 285
+    },
+    {
+      "name": "Settings service settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 287
+    },
+    {
+      "name": "Settings about settles and remains navigable",
+      "ok": true,
+      "elapsedMs": 278
+    },
+    {
+      "name": "A settings toggle persists through actual IPC and reopening",
+      "ok": true,
+      "elapsedMs": 48
+    },
+    {
+      "name": "Missing speech model reports its real backend failure",
+      "ok": true,
+      "elapsedMs": 321
+    },
+    {
+      "name": "Settings search opens the actual parameter and scopes errors",
+      "ok": true,
+      "elapsedMs": 286
+    },
+    {
+      "name": "Light appearance and root restore",
+      "ok": true,
+      "elapsedMs": 194.0000000000009
+    }
+  ],
+  "errors": [],
+  "failure": null,
+  "outcome": {
+    "code": 0,
+    "signal": null
+  }
+}

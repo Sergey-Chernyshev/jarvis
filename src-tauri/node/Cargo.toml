@@ -9,8 +9,9 @@ rust-version = "1.77.2"
 # Отдельный крейт, а не [[bin]] в src-tauri, по прозаической причине: cargo
 # резолвит зависимости на ПАКЕТ, а не на цель. Внутри src-tauri узел тянул бы
 # за собой tauri, objc2 и core-graphics — и не собрался бы на голой Linux-VPS,
-# ради которой всё и затевалось. Здесь зависимостей ровно три.
+# ради которой всё и затевалось. libc нужен только для flock сокета узла.
 [dependencies]
 axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "process", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "process", "time", "sync", "io-util"] }
 serde_json = "1"
+libc = "0.2"

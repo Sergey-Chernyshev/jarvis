@@ -1,0 +1,15 @@
+{
+  "pid": 31707,
+  "app": "/Users/se.chernyshev/jarvis/src-tauri/target/release/bundle/macos/Jarvis.app",
+  "sha256": "e041f0025cc5acb31556d4c8b3df1a4b29152ab1a53dcbb0bcce17ee383db9ec",
+  "sessionCount": 120,
+  "currentChat": {
+    "id": "codex:codex-v1-97dd919f2905aa1e:01a06e5a-e84b-7d72-98d7-f33e6ee938d2",
+    "providerSessionId": "01a06e5a-e84b-7d72-98d7-f33e6ee938d2",
+    "instanceId": "codex-v1-97dd919f2905aa1e",
+    "instanceLabel": "codex-personal",
+    "controlMode": "external",
+    "status": "waiting"
+  },
+  "verifiedAt": "2026-09-05T17:46:11+0300"
+}

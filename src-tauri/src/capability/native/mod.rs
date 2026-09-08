@@ -10,6 +10,7 @@ mod chats;
 mod control;
 mod entities_cap;
 mod metrics;
+mod meetings_cap;
 mod notifications;
 mod sessions;
 mod settings_cap;
@@ -22,6 +23,7 @@ pub fn register_all(reg: &mut DaemonRegistry) {
     // фаза 2 — read
     sessions::register(reg);
     metrics::register(reg);
+    meetings_cap::register(reg);
     notifications::register(reg);
     tasks::register(reg);
     settings_cap::register(reg);

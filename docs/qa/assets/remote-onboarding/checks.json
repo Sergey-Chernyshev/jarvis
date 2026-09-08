@@ -1,0 +1,16 @@
+{
+  "checks": [
+    "ssh-access-dark",
+    "teleport-machine-dark",
+    "teleport-ready-dark",
+    "teleport-ready-compact",
+    "teleport-installed-compact",
+    "open-chat-selects-installed-machine",
+    "teleport-login-dark",
+    "SSO-polls-until-authenticated-without-SSH-password",
+    "exact-proxy-cluster-node-no-secrets",
+    "no-overflow-or-browser-errors",
+    "install-completion-renders-connected-machine"
+  ],
+  "errors": []
+}

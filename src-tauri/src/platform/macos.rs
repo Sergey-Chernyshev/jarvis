@@ -10,9 +10,30 @@ use objc2::{class, msg_send};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use tauri::{Emitter, Manager, WebviewWindow};
 
+#[path = "macos_toast.rs"]
+mod toast_panel;
+
+/// Only call on AppKit's main thread. Tauri retains a hidden carrier window;
+/// notification presentation belongs to a genuine nonactivating NSPanel.
+pub unsafe fn toast_native_window(carrier: *mut AnyObject) -> Result<*mut AnyObject, String> {
+    let main: bool = msg_send![class!(NSThread), isMainThread];
+    if !main { return Err("notification panel requires the AppKit thread".into()); }
+    toast_panel::native_window(carrier)
+}
+
+pub fn prepare_toast(win: &WebviewWindow) {
+    on_main(win, |carrier| unsafe {
+        if let Err(error) = toast_native_window(carrier) {
+            crate::log::line(&format!("[toast] native panel initialization failed: {error}"));
+        }
+    });
+}
+
 const NS_SCREEN_SAVER_WINDOW_LEVEL: isize = 1000;
 /// NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary
 const COLLECTION_BEHAVIOR: usize = (1 << 0) | (1 << 8);
+const CAN_JOIN_ALL_APPLICATIONS: usize = 1 << 18;
+const IGNORES_WINDOW_CYCLE: usize = 1 << 6;
 /// Поведение обычного окна: Managed | ParticipatesInCycle | FullScreenPrimary.
 /// FullScreenPrimary обязателен — без него AppKit не пускает окно в фуллскрин
 /// (зелёная кнопка и ⌃⌘F молча не работают).
@@ -51,6 +72,39 @@ unsafe impl Encode for CGRect {
     const ENCODING: Encoding = Encoding::Struct("CGRect", &[CGPoint::ENCODING, CGSize::ENCODING]);
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct OperatingSystemVersion {
+    major: isize,
+    minor: isize,
+    patch: isize,
+}
+unsafe impl Encode for OperatingSystemVersion {
+    const ENCODING: Encoding =
+        Encoding::Struct("?", &[isize::ENCODING, isize::ENCODING, isize::ENCODING]);
+}
+
+fn overlay_collection_behavior(major: isize) -> usize {
+    COLLECTION_BEHAVIOR
+        | IGNORES_WINDOW_CYCLE
+        | if major >= 13 {
+            CAN_JOIN_ALL_APPLICATIONS
+        } else {
+            0
+        }
+}
+
+unsafe fn configure_overlay(window: *mut AnyObject) {
+    let process: *mut AnyObject = msg_send![class!(NSProcessInfo), processInfo];
+    let version: OperatingSystemVersion = msg_send![process, operatingSystemVersion];
+    // CanJoinAllSpaces alone does not join other applications' Stage Manager
+    // sets/full-screen spaces. The additional flag is available since macOS 13.
+    let _: () = msg_send![window, setLevel: NS_SCREEN_SAVER_WINDOW_LEVEL];
+    let _: () =
+        msg_send![window, setCollectionBehavior: overlay_collection_behavior(version.major)];
+    let _: () = msg_send![window, setHidesOnDeactivate: false];
+}
+
 /// Все вызовы AppKit — строго на главном потоке.
 fn on_main(win: &WebviewWindow, f: impl FnOnce(*mut AnyObject) + Send + 'static) {
     let w = win.clone();
@@ -64,9 +118,27 @@ fn on_main(win: &WebviewWindow, f: impl FnOnce(*mut AnyObject) + Send + 'static)
 /// Поверх всего, на всех Spaces, над фуллскрином — но без кражи фокуса при показе.
 pub fn float_above_everything(win: &WebviewWindow) {
     on_main(win, |w| unsafe {
-        let _: () = msg_send![w, setLevel: NS_SCREEN_SAVER_WINDOW_LEVEL];
-        let _: () = msg_send![w, setCollectionBehavior: COLLECTION_BEHAVIOR];
-        let _: () = msg_send![w, setHidesOnDeactivate: false];
+        configure_overlay(w);
+    });
+}
+
+/// Match the native transparent backing to the single rounded quick surface.
+/// The workspace uses a normal decorated, opaque NSWindow instead.
+pub fn clip_panel_surface(win: &WebviewWindow, radius: f64) {
+    on_main(win, move |w| unsafe {
+        let _: () = msg_send![w, setOpaque: false];
+        let clear: *mut AnyObject = msg_send![class!(NSColor), clearColor];
+        let _: () = msg_send![w, setBackgroundColor: clear];
+        let view: *mut AnyObject = msg_send![w, contentView];
+        if !view.is_null() {
+            let _: () = msg_send![view, setWantsLayer: true];
+            let layer: *mut AnyObject = msg_send![view, layer];
+            if !layer.is_null() {
+                let _: () = msg_send![layer, setCornerRadius: radius];
+                let _: () = msg_send![layer, setMasksToBounds: true];
+            }
+        }
+        let _: () = msg_send![w, invalidateShadow];
     });
 }
 
@@ -103,6 +175,10 @@ pub fn show_inactive(win: &WebviewWindow) {
 /// Хит-тест — по полному frame; мимо всех экранов → mainScreen.
 unsafe fn work_area_under_cursor() -> Option<CGRect> {
     let mouse: CGPoint = msg_send![class!(NSEvent), mouseLocation];
+    work_area_at(mouse)
+}
+
+unsafe fn work_area_at(point: CGPoint) -> Option<CGRect> {
     let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
     if screens.is_null() {
         return None;
@@ -112,10 +188,10 @@ unsafe fn work_area_under_cursor() -> Option<CGRect> {
     for i in 0..count {
         let scr: *mut AnyObject = msg_send![screens, objectAtIndex: i];
         let f: CGRect = msg_send![scr, frame];
-        if mouse.x >= f.origin.x
-            && mouse.x < f.origin.x + f.size.width
-            && mouse.y >= f.origin.y
-            && mouse.y < f.origin.y + f.size.height
+        if point.x >= f.origin.x
+            && point.x < f.origin.x + f.size.width
+            && point.y >= f.origin.y
+            && point.y < f.origin.y + f.size.height
         {
             hit = scr;
             break;
@@ -130,12 +206,87 @@ unsafe fn work_area_under_cursor() -> Option<CGRect> {
     Some(msg_send![hit, visibleFrame])
 }
 
+/// Keyboard dictation follows the foreground editor, even if the pointer was
+/// left on a different display. Read window metadata only (no screen capture,
+/// titles or AX text); fall back to the pointer when no normal window exists.
+unsafe fn foreground_window_center() -> Option<CGPoint> {
+    use core_foundation::base::TCFType;
+    use core_foundation::string::CFString;
+    use core_graphics::window::{
+        copy_window_info, kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly,
+    };
+
+    let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+    let frontmost: *mut AnyObject = msg_send![workspace, frontmostApplication];
+    if frontmost.is_null() {
+        return None;
+    }
+    let pid: i32 = msg_send![frontmost, processIdentifier];
+    let windows = copy_window_info(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        0,
+    )?;
+    let array = windows.as_concrete_TypeRef() as *mut AnyObject;
+    let count: usize = msg_send![array, count];
+    let get = |dict: *mut AnyObject, key: &str| -> *mut AnyObject {
+        let key = CFString::new(key);
+        msg_send![dict, objectForKey: key.as_concrete_TypeRef() as *mut AnyObject]
+    };
+    for i in 0..count {
+        let info: *mut AnyObject = msg_send![array, objectAtIndex: i];
+        let owner = get(info, "kCGWindowOwnerPID");
+        let layer = get(info, "kCGWindowLayer");
+        if owner.is_null() || layer.is_null() {
+            continue;
+        }
+        let owner_pid: i32 = msg_send![owner, intValue];
+        let layer: i32 = msg_send![layer, intValue];
+        if owner_pid != pid || layer != 0 {
+            continue;
+        }
+        let bounds = get(info, "kCGWindowBounds");
+        if bounds.is_null() {
+            continue;
+        }
+        let number = |key: &str| -> Option<f64> {
+            let v = get(bounds, key);
+            if v.is_null() {
+                None
+            } else {
+                Some(msg_send![v, doubleValue])
+            }
+        };
+        let x = number("X")?;
+        let y = number("Y")?;
+        let width = number("Width")?;
+        let height = number("Height")?;
+        if width <= 1.0 || height <= 1.0 {
+            continue;
+        }
+        let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
+        let screen_count: usize = msg_send![screens, count];
+        if screen_count == 0 {
+            return None;
+        }
+        let primary: *mut AnyObject = msg_send![screens, objectAtIndex: 0usize];
+        let primary_frame: CGRect = msg_send![primary, frame];
+        // CGWindow bounds use global top-left coordinates; AppKit is bottom-left.
+        return Some(CGPoint {
+            x: x + width / 2.0,
+            y: primary_frame.size.height - y - height / 2.0,
+        });
+    }
+    None
+}
+
 /// Поставить окно (w×h поинтов) на дисплей с курсором.
 /// `corner` — правый верхний угол с отступом 12; иначе центр, ~⅓ сверху
 /// (как Raycast). Геометрия повторяет positionPanel Electron-версии.
 pub fn place_panel(win: &WebviewWindow, w: f64, h: f64, corner: bool) {
     on_main(win, move |window| unsafe {
-        let Some(vf) = work_area_under_cursor() else { return };
+        let Some(vf) = work_area_under_cursor() else {
+            return;
+        };
         // Адаптивный размер: на большом экране панель крупнее (сохраняя пропорции).
         // База w×h — для ноутбука; масштаб по высоте рабочей области, кламп 1.0..1.7,
         // плюс не вылезать за ~90% экрана. На MacBook фактор ≈1.0 (820×620).
@@ -156,7 +307,10 @@ pub fn place_panel(win: &WebviewWindow, w: f64, h: f64, corner: bool) {
         };
         let frame = CGRect {
             origin: CGPoint { x, y: y_bottom },
-            size: CGSize { width: pw, height: ph },
+            size: CGSize {
+                width: pw,
+                height: ph,
+            },
         };
         let _: () = msg_send![window, setFrame: frame, display: false];
     });
@@ -177,11 +331,13 @@ pub fn poll_toast_hover(win: &WebviewWindow) {
     let w = win.clone();
     let _ = win.run_on_main_thread(move || unsafe {
         let Ok(ptr) = w.ns_window() else { return };
-        let window = ptr as *mut AnyObject;
+        let Ok(window) = toast_native_window(ptr as *mut AnyObject) else { return };
         let frame: CGRect = msg_send![window, frame];
         let m: CGPoint = msg_send![class!(NSEvent), mouseLocation];
+        let visible: bool = msg_send![window, isVisible];
         // окно схлопнуто (карточек нет) — ховер не важен, гасим залипший флаг
-        let over = frame.size.height >= 4.0
+        let over = visible
+            && frame.size.height >= 4.0
             && m.x >= frame.origin.x
             && m.x < frame.origin.x + frame.size.width
             && m.y >= frame.origin.y
@@ -192,7 +348,7 @@ pub fn poll_toast_hover(win: &WebviewWindow) {
         let yi = dom_y.round() as i32;
         let prev_over = OVER.swap(over, Ordering::SeqCst);
         let prev_y = LAST_Y.swap(yi, Ordering::SeqCst);
-        let moved = over && (prev_y - yi).abs() > 3;
+        let moved = over && prev_y.abs_diff(yi) > 3;
         if prev_over != over || moved {
             let payload = serde_json::json!({ "over": over, "x": rel_x, "y": dom_y });
             let _ = w.app_handle().emit_to("toast", "toast-hover", payload);
@@ -200,19 +356,51 @@ pub fn poll_toast_hover(win: &WebviewWindow) {
     });
 }
 
-/// Стек тостов: по центру дисплея с курсором, низ прибит к краю (отступ 14).
-pub fn place_toast(win: &WebviewWindow, w: f64, h: f64) {
-    on_main(win, move |window| unsafe {
-        let Some(vf) = work_area_under_cursor() else { return };
-        let frame = CGRect {
-            origin: CGPoint {
-                x: vf.origin.x + ((vf.size.width - w) / 2.0).round(),
-                y: vf.origin.y + 14.0,
-            },
-            size: CGSize { width: w, height: h },
-        };
-        let _: () = msg_send![window, setFrame: frame, display: true];
-    });
+fn toast_frame(vf: CGRect, w: f64, h: f64) -> CGRect {
+    let width = w.min((vf.size.width - 28.0).max(1.0));
+    let height = h.min((vf.size.height - 28.0).max(1.0));
+    CGRect {
+        origin: CGPoint {
+            x: vf.origin.x + ((vf.size.width - width) / 2.0).round(),
+            y: vf.origin.y + 14.0,
+        },
+        size: CGSize { width, height },
+    }
+}
+
+/// Position and show in one AppKit operation. Space membership is configured
+/// once at NSPanel creation. Reassigning it or reordering an already-visible
+/// panel during a content resize can initiate a Space transition on macOS.
+pub async fn place_toast(win: &WebviewWindow, w: f64, h: f64) -> Result<(), String> {
+    if !w.is_finite() || !h.is_finite() || w <= 0.0 {
+        return Err("invalid notification dimensions".into());
+    }
+    let carrier = win.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    win.run_on_main_thread(move || unsafe {
+        if tx.is_closed() { return; }
+        let result = (|| {
+            let ptr = carrier.ns_window().map_err(|error| error.to_string())?;
+            let window = toast_native_window(ptr as *mut AnyObject)?;
+            if h <= 0.0 {
+                let _: () = msg_send![window, orderOut: std::ptr::null::<AnyObject>()];
+                return Ok(());
+            }
+            let area = foreground_window_center()
+                .and_then(|point| work_area_at(point))
+                .or_else(|| work_area_under_cursor());
+            let vf = area.ok_or("notification display is unavailable")?;
+            let visible: bool = msg_send![window, isVisible];
+            let _: () = msg_send![window, setFrame: toast_frame(vf, w, h), display: false];
+            if !visible { let _: () = msg_send![window, orderFrontRegardless]; }
+            Ok(())
+        })();
+        let _ = tx.send(result);
+    }).map_err(|error| error.to_string())?;
+    // The renderer starts its transition only after the native canvas is ready.
+    tokio::time::timeout(std::time::Duration::from_secs(3), rx).await
+        .map_err(|_| "notification presentation timed out".to_string())?
+        .map_err(|_| "notification presentation was cancelled".to_string())?
 }
 
 /* ===== аудио-шторка: пауза ЛЮБОГО чужого медиа на время озвучки =====
@@ -234,12 +422,16 @@ fn mra_run(args: &[&str]) -> Option<String> {
         .args(args)
         .output()
         .ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Играет ли сейчас какое-либо медиа (now-playing).
 pub fn media_is_playing() -> bool {
-    mra_run(&["get"]).map(|s| s.contains("\"playing\":true")).unwrap_or(false)
+    mra_run(&["get"])
+        .map(|s| s.contains("\"playing\":true"))
+        .unwrap_or(false)
 }
 /// Пауза текущего now-playing (любой источник).
 pub fn media_pause() {
@@ -342,4 +534,56 @@ fn detect_bluetooth_output() -> bool {
     }
     // Дефолтный выход не найден → fail-open
     true
+}
+
+#[cfg(test)]
+mod overlay_tests {
+    use super::*;
+
+    #[test]
+    fn overlay_joins_other_apps_without_conflicting_space_flags() {
+        for version in [11, 12, 13, 26] {
+            let behavior = overlay_collection_behavior(version);
+            assert_ne!(behavior & (1 << 0), 0, "all Spaces");
+            assert_eq!(
+                behavior & (1 << 1),
+                0,
+                "MoveToActiveSpace conflicts with all Spaces"
+            );
+            assert_eq!(
+                behavior & ((1 << 2) | (1 << 5) | (1 << 7)),
+                0,
+                "no document-window behavior"
+            );
+            assert_eq!(behavior & CAN_JOIN_ALL_APPLICATIONS != 0, version >= 13);
+        }
+    }
+
+    #[test]
+    fn toast_respects_secondary_display_origin_and_available_bounds() {
+        let area = CGRect {
+            origin: CGPoint {
+                x: -1920.0,
+                y: 160.0,
+            },
+            size: CGSize {
+                width: 1920.0,
+                height: 1040.0,
+            },
+        };
+        let frame = toast_frame(area, 440.0, 180.0);
+        assert_eq!(frame.origin.x, -1180.0);
+        assert_eq!(frame.origin.y, 174.0);
+        let small = CGRect {
+            size: CGSize {
+                width: 400.0,
+                height: 360.0,
+            },
+            ..area
+        };
+        let frame = toast_frame(small, 440.0, 480.0);
+        assert!(frame.origin.x >= small.origin.x);
+        assert!(frame.origin.x + frame.size.width <= small.origin.x + small.size.width);
+        assert!(frame.origin.y + frame.size.height <= small.origin.y + small.size.height);
+    }
 }

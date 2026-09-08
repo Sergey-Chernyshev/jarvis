@@ -18,13 +18,26 @@
       for (const [k, v] of Object.entries(attrs)) {
         if (v == null || v === false) continue;
         if (k === 'text') n.textContent = v;
-        else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+        else if (k.startsWith('on')) n.addEventListener(k.slice(2), async e => {
+          if (n.getAttribute('aria-busy') === 'true') return;
+          try {
+            const result = v(e);
+            if (result && typeof result.then === 'function') { n.setAttribute('aria-busy', 'true'); await result; }
+          } catch (error) { note(String(error), true); }
+          finally { n.removeAttribute('aria-busy'); }
+        });
         else n.setAttribute(k, v === true ? '' : v);
       }
     } else if (attrs != null) {
       kids.unshift(attrs);
     }
     for (const kid of kids.flat(Infinity)) if (kid) n.appendChild(kid);
+    if (name === 'div' && isProps && typeof attrs.onclick === 'function') {
+      n.setAttribute('role', 'button'); n.setAttribute('tabindex', '0');
+      n.addEventListener('keydown', e => {
+        if (e.target === n && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); n.click(); }
+      });
+    }
     return n;
   };
 
@@ -49,8 +62,15 @@
   let draftAuto = false;
   /* Какую связку смотрим; null — последнюю живую. */
   let openId = null;
+  let message = null, dismissDialog = null, draftLoading = false, draftError = null;
+  const additionalTasks = new Map();
+  window.jarvisModuleBack = window.jarvisModuleBack || {};
+  window.jarvisModuleBack.bundle = () => {
+    if (dismissDialog) { dismissDialog(); return true; }
+    return false; // Leaving the module retains its unfinished starter.
+  };
 
-  const fmtTokens = (n) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(Math.round(n) || 0));
+  const fmtTokens = (n) => Math.max(0, Math.round(Number(n) || 0)).toLocaleString('ru-RU');
   const fmtTime = (ms) => (ms ? new Date(ms).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' }) : '');
 
   const chats = (n) => {
@@ -63,10 +83,10 @@
   const STATE_WORD = {
     new: 'ждёт запуска',
     working: 'работает',
-    ready: 'готов к мержу',
+    ready: 'готов к слиянию',
     conflict: 'конфликт',
-    merged: 'влита',
-    failed: 'не поднялась',
+    merged: 'объединён',
+    failed: 'ошибка запуска',
   };
 
   /* ---------- обмен ---------- */
@@ -74,11 +94,13 @@
   async function pull() {
     try {
       const res = await window.jarvis.bundleGet();
-      if (res && res.ok) { state = res; render(); }
-    } catch (e) { /* старый бэкенд — экран скажет сам */ }
+      if (!res?.ok) throw new Error(res?.error || 'Не удалось загрузить команды агентов.');
+      state = res; render(); return true;
+    } catch (error) { note(String(error), true); return false; }
   }
 
   function note(msg, bad) {
+    message = msg ? { text: msg, bad: !!bad } : null;
     const bar = root && root.querySelector('.bd-note');
     if (!bar) return;
     bar.textContent = msg || '';
@@ -87,11 +109,11 @@
   }
 
   async function call(fn, okMsg) {
-    const res = await fn();
-    if (res && res.ok === false) { note(res.error || 'не вышло', true); return false; }
-    if (okMsg) note(okMsg, false);
-    await pull();
-    return true;
+    try {
+      const res = await fn();
+      if (!res || res.ok === false) throw new Error(res?.error || 'Не удалось выполнить действие.');
+      await pull(); note(okMsg || '', false); return true;
+    } catch (error) { note(String(error), true); return false; }
   }
 
   const current = () => {
@@ -121,9 +143,24 @@
    * путь по памяти, а не запрет его набрать.
    */
   function openDirPicker(machine, startPath, onPick) {
+    const previousFocus = document.activeElement;
+    let browseSequence = 0, closed = false, browsing = true;
     const overlay = el('div.lp-shade');
-    const close = () => overlay.remove();
+    const close = () => {
+      closed = true; overlay.remove(); if (dismissDialog === close) dismissDialog = null;
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+    dismissDialog = close;
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.addEventListener('keydown', e => {
+      if (e.key !== 'Tab') return;
+      const items = [...overlay.querySelectorAll('button:not(:disabled),input,[tabindex="0"]')]
+        .filter(item => !item.disabled && item.getAttribute('tabindex') !== '-1' && !item.closest('[hidden],[aria-hidden="true"]'));
+      const index = items.indexOf(document.activeElement);
+      if (!items.length) return;
+      if (e.shiftKey && index <= 0) { e.preventDefault(); items[items.length - 1].focus(); }
+      else if (!e.shiftKey && index === items.length - 1) { e.preventDefault(); items[0].focus(); }
+    });
 
     let path = startPath || '';
     const crumb = el('div.bd-dir-path', { text: '…' });
@@ -138,13 +175,14 @@
       el('div.lp-actions.bd-dir-act',
         el('button.j-btn.is-primary', {
           text: 'Выбрать эту директорию',
-          onclick: () => { onPick(path); close(); },
+          onclick: () => { if (!browsing) { onPick(path); close(); } },
         }),
         el('div.lp-withrow.bd-dir-new',
           newName,
           el('button.j-btn.lp-ghost', {
             text: '+ сюда',
             onclick: () => {
+              if (browsing) return;
               const name = newName.value.trim().replace(/\/+/g, '');
               if (!name) return;
               onPick(`${path}/${name}`);
@@ -156,13 +194,20 @@
       list,
     );
     overlay.appendChild(box);
+    box.setAttribute('role', 'dialog'); box.setAttribute('aria-modal', 'true'); box.setAttribute('aria-label', 'Где работать');
     root.appendChild(overlay);
+    newName.focus?.();
 
     const go = async (next) => {
+      const request = ++browseSequence;
+      browsing = true;
+      const choosing = [...(box.querySelectorAll?.('.bd-dir-act button') || [])];
+      for (const button of choosing) button.disabled = true;
       crumb.textContent = 'смотрю…';
       let res;
       try { res = await window.jarvis.bundleBrowse(machine, next || ''); }
-      catch (e) { res = null; }
+      catch (e) { res = { ok: false, error: String(e) }; }
+      if (closed || request !== browseSequence) return;
       if (!res || !res.ok) {
         crumb.textContent = (res && res.path) || next || '';
         list.textContent = '';
@@ -170,6 +215,8 @@
         return;
       }
       path = res.path;
+      browsing = false;
+      for (const button of choosing) button.disabled = false;
       crumb.textContent = path;
       list.textContent = '';
       if (res.parent && res.parent !== path) {
@@ -184,7 +231,7 @@
 
     // Известные проекты — прежде обзора: чаще всего нужный каталог уже там.
     window.jarvis.bundlePlaces(machine).then((res) => {
-      if (!res || !res.ok || !(res.known || []).length) return;
+      if (closed || !res || !res.ok || !(res.known || []).length) return;
       const known = el('div.bd-dir-known',
         el('div.lp-sub', { text: 'известные проекты' }),
         res.known.map((cwd) => el('button.lp-chip', {
@@ -217,13 +264,18 @@
     const startBtn = el('button.j-btn.is-primary', {
       text: 'Запустить 0 чатов',
       onclick: async () => {
+        if (!d.dir?.trim()) {
+          note(`Выберите директорию на машине «${machineName(d.machine)}».`, true);
+          directoryInput?.focus?.();
+          return;
+        }
         const saved = await window.jarvis.bundleSave(d);
         if (!saved || !saved.ok) { note((saved && saved.error) || 'не сохранилось', true); return; }
         if (saved.problems && saved.problems.length) {
           note('не хватает: ' + saved.problems.join('; '), true);
           return;
         }
-        if (await call(() => window.jarvis.bundleStart(saved.id), 'руки поднимаются — ветка и worktree на каждую')) {
+        if (await call(() => window.jarvis.bundleStart(saved.id), 'Исполнители запускаются — у каждого своя ветка и worktree.')) {
           draft = null;
           draftAuto = false;
           openId = saved.id;
@@ -242,7 +294,7 @@
       d.hands.forEach((h, i) => {
         const ta = el('textarea.lp-input.bd-task', {
           rows: 2,
-          placeholder: 'Задача руки — это её первое сообщение. Например: «Экран логина, magic-link, сессии в keychain. UI по theme.css, ничего нового не изобретать.»',
+          placeholder: 'Задача исполнителя — первое сообщение в его чате. Например: «Добавь вход по ссылке из письма и тесты для новой формы.»',
           oninput: (e) => { h.task = e.target.value; syncBtn(); },
         });
         ta.value = h.task || '';
@@ -251,14 +303,14 @@
             el('span.bd-hand-n', { text: String(i + 1) }),
             el('span.lp-hint', { text: 'своя ветка и worktree — сами' }),
             d.hands.length > 1
-              ? el('button.j-btn.lp-ghost', { text: '×', title: 'убрать руку', onclick: () => { d.hands.splice(i, 1); paintHands(); } })
+              ? el('button.j-btn.lp-ghost', { text: '×', title: 'Убрать исполнителя', onclick: () => { d.hands.splice(i, 1); paintHands(); } })
               : null,
           ),
           ta,
         ));
       });
       hands.appendChild(el('button.j-btn.lp-ghost', {
-        text: '+ добавить руку',
+        text: '+ добавить исполнителя',
         onclick: () => { d.hands.push({ task: '' }); paintHands(); },
       }));
       syncBtn();
@@ -276,13 +328,20 @@
         ));
       });
       gates.appendChild(el('button.j-btn.lp-ghost', {
-        text: '+ гейт',
+        text: '+ добавить проверку',
         onclick: () => { d.gates.push({ name: '', command: '' }); paintGates(); },
       }));
     };
     paintGates();
 
+    let directoryInput;
     d.machine = d.machine || 'local';
+    d.agent = d.agent || 'claude';
+    const agentSel = el('select.lp-input', { 'aria-label': 'Агент' },
+      el('option', { value: 'claude', text: 'Claude Code' }),
+      el('option', { value: 'codex', text: 'Codex' }));
+    agentSel.value = d.agent;
+    agentSel.addEventListener('change', () => { d.agent = agentSel.value; });
     // Машина — выбор, как в «Проектах»: эта или любой узел из настроек.
     const machineSel = el('select.lp-input',
       machines.map((m) => el('option', { value: m.id, text: m.name + (m.kind === 'remote' && m.sshHost ? ` · ${m.sshHost}` : '') })));
@@ -290,20 +349,28 @@
       machineSel.appendChild(el('option', { value: d.machine, text: d.machine }));
     }
     machineSel.value = d.machine;
-    machineSel.addEventListener('change', () => { d.machine = machineSel.value; });
+    machineSel.addEventListener('change', () => {
+      if (d.machine === machineSel.value) return;
+      d.machine = machineSel.value;
+      // Paths belong to one host. Keep the rest of the unfinished form intact.
+      d.dir = '';
+      if (directoryInput) directoryInput.value = '';
+      dismissDialog?.();
+      note(`Машина изменена. Выберите директорию на «${machineName(d.machine)}».`);
+    });
 
     return el('div.bd-start',
-      el('div.lp-h1', { text: 'Связка — несколько чатов разом' }),
-      el('div.lp-h2', { text: 'каждая рука — обычный чат: пишешь первое сообщение, ветка и worktree создаются сами. Очередь слияний: авторебейз и гейты — сами, вливаешь ты.' }),
+      el('div.lp-h1', { text: 'Команда — несколько чатов разом' }),
+      el('div.lp-h2', { text: 'Каждый исполнитель работает в отдельном чате: ветка и worktree создаются сами. Изменения проходят проверки и попадают в очередь. Слияние подтверждаете вы.' }),
       el('div.bd-start-grid',
-        field('имя связки', d.name, (v) => { d.name = v; }, 'например: клевер-релиз'),
+        field('Название команды', d.name, (v) => { d.name = v; }, 'например: клевер-релиз'),
         el('label.bd-field',
           el('span.bd-label', { text: 'машина' }),
           machineSel,
-          el('span.lp-hint', { text: 'эта или любой узел — как в «Проектах»' }),
+          el('span.lp-hint', { text: 'Этот компьютер или удалённая машина' }),
         ),
         (() => {
-          const input = el('input.lp-input', {
+          const input = directoryInput = el('input.lp-input', {
             value: d.dir || '',
             oninput: (e) => { d.dir = e.target.value; },
           });
@@ -312,19 +379,28 @@
             el('div.lp-withrow', input,
               el('button.j-btn.lp-ghost', {
                 text: 'выбрать…',
-                onclick: () => openDirPicker(d.machine || 'local', d.dir, (picked) => {
-                  d.dir = picked;
-                  input.value = picked;
-                }),
+                onclick: () => {
+                  const pickedMachine = d.machine;
+                  openDirPicker(pickedMachine, d.dir, (picked) => {
+                    if (d.machine !== pickedMachine) return;
+                    d.dir = picked;
+                    input.value = picked;
+                  });
+                },
               })),
-            el('span.lp-hint', { text: 'git не обязателен: нет .git или самого каталога — создам и инициализирую сам' }),
+            el('span.lp-hint', { text: 'Создадим папку и Git-репозиторий при запуске, если их нет.' }),
           );
         })(),
-        field('бюджет на руку, токенов', d.budgetTokens, (v) => { d.budgetTokens = Number(v) || 0; }, 'ориентир на пульте, не ограничитель'),
+        el('label.bd-field',
+          el('span.bd-label', { text: 'Агент' }),
+          agentSel,
+          el('span.lp-hint', { text: 'Перед запуском проверим CLI на выбранной машине. Вход в аккаунт — через CLI.' }),
+        ),
+        field('Ориентир расхода', d.budgetTokens, (v) => { d.budgetTokens = Math.max(0, Math.round(Number(v) || 0)); }, 'Токенов на исполнителя. Не ограничивает работу. 0 — без ориентира.'),
       ),
-      el('div.lp-sub', { text: 'руки' }),
+      el('div.lp-sub', { text: 'Исполнители' }),
       hands,
-      el('div.lp-sub', { text: 'гейты перед очередью' }),
+      el('div.lp-sub', { text: 'Проверки перед слиянием' }),
       gates,
       el('div.lp-actions',
         startBtn,
@@ -338,12 +414,12 @@
   /* ---------- пульт: карточки рук ---------- */
 
   function statusLine(h) {
-    if (h.state === 'ready') return `готов к мержу · очередь #${h.queuePos || '?'} · гейты и критик зелёные`;
+    if (h.state === 'ready') return `готов к слиянию · очередь #${h.queuePos || '?'} · проверки пройдены`;
     if (h.state === 'conflict') {
       return `конфликт при ребейзе: ${(h.conflictFiles || []).join(', ') || '…'} · чинит сам, попытка ${h.attempt} · очередь ждёт`;
     }
-    if (h.state === 'merged') return `влита в ${fmtTime(h.mergedAt) || 'базу'}`;
-    if (h.state === 'failed') return 'не поднялась — причина в ленте';
+    if (h.state === 'merged') return `объединён · ${fmtTime(h.mergedAt) || 'изменения в основной ветке'}`;
+    if (h.state === 'failed') return 'ошибка запуска — причина в ленте событий';
     if (h.state === 'new') return 'ждёт запуска';
     if (h.status === 'waiting') return 'спрашивает — зайди в чат';
     return h.detail || 'работает';
@@ -352,14 +428,16 @@
   function handCard(b, h) {
     const card = el('div.bd-card', { 'data-state': h.state },
       el('div.bd-card-head',
-        el('span.bd-card-name', { text: h.name || 'рука' }),
+        el('span.bd-card-name', { text: h.name || 'исполнитель' }),
         el('span.bd-card-state', { text: STATE_WORD[h.state] || h.state }),
       ),
       el('div.bd-card-line', { text: statusLine(h) }),
       el('div.bd-card-meta', {
+        title: 'Расход включает входные, выходные и кэшированные токены. Ориентир не ограничивает работу.',
         text: [
           h.branch || null,
-          h.tokens ? `${fmtTokens(h.tokens)}${b.budgetTokens ? ' / ' + fmtTokens(b.budgetTokens) : ''}` : null,
+          h.tokens > 0 ? `Расход: ${fmtTokens(h.tokens)} токенов` : null,
+          b.budgetTokens > 0 ? `Ориентир: ${fmtTokens(b.budgetTokens)} токенов` : null,
         ].filter(Boolean).join(' · '),
       }),
     );
@@ -368,7 +446,7 @@
       card.addEventListener('click', () => {
         if (window.openSessionById) window.openSessionById(h.sessionId);
       });
-      card.title = 'открыть чат руки';
+      card.title = 'Открыть чат исполнителя';
     }
     return card;
   }
@@ -381,12 +459,12 @@
       el('div.lp-sub', { text: 'очередь слияний' }),
       el('div.lp-hint', {
         text: b.lastMergeAt
-          ? `последнее вливание ${fmtTime(b.lastMergeAt)} · после каждого — авторебейз хвоста и гейты заново`
-          : 'после каждого вливания — авторебейз хвоста и прогон гейтов заново',
+          ? `Последнее слияние ${fmtTime(b.lastMergeAt)}. Остальные ветки обновляются, проверки запускаются заново.`
+          : 'После каждого слияния остальные ветки обновляются, проверки запускаются заново.',
       }),
     );
     if (!ready.length && !conflicts.length) {
-      box.appendChild(el('div.lp-empty', { text: 'пока пусто — руки встанут в очередь сами, когда закончат и гейты позеленеют' }));
+      box.appendChild(el('div.lp-empty', { text: 'Пока пусто — исполнители встанут в очередь сами, когда завершат задачи и пройдут проверки.' }));
     }
     ready.forEach((h, i) => {
       const row = el('div.bd-qrow',
@@ -396,23 +474,23 @@
       if (i === 0) {
         row.appendChild(el('button.j-btn.is-primary.bd-merge', {
           text: `Влить в ${b.base || 'main'}`,
-          title: h.canMerge ? 'гейты зелёные, ветка на свежей базе' : 'ждём зелёных гейтов на свежей базе',
+          title: h.canMerge ? 'Проверки пройдены, ветка обновлена' : 'Ожидаются успешные проверки обновлённой ветки',
           disabled: !h.canMerge,
           onclick: (e) => {
             e.stopPropagation();
-            call(() => window.jarvis.bundleMerge(b.id, h.id), 'влито — хвост переребейзится сам');
+            call(() => window.jarvis.bundleMerge(b.id, h.id), 'Изменения объединены. Остальные ветки обновляются.');
           },
         }));
       } else {
-        row.appendChild(el('span.lp-hint', { text: `после #${i} — авторебейз и гейты` }));
+        row.appendChild(el('span.lp-hint', { text: `После #${i} — обновление ветки и проверки` }));
       }
       box.appendChild(row);
     });
     conflicts.forEach((h) => {
       box.appendChild(el('div.bd-qrow.out',
         el('span.bd-qpos', { text: '⚠' }),
-        el('span.bd-qname', { text: `${h.name} — выпала: конфликт · чинит сам, попытка ${h.attempt}` }),
-        el('span.lp-hint', { text: 'вернётся в хвост, когда ребейз пройдёт и гейты позеленеют' }),
+        el('span.bd-qname', { text: `${h.name} — конфликт · чинит сам, попытка ${h.attempt}` }),
+        el('span.lp-hint', { text: 'Вернётся в конец очереди после устранения конфликта и успешных проверок' }),
       ));
     });
     if (working.length) {
@@ -426,7 +504,7 @@
   function sidePanel(b) {
     const box = el('div.bd-side');
     if ((b.hotFiles || []).length) {
-      box.appendChild(el('div.lp-sub', { text: 'горячие файлы' }));
+      box.appendChild(el('div.lp-sub', { text: 'Файлы нескольких исполнителей' }));
       b.hotFiles.forEach((f) => box.appendChild(
         el('div.bd-hot',
           el('span.bd-hot-file', { text: f.file }),
@@ -446,13 +524,15 @@
   }
 
   function console_(b) {
-    const addTask = el('textarea.lp-input.bd-task', { rows: 2, placeholder: 'добавить руку: задача — первое сообщение нового чата' });
+    const addTask = el('textarea.lp-input.bd-task', { rows: 2, placeholder: 'Задача нового исполнителя — первое сообщение в его чате',
+      oninput: e => additionalTasks.set(b.id, e.target.value) });
+    addTask.value = additionalTasks.get(b.id) || '';
     return el('div.bd-console',
       el('div.bd-head',
         el('div',
-          el('div.lp-h1', { text: `связка · ${b.name}` }),
+          el('div.lp-h1', { text: `команда · ${b.name}` }),
           el('div.lp-h2', {
-            text: `${machineName(b.machine)} · ${b.dir} → ${b.base || 'main'}${b.paused ? ' · на паузе' : ''}`,
+            text: `${b.agent === 'codex' ? 'Codex' : 'Claude Code'} · ${machineName(b.machine)} · ${b.dir} → ${b.base || 'main'}${b.paused ? ' · на паузе' : ''}`,
           }),
         ),
         el('div.lp-actions',
@@ -461,32 +541,33 @@
             onclick: () => call(() => window.jarvis.bundlePause(b.id, !b.paused)),
           }),
           el('button.j-btn.lp-ghost', {
-            text: 'Новая связка',
+            text: 'Новая команда',
             onclick: async () => {
               const res = await window.jarvis.bundleDraft();
-              if (res && res.ok) { draft = res.item; draftAuto = false; render(); }
+              if (!res?.ok || !res.item) throw new Error(res?.error || 'Не удалось подготовить форму.');
+              draft = res.item; draftAuto = false; render();
             },
           }),
           el('button.j-btn.lp-ghost', {
-            text: 'Убрать связку',
+            text: 'Убрать команду',
             onclick: () => {
               // Ветки остаются — в них работа; уходят worktree и карточки.
-              call(() => window.jarvis.bundleRemove(b.id), 'связка убрана — ветки целы');
+              return call(() => window.jarvis.bundleRemove(b.id), 'Команда убрана. Ветки с изменениями сохранены.');
             },
           }),
         ),
       ),
-      el('div.bd-note', { hidden: true }),
       el('div.bd-grid', b.hands.map((h) => handCard(b, h))),
       el('div.bd-add',
         addTask,
         el('button.j-btn.lp-ghost', {
-          text: '+ рука',
+          text: '+ исполнитель',
           onclick: async () => {
             const task = addTask.value.trim();
-            if (!task) { note('задача пустая — руке нечего делать', true); return; }
-            addTask.value = '';
-            await call(() => window.jarvis.bundleAddHand(b.id, task, null), 'рука поднимается');
+            if (!task) { note('Опишите задачу для нового исполнителя.', true); return; }
+            if (await call(() => window.jarvis.bundleAddHand(b.id, task, null), 'Исполнитель запускается.')) {
+              additionalTasks.delete(b.id); render();
+            }
           },
         }),
       ),
@@ -507,19 +588,24 @@
       const b = current();
       if (!b) {
         // Первый вход: черновик сразу — незачем показывать пустоту с кнопкой.
-        window.jarvis.bundleDraft().then((res) => {
-          if (res && res.ok && !draft && !state.bundles.length) {
-            draft = res.item;
-            draftAuto = true;
-            render();
-          }
-        });
+        if (draftError) return el('div.lp-empty',
+          el('p', { text: draftError }),
+          el('button.j-btn', { text: 'Повторить', onclick: () => { draftError = null; render(); } }));
+        if (!draftLoading) {
+          draftLoading = true;
+          Promise.resolve().then(() => window.jarvis.bundleDraft()).then(res => {
+            if (!res?.ok || !res.item) throw new Error(res?.error || 'Не удалось подготовить форму.');
+            if (!draft && !state.bundles.length) { draft = res.item; draftAuto = true; }
+          }).catch(error => { draftError = String(error); })
+            .finally(() => { draftLoading = false; render(); });
+        }
         return el('div.lp-empty', { text: 'готовлю форму…' });
       }
       return console_(b);
     })();
-    const note_ = draft ? el('div.bd-note', { hidden: true }) : null;
+    const note_ = el('div.bd-note', { hidden: true });
     root.appendChild(el('div.bd-wrap', note_, body));
+    if (message) note(message.text, message.bad);
   }
 
   window.initBundle = (mount) => {
@@ -530,7 +616,12 @@
     if (!window.__bundleBound) {
       window.__bundleBound = true;
       if (window.jarvis.onBundleState) {
-        window.jarvis.onBundleState((s) => { if (s && s.ok) { state = s; render(); } });
+        window.jarvis.onBundleState((s) => {
+          if (s && s.ok) {
+            state = s;
+            if (!(draft && !draftAuto || root?.contains(document.activeElement) && document.activeElement?.matches('input,textarea,select,[role="combobox"]') || root?.querySelector('[role="combobox"][aria-expanded="true"]'))) render();
+          }
+        });
       }
     }
   };

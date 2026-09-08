@@ -1,0 +1,33 @@
+{
+  "ok": true,
+  "scope": "Chromium with strict synthetic bridge; no native IPC, agents, or SSH connections",
+  "records": [
+    "same-directory-projects-separated-by-machine",
+    "welcome-dark-desktop",
+    "remote-launch-preserves-machine-profile-model-provider-task-and-permissions",
+    "launch-failure-retains-draft",
+    "launch-id-waits-for-matching-prompt-delivery",
+    "early-delivery-event-survives-invoke-response-race",
+    "failed-prompt-delivery-restores-original-task",
+    "per-chat-drafts-survive-switching-without-sending",
+    "chat-dark-desktop",
+    "usage-details-desktop",
+    "usage-breakdown-opt-in-with-explicit-estimate",
+    "external-readonly-usage-desktop",
+    "external-chat-keeps-source-scoped-readonly-usage-without-message-controls",
+    "terminal-remote-desktop",
+    "terminal-opt-in-and-stale-snapshot-does-not-cross-sessions",
+    "attention-inbox-desktop",
+    "attention-deduplicates-snapshots-and-keeps-read-state",
+    "welcome-dark-desktop",
+    "chat-dark-desktop",
+    "chat-dark-narrow",
+    "welcome-dark-narrow",
+    "welcome-light-desktop",
+    "chat-light-desktop",
+    "chat-light-narrow",
+    "welcome-light-narrow"
+  ],
+  "errors": [],
+  "unknown": []
+}

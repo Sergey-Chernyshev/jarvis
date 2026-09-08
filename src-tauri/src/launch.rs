@@ -36,6 +36,15 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// An explicit per-task choice always wins over the legacy global flag.
+    pub fn resolve(requested: Option<&str>, legacy_dangerous: bool) -> Mode {
+        match requested {
+            Some(mode) => Self::parse(mode),
+            None if legacy_dangerous => Self::Yolo,
+            None => Self::Ask,
+        }
+    }
+
     /// Из строки панели. Неизвестное — самый осторожный режим: молча дать
     /// агенту больше прав, чем просили, нельзя.
     pub fn parse(s: &str) -> Mode {
@@ -44,6 +53,28 @@ impl Mode {
             "yolo" => Mode::Yolo,
             _ => Mode::Ask,
         }
+    }
+}
+
+#[cfg(test)]
+mod mode_precedence_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_task_permissions_win_over_global_full_access() {
+        for global in [false, true] {
+            assert_eq!(Mode::resolve(Some("ask"), global), Mode::Ask);
+            assert_eq!(Mode::resolve(Some("plan"), global), Mode::Plan);
+            assert_eq!(Mode::resolve(Some("yolo"), global), Mode::Yolo);
+            for invalid in ["", "full", "unexpected"] {
+                assert_eq!(Mode::resolve(Some(invalid), global), Mode::Ask);
+            }
+        }
+        assert_eq!(Mode::resolve(None, true), Mode::Yolo);
+        assert_eq!(Mode::resolve(None, false), Mode::Ask);
+        let command = agent_command_mode("claude", None, Mode::resolve(Some("plan"), true));
+        assert!(command.contains("--permission-mode plan"));
+        assert!(!command.contains("skip-permissions"));
     }
 }
 
@@ -71,6 +102,102 @@ pub fn agent_command_mode(agent: &str, session_id: Option<&str>, mode: Mode) -> 
             Some(id) => format!("claude --resume {id}{flag}"),
             None => format!("claude{flag}"),
         }
+    }
+}
+
+/// Start an independent continuation without reusing the source's writable SID.
+/// Provider/account selection belongs to the caller, not this command builder.
+pub fn fork_command(agent: &str, session_id: &str, mode: Mode) -> Result<String, String> {
+    if !matches!(agent, "claude" | "codex") {
+        return Err("Продолжение отдельным чатом доступно только для Claude и Codex".into());
+    }
+    if session_id.is_empty()
+        || session_id.len() > 256
+        || !session_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("Некорректный идентификатор исходного чата агента".into());
+    }
+    let sid = shell_quote(session_id);
+    let command = match agent {
+        "claude" => format!("claude --resume {sid} --fork-session"),
+        "codex" => format!("codex fork {sid}"),
+        _ => unreachable!(),
+    };
+    // Keep permission policy identical to a normal launch. In particular,
+    // Codex Plan currently uses Ask semantics, never a bypass flag.
+    let launch = agent_command_mode(agent, None, mode);
+    let flags = launch.strip_prefix(agent).expect("supported launch starts with its provider");
+    Ok(format!("{command}{flags}"))
+}
+
+#[cfg(test)]
+mod fork_command_tests {
+    use super::*;
+
+    #[test]
+    fn forks_use_new_provider_dialogs_and_existing_permission_policy() {
+        for (agent, mode, expected) in [
+            ("claude", Mode::Ask, "claude --resume 'session-123_A' --fork-session"),
+            ("claude", Mode::Plan, "claude --resume 'session-123_A' --fork-session --permission-mode plan"),
+            ("claude", Mode::Yolo, "claude --resume 'session-123_A' --fork-session --dangerously-skip-permissions"),
+            ("codex", Mode::Ask, "codex fork 'session-123_A'"),
+            ("codex", Mode::Plan, "codex fork 'session-123_A'"),
+            ("codex", Mode::Yolo, "codex fork 'session-123_A' --dangerously-bypass-approvals-and-sandbox"),
+        ] {
+            assert_eq!(fork_command(agent, "session-123_A", mode).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn forks_never_add_bypass_without_explicit_yolo_mode() {
+        for agent in ["claude", "codex"] {
+            for mode in [Mode::Ask, Mode::Plan, Mode::parse(""), Mode::parse("unexpected")] {
+                let command = fork_command(agent, "abc", mode).unwrap();
+                assert!(!command.contains("dangerously"), "{command}");
+                assert!(!command.contains("skip-permissions"), "{command}");
+                assert!(!command.contains("bypass"), "{command}");
+            }
+        }
+    }
+
+    #[test]
+    fn fork_ids_are_bounded_provider_ids_not_shell_or_scoped_ui_keys() {
+        for agent in ["claude", "codex"] {
+            assert!(fork_command(agent, &"a".repeat(256), Mode::Ask).is_ok());
+            assert!(fork_command(agent, &"a".repeat(257), Mode::Ask).is_err());
+            for invalid in ["", " ", " two", "two words", "x\nquit", "x\rquit", "x\0y", "$(id)",
+                "x;touch /tmp/should-not-run", "`id`", "x'", "x\"", "x\\y", "../session", "a.b",
+                "vm:abc", "codex:profile:abc", "сессия", "session🐈"] {
+                assert!(fork_command(agent, invalid, Mode::Ask).is_err(), "{agent}: {invalid:?}");
+            }
+        }
+        for unsupported in ["", "opencode", "Claude", "codex --help", "claude;id"] {
+            assert!(fork_command(unsupported, "abc", Mode::Ask).is_err());
+        }
+    }
+}
+
+/// A per-task model is an argv value, never a slash command or shell fragment.
+pub fn with_model(command: String, agent: &str, model: Option<&str>) -> Result<String, String> {
+    let Some(model) = model.filter(|model| !model.is_empty()) else { return Ok(command); };
+    if !matches!(agent, "claude" | "codex") { return Err("Выбор модели пока доступен для Claude и Codex".into()); }
+    if model.len() > 120 || !model.as_bytes()[0].is_ascii_alphanumeric() || !model.bytes().all(|c| c.is_ascii_alphanumeric() || b"-._:/".contains(&c)) {
+        return Err("Некорректный идентификатор модели".into());
+    }
+    Ok(format!("{command} --model {}", shell_quote(model)))
+}
+
+#[cfg(test)]
+mod launch_model_tests {
+    use super::*;
+    #[test] fn model_is_applied_before_initial_prompt_without_changing_permissions() {
+        for agent in ["claude", "codex"] {
+            let command = agent_command_mode(agent, None, Mode::Ask);
+            assert_eq!(with_model(command.clone(), agent, None).unwrap(), command);
+            assert_eq!(with_model(command.clone(), agent, Some("gpt-5.6-sol")).unwrap(), format!("{command} --model 'gpt-5.6-sol'"));
+            for invalid in ["--help", "x\n/quit", "$(id)", "two models"] { assert!(with_model(command.clone(), agent, Some(invalid)).is_err()); }
+        }
+        assert!(with_model("opencode".into(), "opencode", Some("model")).is_err());
     }
 }
 

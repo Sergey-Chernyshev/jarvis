@@ -529,7 +529,9 @@ function render() {
 /* --- мини-маркдаун для реплик ассистента: абзацы, списки, код. Без innerHTML. --- */
 
 function renderInline(el, text) {
-  for (const t of text.split(/(`[^`]+`|\*\*[^*]+\*\*|\[[^\]\n]+\]\([^\s)]+\))/g)) {
+  // Keep the destination token in sync with markdown.js: one balanced pair of
+  // parentheses is valid inside a URL (for example Wikipedia article names).
+  for (const t of text.split(/(`[^`]+`|\*\*[^*]+\*\*|\[[^\]\n]+\]\((?:[^()\s]|\([^()\s]*\))+\))/g)) {
     if (!t) continue;
     if (t.length > 2 && t.startsWith('`') && t.endsWith('`')) {
       const code = document.createElement('code');

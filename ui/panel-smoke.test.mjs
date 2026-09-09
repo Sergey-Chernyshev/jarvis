@@ -731,3 +731,22 @@ test('Codex progress stays collapsed and later runtime events preserve the Markd
   assert.equal(log.querySelectorAll('.msg.assistant').length, 1);
   assert.doesNotMatch(log.textContent, /raw args/);
 });
+
+test('chat Markdown opens complete HTTP URLs with balanced parentheses and leaves other schemes inert', async () => {
+  const url = 'https://en.wikipedia.org/wiki/Function_(mathematics)';
+  const items = [{ role: 'assistant', kind: 'text', text: `[API](${url}) [local](jarvis://settings)`, ts: 1 }];
+  const { doc, calls } = await boot({ startAt: 'list', state: [SESSION], openChat: async () => ({ ok: true, items, spans: [], cards: {} }) });
+  doc.querySelector('#list .row').dispatchEvent(click(doc));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const link = doc.querySelector('#chatlog .msg.assistant a');
+  assert.equal(link?.getAttribute('data-href'), url);
+  link.dispatchEvent(click(doc));
+  link.dispatchEvent(key(doc, 'Enter'));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(calls.filter(call => call[0] === 'openUrl'), [
+    ['openUrl', url],
+    ['openUrl', url],
+  ]);
+  assert.match(doc.querySelector('#chatlog .msg.assistant').textContent, /local/);
+  assert.equal(doc.querySelectorAll('#chatlog .msg.assistant a').length, 1);
+});

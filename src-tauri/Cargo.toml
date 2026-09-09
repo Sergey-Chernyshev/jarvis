@@ -13,7 +13,7 @@ version = "1.0.0-beta.1"
 description = "Menu-bar/tray mission control for Claude Code and Codex sessions (macOS, Linux)"
 license = "MIT"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.87"
 default-run = "jarvis"
 
 [build-dependencies]
@@ -52,10 +52,10 @@ flate2 = "1" # gzip для сжатого хранения аудио дикто
 # клиент к Silero-сайдкару (localhost HTTP), blocking — зовём из voice-воркера
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 # base64 для stt.transcribe capability (кодирование PCM в аргументах MCP)
-base64 = "0.22"
+base64 = "0.23"
 # аудио-захват (инкр. 9, фаза 4): микрофон через CPAL + ресемпл 16кГц
 cpal = "0.17.1"
-rubato = "0.16.2"
+rubato = "5.0.0"
 # вставка текста (инкр. 9, фаза 5): clipboard snapshot/restore для ⌘V-вставки
 arboard = "3"
 

@@ -183,7 +183,8 @@ impl CodexCliHost {
         use tokio::process::Command;
 
         let mut state = StreamLifecycle::new(resume);
-        let Some(bin) = crate::backend::codex::resolve_codex_bin() else {
+        let Some(bin) = crate::agent_instances::load_registry(&crate::util::jarvis_dir()).ok()
+            .and_then(|registry| registry.launch_spec(Some(&self.instance_id)).ok()).map(|spec| spec.program) else {
             crate::log::line("[codex-agent] codex не найден");
             // Молча выйти нельзя: окно осталось бы в «думает…» навсегда.
             self.fail("codex не найден — агент не запустился");

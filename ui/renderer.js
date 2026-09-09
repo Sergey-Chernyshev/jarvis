@@ -657,6 +657,7 @@ function render() {
 
 function renderMarkdown(root, text) { JarvisMarkdown.renderChat(root, text); }
 
+
 /* --- лента чата: подряд идущие тулзы группируются в чипы, повторы ×N --- */
 
 let toolsGroup = null; // текущая группа чипов (обнуляется текстовой репликой)
@@ -1141,10 +1142,12 @@ function appendChatItems(items) {
     chatlogEl.scrollHeight - chatlogEl.scrollTop - chatlogEl.clientHeight < 60;
   chatlogEl.querySelector('.chatempty')?.remove();
   for (const it of items) {
-    if (it.kind === 'tool') {
-      addToolChip(it.text);
+    if (it.kind === 'tool' || it.kind === 'progress') {
+      addToolChip(it.kind === 'progress' ? 'Ход работы · ' + it.text : it.text);
       continue;
     }
+    // Ignore future runtime events instead of interpreting them as assistant text.
+    if ((it.kind && it.kind !== 'text') || !['user', 'assistant'].includes(it.role)) continue;
     toolsGroup = null;
     if (it.role === 'user') {
       // реальная реплика из транскрипта пришла — снимаем оптимистичный дубль

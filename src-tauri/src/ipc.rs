@@ -3076,9 +3076,12 @@ pub async fn agent_send(app: AppHandle, message: String, session_id: Option<Stri
     } else {
         provider.unwrap_or_else(|| settings.get("agentProvider").and_then(Value::as_str).unwrap_or("auto").to_string())
     };
+    let bound_instance = settings.pointer(&format!("/agentChat/instances/{chat_id}")).and_then(Value::as_str);
+    let codex_available = crate::agent_instances::load_registry(&crate::util::jarvis_dir()).ok()
+        .and_then(|registry| registry.launch_spec(if resume.is_some() { bound_instance } else { None }).ok()).is_some();
     let selected = match crate::agent::select_provider(&selected,
         crate::claude_bin::resolve_claude_bin().is_some(),
-        crate::backend::codex::resolve_codex_bin().is_some()) {
+        codex_available) {
         Ok(selected) => selected,
         Err(message) => return err(&message),
     };

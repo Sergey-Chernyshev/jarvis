@@ -219,22 +219,39 @@
     return e;
   }
 
-  function inlineInto(el, text) {
-    for (const t of text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g)) {
-      if (!t) continue;
-      if (t.length > 2 && t.startsWith('`') && t.endsWith('`')) {
-        const code = document.createElement('code');
-        code.textContent = t.slice(1, -1);
-        el.appendChild(code);
-      } else if (t.length > 4 && t.startsWith('**') && t.endsWith('**')) {
-        const b = document.createElement('strong');
-        b.textContent = t.slice(2, -2);
-        el.appendChild(b);
-      } else {
-        el.appendChild(document.createTextNode(t));
-      }
+function inlineInto(el, text) {
+  // Keep the destination token in sync with markdown.js: one balanced pair of
+  // parentheses is valid inside a URL (for example Wikipedia article names).
+  for (const t of text.split(/(`[^`]+`|\*\*[^*]+\*\*|\[[^\]\n]+\]\((?:[^()\s]|\([^()\s]*\))+\))/g)) {
+    if (!t) continue;
+    if (t.length > 2 && t.startsWith('`') && t.endsWith('`')) {
+      const code = document.createElement('code');
+      code.textContent = t.slice(1, -1);
+      el.appendChild(code);
+    } else if (t.length > 4 && t.startsWith('**') && t.endsWith('**')) {
+      const b = document.createElement('strong');
+      b.textContent = t.slice(2, -2);
+      el.appendChild(b);
+    } else {
+      const link = t.match(/^\[([^\]]+)\]\((https?:\/\/[^\s<>]+)\)$/i);
+      if (link) {
+        const a = document.createElement('a');
+        a.className = 'md-link'; a.dataset.href = link[2];
+        a.setAttribute('role', 'link'); a.tabIndex = 0;
+        a.textContent = link[1];
+        const open = async (event) => {
+          event.preventDefault();
+          try { if (window.jarvis?.openUrl) await window.jarvis.openUrl(link[2]);
+          else await window.__TAURI__.core.invoke('url_open', { url: link[2] }); }
+          catch (error) { const note = document.createElement('span'); note.setAttribute('role', 'alert'); note.textContent = String(error?.message || error); el.appendChild(note); }
+        };
+        a.addEventListener('click', open);
+        a.addEventListener('keydown', event => { if (event.key === 'Enter') open(event); });
+        el.appendChild(a);
+      } else el.appendChild(document.createTextNode(t));
     }
   }
+}
 
   // Русское склонение числительных. Одна на файл: «N заметок» у Insight и
   // «N реплик» у чата агента считались бы по разным правилам.

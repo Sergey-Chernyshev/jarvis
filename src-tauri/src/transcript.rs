@@ -17,7 +17,7 @@ use crate::util::{basename, ellipsize, friendly_model, home_dir, now_ms, one_lin
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatItem {
     pub role: &'static str, // 'user' | 'assistant'
-    pub kind: &'static str, // 'text' | 'tool'
+    pub kind: &'static str, // 'text' | 'tool' | 'progress'
     pub text: String,
     pub ts: i64,
 }

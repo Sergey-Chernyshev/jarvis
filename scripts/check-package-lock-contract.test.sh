@@ -132,6 +132,64 @@ expect_rejected() {
   fi
 }
 
+write_host_scope() {
+  printf '%s\n' '[package]' 'name = "jarvis"' 'version = "0.3.3"' '' \
+    "$1" 'jarvis-package = { path = "../crates/jarvis-package" }' \
+    > "$fixture_root/src-tauri/Cargo.toml"
+}
+
+macos_table="[target.'cfg(target_os = \"macos\")'.dependencies]"
+write_clean_fixture
+write_host_scope "$macos_table"
+bash "$repo_root/scripts/check-package-lock-contract.sh" "$fixture_root" >/dev/null
+
+for scope in '[build-dependencies]' \
+  "[target.'cfg(target_os = \"macos\")'.dev-dependencies]" \
+  "[target.'cfg(target_os = \"macos\")'.build-dependencies]" \
+  "[target.'cfg(target_os = \"linux\")'.dependencies]" \
+  "[target.'cfg(unix)'.dependencies]"; do
+  write_clean_fixture
+  write_host_scope "$scope"
+  expect_rejected "host jarvis-package dependency must be a normal dependency"
+done
+
+for second_scope in '[dependencies]' "$macos_table" '[dev-dependencies]' \
+  "[target.'cfg(target_os = \"linux\")'.dependencies]"; do
+  write_clean_fixture
+  printf '%s\n' "$second_scope" 'jarvis-package = { path = "../crates/jarvis-package" }' \
+    >> "$fixture_root/src-tauri/Cargo.toml"
+  expect_rejected "host jarvis-package dependency definitions are ambiguous"
+done
+
+write_clean_fixture
+printf '%s\n' "$macos_table" 'jarvis-package = { path = "../wrong" }' \
+  >> "$fixture_root/src-tauri/Cargo.toml"
+expect_rejected "host jarvis-package dependency definitions are ambiguous"
+
+write_clean_fixture
+printf '%s\n' '[dev-dependencies]' '"jarvis-package" = { path = "../wrong" }' \
+  >> "$fixture_root/src-tauri/Cargo.toml"
+expect_rejected "host jarvis-package dependency definitions are ambiguous"
+
+write_clean_fixture
+printf '%s\n' '[dev-dependencies.jarvis-package]' 'path = "../wrong"' \
+  >> "$fixture_root/src-tauri/Cargo.toml"
+expect_rejected "host jarvis-package dependency definitions are ambiguous"
+
+write_clean_fixture
+printf '%s\n' '[dev-dependencies]' 'other = { package = "jarvis-package", path = "../wrong" }' \
+  >> "$fixture_root/src-tauri/Cargo.toml"
+expect_rejected "host jarvis-package dependency definitions are ambiguous"
+
+for declaration in 'jarvis-package = { path = "../wrong" }' \
+  'jarvis-package = { path = "../crates/jarvis-package", version = "9.0.0" }' \
+  'jarvis-package = { path = "../crates/jarvis-package", package = "other" }'; do
+  write_clean_fixture
+  printf '%s\n' '[package]' 'name = "jarvis"' 'version = "0.3.3"' "$macos_table" "$declaration" \
+    > "$fixture_root/src-tauri/Cargo.toml"
+  expect_rejected "host jarvis-package dependency must use the exact private path"
+done
+
 write_clean_fixture
 bash "$repo_root/scripts/check-package-lock-contract.sh" "$fixture_root" >/dev/null
 
@@ -222,5 +280,8 @@ if CAPTURE_PATH="$capture" CARGO_BIN="$fake_cargo" \
   echo "package lock generator accepted an incompatible generated private lock" >&2
   exit 1
 fi
+
+# Exercise the current repository layout in addition to synthetic fixtures.
+bash "$repo_root/scripts/check-package-lock-contract.sh" "$repo_root" >/dev/null
 
 echo "package lock contract negative fixtures passed"

@@ -147,20 +147,43 @@ if ! printf '%s\n' "$private_normal_dependencies" | rg -q \
   report "private tempfile dependency must be pinned to 3.27.0"
 fi
 
-host_normal_dependencies="$(
-  normal_dependencies "$host_manifest"
+# This contract deliberately supports only the two audited runtime locations.
+# Collect declarations from every section first, so a valid-looking line cannot
+# hide a second definition in a dev/build/unsupported-target table.
+host_package_declarations="$(
+  awk -v macos_table="[target.'cfg(target_os = \"macos\")'.dependencies]" '
+    /^[[:space:]]*\[/ {
+      section = $0
+      sub(/^[[:space:]]*/, "", section)
+      sub(/[[:space:]]*$/, "", section)
+      if (section ~ /jarvis-package/) {
+        print "unsupported\t" section
+      }
+      next
+    }
+    /^[[:space:]]*["\047]?jarvis-package["\047]?[[:space:]]*=/ {
+      scope = (section == "[dependencies]" || section == macos_table) ? "runtime" : "unsupported"
+      print scope "\t" $0
+      next
+    }
+    /package[[:space:]]*=[[:space:]]*["\047]jarvis-package["\047]/ {
+      print "unsupported\t" $0
+    }
+  ' "$host_manifest"
 )"
-host_package_dependency="$(
-  printf '%s\n' "$host_normal_dependencies" \
-    | rg '^\s*jarvis-package\s*=' \
-    || true
-)"
-if [[ -z "$host_package_dependency" ]]; then
+host_package_count="$(printf '%s\n' "$host_package_declarations" | awk 'NF { count++ } END { print count+0 }')"
+if [[ "$host_package_count" -eq 0 ]]; then
   report "host jarvis-package dependency must be a normal dependency"
-elif ! printf '%s\n' "$host_package_dependency" | rg -q \
-  '^\s*jarvis-package\s*=\s*\{[^}]*path\s*=\s*"\.\./crates/jarvis-package"[^}]*\}\s*$' \
-  -; then
-  report "host jarvis-package dependency must use the exact private path"
+elif [[ "$host_package_count" -ne 1 ]]; then
+  report "host jarvis-package dependency definitions are ambiguous"
+elif [[ "$host_package_declarations" != runtime$'\t'* ]]; then
+  report "host jarvis-package dependency must be a normal dependency in the global or supported macOS table"
+else
+  host_package_dependency="${host_package_declarations#*$'\t'}"
+  if ! printf '%s\n' "$host_package_dependency" | rg -q \
+    '^\s*jarvis-package\s*=\s*\{\s*path\s*=\s*"\.\./crates/jarvis-package"\s*\}\s*$' -; then
+    report "host jarvis-package dependency must use the exact private path without overrides"
+  fi
 fi
 
 private_records="$(lock_records "$private_lock")"

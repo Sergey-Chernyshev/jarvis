@@ -190,7 +190,7 @@ fn main() {
                     } else if let Some(n) = ipc::is_select_hotkey(&d, shortcut) {
                         d.answer_question_hotkey(n);
                     } else {
-                        windows::toggle_panel(&d);
+                        windows::toggle_hotkey_panel(&d);
                     }
                 })
                 .build(),

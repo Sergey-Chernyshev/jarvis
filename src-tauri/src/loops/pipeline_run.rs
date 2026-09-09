@@ -344,7 +344,7 @@ pub async fn run_pipeline(
         let mut queue = std::mem::take(&mut pending);
         let mut runnable: Vec<TokenState> = Vec::new();
         let mut each: Vec<TokenState> = Vec::new();
-        let mut human: Option<TokenState> = None;
+        let mut human: Vec<TokenState> = Vec::new();
         while let Some(t) = queue.pop() {
             let Some(step) = p.step(&t.node).cloned() else {
                 // Ссылка в никуда: проверки её не пропускают, но файл могли
@@ -353,7 +353,7 @@ pub async fn run_pipeline(
                 return;
             };
             if matches!(step.kind, StepKind::Human { .. }) {
-                human = Some(t);
+                human.push(t);
                 continue;
             }
             match &step.kind {
@@ -417,7 +417,7 @@ pub async fn run_pipeline(
         }
 
         /* ---- 2. вопрос человеку замораживает ВЕСЬ прогон ---- */
-        if let Some(t) = human {
+        if let Some(t) = human.last().cloned() {
             let step = p.step(&t.node).cloned().unwrap_or_else(|| unreachable_step(&t.node));
             let question = match &step.kind {
                 StepKind::Human { question } => pipeline::interpolate(question, &run.vars),
@@ -425,7 +425,8 @@ pub async fn run_pipeline(
             };
             run.tokens_at = runnable;
             run.tokens_at.extend(each);
-            run.tokens_at.push(t.clone());
+            // Keep every paused lane; only the displayed question advances on resume.
+            run.tokens_at.extend(human);
             run.state = RunState::Asking;
             run.ask = Some(Ask {
                 at: crate::util::now_ms(),
@@ -1306,6 +1307,105 @@ mod tests {
         assert!(base.join("finished.txt").exists());
         assert!(!base.join("duplicate.txt").exists());
         let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn parallel_human_questions_survive_checkpoint_reload_and_each_consume_one_answer() {
+        let (repo, base) = sandbox("parallel-human")
+            .await
+            .expect("git is required for the parallel checkpoint regression");
+        let state_dir = repo.parent().unwrap().join("state");
+        let mut store = Arc::new(Store::load_at(state_dir.clone()));
+        let (item, mut p) = parallel_loop(&repo, "stop");
+        p.steps[1].kind = StepKind::Human {
+            question: "Approve frontend?".into(),
+        };
+        p.steps[2].kind = StepKind::Human {
+            question: "Approve backend?".into(),
+        };
+        assert!(p.problems().is_empty(), "{:?}", p.problems());
+        store.save(item.clone());
+        run_pipeline(
+            store.clone(),
+            item.clone(),
+            p.clone(),
+            fresh_run(&base),
+            base.clone(),
+            |_| {},
+        )
+        .await;
+
+        let mut answered = std::collections::BTreeMap::new();
+        for answer_number in 1..=2 {
+            // Reload the real on-disk checkpoint before answering either question.
+            drop(store);
+            store = Arc::new(Store::load_at(state_dir.clone()));
+            let checkpoint = store.run("t").expect("checkpoint must survive reload");
+            assert_eq!(
+                checkpoint.state,
+                RunState::Asking,
+                "{}",
+                checkpoint.stop_note
+            );
+            assert_eq!(checkpoint.tokens_at.len() + checkpoint.waiting_at.len(), 2);
+            let ask = checkpoint.ask.as_ref().unwrap();
+            let expected_question = match ask.step.as_str() {
+                "фронт" => "Approve frontend?",
+                "бэк" => "Approve backend?",
+                other => panic!("unexpected question node: {other}"),
+            };
+            assert_eq!(ask.question, expected_question);
+            assert!(
+                !answered.contains_key(&ask.step),
+                "question was asked twice"
+            );
+            assert!(!checkpoint.vars.contains_key(&ask.step));
+            assert!(checkpoint.interventions.is_empty());
+            for (node, answer) in &answered {
+                assert_eq!(&checkpoint.vars[node].output, answer);
+            }
+
+            let answer = format!("answer {answer_number} for {}", ask.step);
+            answered.insert(ask.step.clone(), answer.clone());
+            store.with_run("t", |run| {
+                run.state = RunState::Running;
+                run.interventions.push(answer);
+            });
+            let resumed = store.run("t").unwrap();
+            run_pipeline(
+                store.clone(),
+                item.clone(),
+                p.clone(),
+                resumed,
+                base.clone(),
+                |_| {},
+            )
+            .await;
+            assert!(store.run("t").unwrap().interventions.is_empty());
+        }
+
+        drop(store);
+        let store = Store::load_at(state_dir);
+        let finished = store.run("t").unwrap();
+        assert_eq!(finished.state, RunState::Done, "{}", finished.stop_note);
+        assert_eq!(answered.len(), 2);
+        for (node, answer) in answered {
+            assert_eq!(finished.vars[&node].output, answer);
+        }
+        assert!(finished.ask.is_none());
+        assert!(finished.tokens_at.is_empty());
+        assert!(finished.waiting_at.is_empty());
+        assert!(finished.interventions.is_empty());
+        assert_eq!(
+            finished
+                .iterations
+                .iter()
+                .filter(|i| i.step == "свести")
+                .count(),
+            1,
+            "both branches must reach the join exactly once"
+        );
+        std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
     }
 
     #[tokio::test]

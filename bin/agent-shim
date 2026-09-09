@@ -70,6 +70,19 @@ case "$BIN_NAME" in
       exec|e|login|logout|mcp|mcp-server|app-server|completion|doctor|apply|review|cloud|features|update|sandbox|queue|archive|unarchive|delete|migrate-rollouts|debug|remote-control|app|help|-h|--help|--version) wrap=0 ;;
     esac
     ;;
+  kimi)
+    # kimi: неинтерактив — сабкоманды (argv[1]) и одноразовый прогон `-p/--prompt`.
+    # -S/--session и -c/--continue НЕ здесь: они поднимают интерактивный TUI и
+    # обязаны оборачиваться в tmux, иначе resumeCmd не вернёт сессию под управление.
+    case "${1:-}" in
+      login|acp|web|server|doctor|export|migrate|upgrade|update|vis|provider|help|-h|--help|-V|--version) wrap=0 ;;
+    esac
+    for a in "$@"; do
+      case "$a" in
+        -p|--prompt) wrap=0 ;;
+      esac
+    done
+    ;;
   *)
     # claude: -p/--print одноразовый; auth/setup-token — логин (мимо tmux).
     for a in "$@"; do

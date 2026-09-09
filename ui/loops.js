@@ -79,6 +79,15 @@
 
   const byId = (id) => state.loops.find((l) => l.id === id);
 
+  /* Склонение числительных — как в панели: «1 итерация», «2 итерации»,
+   * «5 итераций». Числа тут человеческие, а не отладочные. */
+  const plural = (n, one, few, many) => {
+    const d10 = n % 10, d100 = n % 100;
+    if (d10 === 1 && d100 !== 11) return one;
+    if (d10 >= 2 && d10 <= 4 && (d100 < 12 || d100 > 14)) return few;
+    return many;
+  };
+
   const fmtTokens = (n) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n || 0));
   const fmtMoney = (n) => `$${(n || 0).toFixed(2)}`;
   const fmtTime = (ms) => (ms ? new Date(ms).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' }) : '—');
@@ -167,7 +176,7 @@
     if (open && open.id === l.id) row.classList.add('active');
     if (state5 === 'running') row.classList.add('running');
     if (state5 === 'asking' || l.pendingReview > 0) row.classList.add('needs-you');
-    if (l.pendingReview > 0) row.appendChild(el('span.lp-dot', { title: `${l.pendingReview} ждёт взгляда` }));
+    if (l.pendingReview > 0) row.appendChild(el('span.lp-dot', { title: `${l.pendingReview} ${plural(l.pendingReview, 'итерация ждёт', 'итерации ждут', 'итераций ждут')} твоего взгляда` }));
     return row;
   }
 
@@ -213,8 +222,9 @@
   let catalog = null;
   const FALLBACK_MODELS = {
     claude: [
-      { id: 'fable', label: 'Fable' }, { id: 'opus', label: 'Opus' },
-      { id: 'sonnet', label: 'Sonnet' }, { id: 'haiku', label: 'Haiku' },
+      // Fable последней — см. backend/mod.rs: по умолчанию её не берут.
+      { id: 'opus', label: 'Opus' }, { id: 'sonnet', label: 'Sonnet' },
+      { id: 'haiku', label: 'Haiku' }, { id: 'fable', label: 'Fable' },
     ],
     codex: [
       { id: 'gpt-5.5', label: 'GPT-5.5' }, { id: 'gpt-5-codex', label: 'Codex' },
@@ -230,8 +240,26 @@
     } catch (e) { /* останемся на встроенных списках */ }
     return catalog;
   }
-  const modelsFor = (agent) =>
-    (catalog && catalog.models && catalog.models[agent]) || FALLBACK_MODELS[agent] || FALLBACK_MODELS.claude;
+  /* Каталог агентов панели; в отдельном окне его нет — живём на loopsCatalog. */
+  const agentsApi = () => (typeof window !== 'undefined' && window.JarvisAgents) || null;
+  const agentIds = () => {
+    const api = agentsApi();
+    if (api) return api.present().map((a) => a.id);
+    if (catalog && catalog.models) return Object.keys(catalog.models);
+    return Object.keys(FALLBACK_MODELS);
+  };
+  /* У codex модель и reasoning критика задаёт он сам — селект был бы враньём. */
+  const picksItsOwnModel = (agent) => {
+    const api = agentsApi();
+    return api ? !api.hasSeparateEffort(agent) : agent === 'codex';
+  };
+  const modelsFor = (agent) => {
+    const own = catalog && catalog.models && catalog.models[agent];
+    if (own && own.length) return own;
+    const api = agentsApi();
+    const known = api ? api.models(agent).map((m) => ({ id: m.id, label: m.name })) : null;
+    return (known && known.length) ? known : (FALLBACK_MODELS[agent] || FALLBACK_MODELS.claude);
+  };
   const modelLabel = (agent, id) => {
     const hit = modelsFor(agent).find((m) => m.id === id);
     return hit ? hit.label : id;
@@ -369,11 +397,7 @@
 
   /* ---------- «как это будет работать» ---------- */
 
-  const razWord = (n) => {
-    const d10 = n % 10, d100 = n % 100;
-    if (d10 >= 2 && d10 <= 4 && (d100 < 12 || d100 > 14)) return 'раза';
-    return 'раз';
-  };
+  const razWord = (n) => plural(n, 'раз', 'раза', 'раз');
 
   /**
    * Вся конфигурация — одним человеческим абзацем.
@@ -410,13 +434,40 @@
     const streak = Math.max(1, Number(d.exit.streak) || 1);
     const walls = [
       d.limits.tokens ? `${fmtTokens(d.limits.tokens)} токенов` : null,
-      d.limits.iterations ? `${d.limits.iterations} итераций` : null,
+      d.limits.iterations ? `${d.limits.iterations} ${plural(d.limits.iterations, 'итерацию', 'итерации', 'итераций')}` : null,
       d.limits.minutes ? `${Math.round(d.limits.minutes / 60 * 10) / 10} ч` : null,
     ].filter(Boolean).join(' · ');
     const sample = d.sampling.every
       ? `Каждая ${d.sampling.every}-я итерация ждёт твоего взгляда.`
       : 'Выборочная проверка выключена — цикл покажет только итог.';
     const memory = d.memory.enabled ? ` Выводы каждой итерации лягут в ${d.memory.file || 'дневник'}.` : '';
+
+    /* У пайплайна другая середина: не «цель и гейты», а граф. Рассказывать про
+     * источник задач и критика, которых в нём нет, значило бы описывать чужой
+     * цикл — а этот абзац существует ровно затем, чтобы человек увидел, ЧТО
+     * произойдёт, и заметил расхождение до запуска. */
+    if (d.pipeline) {
+      const steps = d.pipeline.steps || [];
+      const gate = (s) => ['choice', 'fork', 'join'].includes(s.kind);
+      const work = steps.filter((s) => !gate(s)).length;
+      const forks = steps.filter((s) => s.kind === 'fork').length;
+      const first = steps.find((s) => s.id === d.pipeline.start) || steps[0];
+      const head = first ? `начиная с «${first.name || first.id}»` : '…первый шаг не задан';
+      const par = forks
+        ? ` Есть ${forks} ${plural(forks, 'ветвление', 'ветвления', 'ветвлений')}: ветки пойдут одновременно, `
+          + 'каждая в своём worktree, и сойдутся в слиянии.'
+        : '';
+      const asks = steps.some((s) => s.kind === 'human')
+        ? ' На шаге с вопросом прогон замрёт целиком и будет ждать тебя.'
+        : '';
+      const linked = (d.pipeline.bpmnFile || '').trim()
+        ? ' Граф связан с файлом .bpmn: правки из модельера подхватятся сами.'
+        : '';
+      return `${when} агент ${d.agent || 'claude'} пройдёт пайплайн из ${work} `
+        + `${plural(work, 'шага', 'шагов', 'шагов')} ${place}, ${head}.${par}${asks} `
+        + `Остановится сам, израсходовав ${walls || '…стен нет — так нельзя'}. ${sample}${linked}`;
+    }
+
     return `${when} агент ${d.agent || 'claude'} ${src}, сделает один шаг ${place}, ${gates}; ${critic}. ` +
       `Цикл завершится, когда всё будет зелёным ${streak} ${razWord(streak)} подряд, ` +
       `и остановится сам, израсходовав ${walls || '…стен нет — так нельзя'}. ${sample}${memory}`;
@@ -476,11 +527,10 @@
     const summary = el('div.lp-explain-text', { text: explain(d) });
     const refresh = () => { summary.textContent = explain(d); };
 
-    /* Агент — сегмент из двух, а не поле по памяти. Смена агента меняет и
-     * список моделей критика, поэтому конструктор перерисовывается целиком:
+    /* Смена агента меняет и модели критика — перерисовываем целиком;
      * черновик это переживает, он живёт отдельно от DOM. */
     const seg = el('div.lp-seg',
-      ['claude', 'codex'].map((a) => {
+      agentIds().map((a) => {
         const b = el('button', {
           text: a,
           onclick: () => { if (d.agent !== a) { d.agent = a; render(); } },
@@ -568,11 +618,11 @@
     };
     paintProblems(l.problems);
 
-    /* У Codex модель критика задаётся его собственными настройками — рисовать
-     * селект, который ни на что не влияет, было бы нечестно. */
-    const criticModel = (d.agent || 'claude') === 'codex'
-      ? el('div.lp-hint', { text: 'модель и усилие критика задаёт сам Codex — в его настройках' })
-      : selectField('модель критика', modelsFor('claude'), d.exit.critic.model,
+    /* Модели ЕГО агента: раньше здесь жёстко стояли claude, и выбор был чужим. */
+    const criticAgent = d.agent || 'claude';
+    const criticModel = picksItsOwnModel(criticAgent)
+      ? el('div.lp-hint', { text: `модель и усилие критика задаёт сам ${criticAgent} — в его настройках` })
+      : selectField('модель критика', modelsFor(criticAgent), d.exit.critic.model,
           (v) => { d.exit.critic.model = v; refresh(); },
           'на ревью обычно ставят сильнее, чем на исполнение');
 
@@ -597,9 +647,62 @@
         return b;
       }));
 
+    /* Обмен пайплайна с модельером.
+     *
+     * Выгружать нечего, пока цикл не сохранён: файл связывается с ним по id, а
+     * у несохранённого его нет. Поэтому сначала сохраняем — молча, без
+     * вопросов: человек нажал «Открыть в модельере», а не «Сохранить», и
+     * лишний диалог здесь был бы препятствием на ровном месте. */
+    async function ensureSaved() {
+      if (l && l.id && !isNew) return l.id;
+      const res = await window.jarvis.loopsSave(d);
+      if (!res || !res.ok) { note((res && res.error) || 'не сохранилось', true); return null; }
+      d.id = res.id;
+      return res.id;
+    }
+
+    async function afterBpmn(id, msg, bad) {
+      draft = null;
+      open = { id, screen: 'builder' };
+      await pull();
+      render();
+      // Сообщение — ПОСЛЕ перерисовки: полоску заметок render собирает заново,
+      // и написанное до него стёрлось бы, ничего не сказав человеку.
+      note(msg, bad);
+    }
+
+    const bpmnActions = {
+      exportBpmn: async () => {
+        const id = await ensureSaved();
+        if (!id) return;
+        const res = await window.jarvis.loopsBpmnExport(id, null, true);
+        if (!res || !res.ok) { await afterBpmn(id, (res && res.error) || 'не выгрузилось', true); return; }
+        // Открыть файл могло и не выйти — .bpmn не всегда чем-то ассоциирован.
+        // Тогда путь всё равно называем: открыть его руками человек сумеет.
+        await afterBpmn(id, res.warning
+          ? `выгружено в ${res.path}, но открыть не вышло: ${res.warning}`
+          : `открываю ${res.path}`, !!res.warning);
+      },
+      importBpmn: async () => {
+        const id = await ensureSaved();
+        if (!id) return;
+        const res = await window.jarvis.loopsBpmnImport(id, null);
+        if (!res || !res.ok) { await afterBpmn(id, (res && res.error) || 'не забралось', true); return; }
+        const left = res.problems && res.problems.length;
+        await afterBpmn(id, left ? 'забрал, но граф не собран: ' + res.problems.join('; ') : 'забрал правку из файла', !!left);
+      },
+      unlinkBpmn: async () => {
+        const id = await ensureSaved();
+        if (!id) return;
+        await window.jarvis.loopsBpmnUnlink(id);
+        await afterBpmn(id, 'отвязал — за файлом больше не следим');
+      },
+    };
+
     const pipeBox = el('div.pl-editor');
     if (isPipe && typeof JarvisPipeline !== 'undefined') {
-      JarvisPipeline.renderTo(pipeBox, d.pipeline, () => refresh());
+      const hasBridge = typeof window.jarvis.loopsBpmnExport === 'function';
+      JarvisPipeline.renderTo(pipeBox, d.pipeline, () => refresh(), hasBridge ? bpmnActions : null);
     }
 
     const box = el('div.lp-builder',
@@ -773,7 +876,7 @@
         metric(fmtTokens(run.tokens), 'токены за запуск', fmtMoney(run.costUsd)),
         metric(String(run.iterations.length), 'итераций', `выход: ${l.exit.streak} подряд`),
         metric(String(run.iterations.filter((i) => i.verdict === 'returned').length), 'возвраты критика'),
-        metric(String(l.pendingReview), 'ждут твоего взгляда', l.sampling.every ? `выборка: каждая ${l.sampling.every}-я` : 'выборка выключена'),
+        metric(String(l.pendingReview), plural(l.pendingReview, 'ждёт твоего взгляда', 'ждут твоего взгляда', 'ждут твоего взгляда'), l.sampling.every ? `выборка: каждая ${l.sampling.every}-я` : 'выборка выключена'),
         metric(fmtWhen(l.nextWake), 'следующее пробуждение', l.wakeLabel),
       ),
       run.state === 'stopped' && run.stop && run.stop !== 'stopped' ? stopped(l, run) : null,
@@ -911,7 +1014,7 @@
         metric(String(passed), 'итераций прошло'),
         metric(String(returned), 'возвратов критика'),
         metric(fmtMoney(run.costUsd), 'расход', fmtTokens(run.tokens)),
-        metric(String(l.pendingReview), 'ждут твоего взгляда'),
+        metric(String(l.pendingReview), plural(l.pendingReview, 'ждёт твоего взгляда', 'ждут твоего взгляда', 'ждут твоего взгляда')),
       ),
       journal(l, run),
       el('div.lp-actions',
@@ -944,6 +1047,11 @@
         el('div.lp-row-sub', { text: t.hint }))));
 
     let body;
+    // Черновик мог исчезнуть между сохранением и перерисовкой: обработчики
+    // снимают его ДО того, как обновят состояние с демона. Рисовать «новый
+    // цикл» без черновика нечем, и попытка кончалась исключением, которое
+    // уносило весь экран режима.
+    if (open && open.screen === 'new' && !draft) open = null;
     if (open && open.screen === 'new') body = builder(draft, true);
     else if (!open) body = library();
     else {

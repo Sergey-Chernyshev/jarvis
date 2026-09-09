@@ -7,6 +7,10 @@
          macOS показал диалог разрешения микрофона при `cargo run` (нет .app-бандла).
          Продакшн .app использует СВОЙ Info.plist (src-tauri/Info.plist) и эту секцию
          не трогает. -->
+    <!-- Как и в проде: меню-бар без иконки в доке с первой миллисекунды
+         (см. комментарий в src-tauri/Info.plist). -->
+    <key>LSUIElement</key>
+    <true/>
     <key>CFBundleIdentifier</key>
     <string>app.jarvis.monitor.dev</string>
     <key>CFBundleName</key>

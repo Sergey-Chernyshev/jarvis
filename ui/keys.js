@@ -11,7 +11,11 @@
  * Подключается в <head> сразу после theme.js, ДО bridge.js. */
 
 (() => {
-  const ua = navigator.userAgent || '';
+  // Через `window`, а не голым глобалом: в вебвью это одно и то же, а вне его
+  // — нет. Голый `navigator` появился в Node только в 21-й версии, и на 18-й
+  // модуль падал ReferenceError'ом ещё до первой строки полезной работы,
+  // унося с собой все тесты панели, которые его подключают.
+  const ua = ((typeof window !== 'undefined' && window.navigator) || {}).userAgent || '';
   const isMac = /Mac OS X|Macintosh/i.test(ua) && !/Android/i.test(ua);
   document.documentElement.setAttribute('data-os', isMac ? 'macos' : 'linux');
 

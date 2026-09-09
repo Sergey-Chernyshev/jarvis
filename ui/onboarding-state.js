@@ -62,8 +62,26 @@
     return { ...base, screen: 'capabilities', primaryAction: 'continue' };
   }
 
+  // Ключ галочки → id возможности в снимке: у Qwen выбирают вес, а возможностью
+  // числится рантайм.
+  const CAPABILITY_ID = {
+    whisper: 'whisper-turbo',
+    qwen: 'qwen3-runtime',
+    wake: 'hey_jarvis',
+    silero: 'silero',
+  };
+
+  // Недоступно, только если снимок сказал это прямо: движок под cargo-фичей может
+  // отсутствовать в сборке. Молчание бэкенда не отнимает то, что раньше работало.
+  function capabilityAvailable(capabilities, key) {
+    const id = CAPABILITY_ID[key] || key;
+    const item = (Array.isArray(capabilities) ? capabilities : []).find((x) => x && x.id === id);
+    return !item || item.available !== false;
+  }
+
   function selectedPlan(selection, capabilities) {
     const value = selection || {};
+    const on = (key) => Boolean(value[key]) && capabilityAvailable(capabilities, key);
     const ids = [];
     if (value.whisper) ids.push('whisper-turbo');
     if (value.qwen) ids.push(value.qwenSize === 'qwen3-1.7b' ? 'qwen3-1.7b' : 'qwen3-0.6b');
@@ -72,7 +90,7 @@
     if (!Array.isArray(capabilities)) return ids;
     return ids.filter((id) => {
       const capability = capabilities.find((item) => item.id === (id.startsWith('qwen3-') ? 'qwen3-runtime' : id));
-      return capability && capability.available !== false && !capability.ready;
+      return !capability || (capability.available !== false && !capability.ready);
     });
   }
 
@@ -117,5 +135,5 @@
     }[kind] || ['Не получен ответ', 'Проверь состояние ещё раз. Если установка уже началась, она продолжится в фоне.'];
   }
 
-  return Object.freeze({ derive, selectedPlan, classifyFailure, mergeSnapshot, stepProgress, navigation, failureCopy });
+  return Object.freeze({ derive, selectedPlan, classifyFailure, mergeSnapshot, stepProgress, navigation, failureCopy, capabilityAvailable });
 });

@@ -1,4 +1,9 @@
-//! Настройки Jarvis: ~/.jarvis/settings.json. Битый файл → дефолты, молча.
+//! Настройки Jarvis: ~/.jarvis/settings.json.
+//!
+//! Битый файл → дефолты, но ГРОМКО: строка в лог и копия рядом
+//! (`settings.broken.json`) до первой перезаписи. Молчание здесь читается как
+//! «приложение свежее» — без узлов, хоткеев и грантов, — а первый же тумблер
+//! дописывал бы дефолты поверх единственного экземпляра оригинала.
 //!
 //! Загрузка мержит дефолты ⊕ диск, поэтому ДОБАВЛЕНИЕ полей безопасно (старый
 //! файл без поля читается). Ломающие изменения схемы (переименование/смена
@@ -18,7 +23,7 @@ use crate::util::jarvis_dir;
 
 /// Текущая версия схемы settings.json. Поднимать при ЛОМАЮЩИХ изменениях формата
 /// (не при простом добавлении полей), добавляя шаг в `run_migrations`.
-pub const SCHEMA_VERSION: u64 = 1;
+pub const SCHEMA_VERSION: u64 = 3;
 
 pub struct Store {
     /// Разобранные настройки + отпечаток файла, с которого они прочитаны.
@@ -26,8 +31,17 @@ pub struct Store {
     /// `jarvis-setup remote add` дописывает узел, и человек редактирует файл
     /// руками. Без сверки приложение записало бы поверх свой устаревший
     /// снимок — то есть молча стёрло бы чужую правку.
-    cache: Mutex<Option<(Value, Stamp)>>,
+    cache: Mutex<Option<Cached>>,
     path: PathBuf,
+}
+
+/// Снимок настроек в памяти. `broken` — файл на диске есть, но не разбирается:
+/// значит `value` это чистые дефолты, и писать их поверх оригинала без копии
+/// нельзя.
+struct Cached {
+    value: Value,
+    stamp: Stamp,
+    broken: bool,
 }
 
 /// Отпечаток файла: время правки и размер. Не содержимое — читать файл ради
@@ -56,7 +70,10 @@ fn concat_mod(rest: &str) -> String {
     format!("{}+{rest}", main_mod())
 }
 
-fn defaults() -> Value {
+/// Дефолты целиком. `pub(crate)` — чтобы владельцы блоков могли СВЕРИТЬ свои
+/// дефолты с тем, что тут написано (agent/chain.rs так проверяет потолки
+/// автономии): два похожих числа в двух местах расходятся молча.
+pub(crate) fn defaults() -> Value {
     json!({
         // Главный модификатор платформенный: на macOS это Command, на Linux —
         // Control. Super на Linux принадлежит окружению рабочего стола (в GNOME
@@ -84,6 +101,58 @@ fn defaults() -> Value {
         // действие руками — ровно та работа, ради отсутствия которой его и
         // ставят. Выключается тумблером в «Запуске».
         "launchDangerous": true,
+        // Бюджет лимитов (budget.rs). НЕ в SETTINGS_ALLOWLIST: агент, который
+        // вправе поднять себе потолок, потолка не имеет. Числа параллельных
+        // сессий тут нет намеренно — сдерживает их расход, а не счёт.
+        // Проценты — доли недельного лимита.
+        "budget": {
+            "claudeBufferPct": 5.0,   // буфер сверху резерва claude
+            "kimiFloorPct": 5.0,      // плоский минимум последнего дня kimi (он короткий)
+            "tailGlueHours": 6.0,     // хвост короче — не день, клеится к предыдущему
+            "pollIdleMin": 15,        // далеко от порогов
+            "pollActiveMin": 3,       // идёт работа
+            "pollNearMin": 2,         // у порога или чисел ещё нет
+            "nightFrom": "23:00",     // границы ночи — у человека они свои
+            "nightTo": "08:00",
+            "nightCapPct": 15.0,      // жёсткий ночной потолок за одну ночь
+        },
+        // Потолки автономных цепочек (agent/chain.rs), доллары. НЕ в
+        // SETTINGS_ALLOWLIST — по той же причине, что и budget: агент, вправе
+        // поднявший себе потолок, потолка не имеет. Числа те же, с которыми
+        // автономия начинала жить константами: владелец меняет режимы по
+        // ситуации, значит и потолки должен менять он, а не сборка.
+        "autonomy": {
+            "chatNightUsd": crate::agent::chain::CHAT_NIGHT_USD, // ночной потолок одного чата
+            "chatDayUsd": crate::agent::chain::CHAT_DAY_USD,     // его же дневная норма
+            "allNightUsd": crate::agent::chain::ALL_NIGHT_USD,   // ночной потолок всех автономных чатов
+            "allDayUsd": crate::agent::chain::ALL_DAY_USD,       // и он же на сутки
+        },
+        // Пороги оживления сессий (capability/native/resume.rs). НЕ в
+        // SETTINGS_ALLOWLIST по той же причине, что budget и autonomy: агент,
+        // вправе поднявший себе порог, порога не имеет.
+        //
+        // Зачем они вообще. Оживление вынесено в грант — джарвисы поднимают
+        // мёртвые сессии без карточки. Карточка была последним местом, где
+        // человек видел цену, и вместо неё цену держат эти два числа: всё, что
+        // мельче обоих, идёт молча; всё, что перерастает любое из них, спрашивает
+        // даже при выданном гранте.
+        "resume": {
+            // Мегабайты транскрипта. Цену они НЕ предсказывают (замер: 4.7 МБ
+            // несли 436 550 токенов, 37.4 МБ — 310 579) и стоят здесь не вместо
+            // денег, а рядом: крупный файл — это ещё и минуты подъёма, и риск
+            // упереться в окно контекста. Владелец просил порог именно по размеру.
+            "confirmMb": crate::capability::native::resume::CONFIRM_MB,
+            // …а это та же стена по деньгам, и она главная. Дешёвый по цене, но
+            // жирный по байтам транскрипт спросит по первому порогу, дорогой при
+            // скромном размере — по этому.
+            "confirmUsd": crate::capability::native::resume::CONFIRM_USD,
+            // Ночью крупные оживления не делаем вовсе: цена высокая, а решить,
+            // нужна ли она, некому. Отказ, а не вопрос — будить незачем.
+            "nightUsd": crate::capability::native::resume::NIGHT_USD,
+        },
+        // Дописка человека к преамбуле главного агента (базовый текст —
+        // agent::AGENT_SYSTEM_PROMPT). Пусто — агент получает только базу.
+        "agentPreamble": "",
         // внешность (дизайн «Клевер», экран 14f «вид»)
         "theme": "auto",   // 'light' | 'dark' | 'auto' (системная)
         "paint": "clover",  // 'clover' | 'coal' | 'raspberry' | 'custom'
@@ -113,17 +182,55 @@ fn file() -> std::path::PathBuf {
     jarvis_dir().join("settings.json")
 }
 
-fn read_merged(path: &Path) -> Value {
+/// Дефолты ⊕ диск + признак «файл есть, но не разбирается». Нет файла — не
+/// беда (первый запуск), а вот битый файл обязан быть слышен: дефолты вместо
+/// настроек выглядят как чистая установка, и человек ищет причину не там.
+fn read_merged(path: &Path) -> (Value, bool) {
     let mut merged = defaults();
-    if let Ok(raw) = fs::read_to_string(path) {
-        if let Ok(Value::Object(disk)) = serde_json::from_str::<Value>(&raw) {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return (merged, false);
+    };
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(Value::Object(disk)) => {
             let m = merged.as_object_mut().unwrap();
             for (k, v) in disk {
                 m.insert(k, v);
             }
+            (merged, false)
+        }
+        other => {
+            let why = match other {
+                Err(e) => e.to_string(),
+                _ => "в корне не объект".to_string(),
+            };
+            let msg = format!(
+                "[settings] {} не разбирается ({why}) — работаю на дефолтах; \
+                 оригинал не трону без копии",
+                path.display()
+            );
+            crate::log::line(&msg);
+            eprintln!("[jarvis] {msg}");
+            (merged, true)
         }
     }
-    merged
+}
+
+/// Отложить копию непарсящегося файла рядом (`settings.broken.json`).
+/// `false` — копия не сделалась, значит перезапись уничтожит единственный
+/// экземпляр настроек и делать её нельзя.
+fn backup_broken(path: &Path) -> bool {
+    let to = path.with_file_name("settings.broken.json");
+    match fs::copy(path, &to) {
+        Ok(_) => {
+            let _ = fs::set_permissions(&to, fs::Permissions::from_mode(0o600));
+            crate::log::line(&format!("[settings] битый файл сохранён как {}", to.display()));
+            true
+        }
+        Err(e) => {
+            eprintln!("[jarvis] не смог сохранить копию битых настроек: {e}");
+            false
+        }
+    }
 }
 
 fn read_for_update(path: &Path) -> Result<Value, String> {
@@ -133,7 +240,7 @@ fn read_for_update(path: &Path) -> Result<Value, String> {
         Err(error) => return Err(format!("Не удалось прочитать настройки: {error}")),
     };
     let disk: Value = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("Файл настроек повреждён: {error}"))?;
+        .map_err(|error| { backup_broken(path); format!("Файл настроек повреждён: {error}") })?;
     let disk = disk.as_object().ok_or("Файл настроек должен содержать JSON-объект")?;
     let mut merged = defaults();
     merged.as_object_mut().unwrap().extend(disk.clone());
@@ -193,8 +300,24 @@ fn run_migrations(mut obj: Map<String, Value>, from: u64) -> Map<String, Value> 
         // формат уже совместим (дефолты домерживаются при загрузке).
         v = 1;
     }
+    if v < 2 {
+        // 1 → 2: выносим мёртвый ключ `sessionsSpawnMax`.
+        //
+        // Потолок одновременных сессий удалён из кода по решению владельца, и
+        // сторож следит, чтобы он не вернулся. Но у тех, кто ставил приложение
+        // раньше, число осталось лежать в файле — его никто не читает, а
+        // выглядит оно как действующая настройка. Человек по нему уже сделал
+        // неверный вывод («потолок вернулся»), и это ровно та цена, которую
+        // берёт мёртвая ручка в конфиге.
+        obj.remove("sessionsSpawnMax");
+        v = 2;
+    }
+    if v < 3 {
+        // Preserve explicit CLI authentication; no token migration is needed.
+        v = 3;
+    }
     // Шаблон следующего шага:
-    // if v < 2 { /* преобразование JSON */ v = 2; }
+    // if v < 4 { /* преобразование JSON */ v = 4; }
     obj.insert("schemaVersion".into(), Value::from(v));
     obj
 }
@@ -215,18 +338,18 @@ impl Store {
         }
     }
 
-    fn current_locked(&self, cache: &mut Option<(Value, Stamp)>) -> Value {
+    fn current_locked(&self, cache: &mut Option<Cached>) -> Value {
         let stamp = stamp_of(&self.path);
-        if let Some((value, at)) = cache.as_ref() {
-            if *at == stamp {
-                return value.clone();
+        if let Some(c) = cache.as_ref() {
+            if c.stamp == stamp {
+                return c.value.clone();
             }
             // Файл сменился под нами — перечитываем. Иначе следующая же запись
             // (любой тумблер в панели) вернула бы файл к нашему снимку.
             crate::log::line("[settings] файл изменился снаружи — перечитываю");
         }
-        let value = read_merged(&self.path);
-        *cache = Some((value.clone(), stamp));
+        let (value, broken) = read_merged(&self.path);
+        *cache = Some(Cached { value: value.clone(), stamp, broken });
         value
     }
 
@@ -240,8 +363,18 @@ impl Store {
         let mut next = current.clone();
         mutate(next.as_object_mut().unwrap())?;
         atomic_write(&self.path, &next).map_err(|error| format!("Не удалось сохранить настройки: {error}"))?;
-        *cache = Some((next.clone(), stamp_of(&self.path)));
+        *cache = Some(Cached { value: next.clone(), stamp: stamp_of(&self.path), broken: false });
         Ok(next)
+    }
+
+    /// Молчаливая правка: значение после (или прежнее, если запись не удалась).
+    /// Только для мест, где отказ ловится иначе (чтение-после-записи) — всё
+    /// остальное зовёт `try_*`.
+    fn update_quiet(&self, mutate: impl FnOnce(&mut Map<String, Value>)) -> Value {
+        self.try_update(|root| { mutate(root); Ok(()) }).unwrap_or_else(|error| {
+            crate::log::line(&format!("[settings] background save failed: {error}"));
+            self.load()
+        })
     }
 
     /// Однократная миграция файла на старте: если версия на диске устарела —
@@ -251,9 +384,28 @@ impl Store {
         let mut cache = self.cache.lock().unwrap();
         let path = &self.path;
         let Ok(raw) = fs::read_to_string(path) else { return }; // нет файла → дефолты
-        let Ok(Value::Object(disk)) = serde_json::from_str::<Value>(&raw) else { return }; // битый → не трогаем
+        let Ok(Value::Object(disk)) = serde_json::from_str::<Value>(&raw) else {
+            // Битый файл не мигрируем, но копию делаем ЗДЕСЬ — до того, как
+            // первый же тумблер допишет дефолты поверх оригинала.
+            backup_broken(path);
+            return;
+        };
         let from = disk.get("schemaVersion").and_then(Value::as_u64).unwrap_or(0);
-        if from >= SCHEMA_VERSION {
+        if from > SCHEMA_VERSION {
+            // Файл от более новой сборки. Читаем как есть (мерж сохраняет
+            // незнакомые ключи), но говорим вслух и кладём снимок: даунгрейд
+            // трактует поля по-своему, и без копии откат необратим.
+            crate::log::line(&format!(
+                "[settings] файл новее сборки (схема {from} > {SCHEMA_VERSION}) — \
+                 работаю как есть, снимок в settings.bak.json"
+            ));
+            let backup = path.with_file_name("settings.bak.json");
+            if fs::copy(path, &backup).is_ok() {
+                let _ = fs::set_permissions(&backup, fs::Permissions::from_mode(0o600));
+            }
+            return;
+        }
+        if from == SCHEMA_VERSION {
             return; // уже актуально
         }
         let backup = path.with_file_name("settings.bak.json");
@@ -447,6 +599,23 @@ mod migration_tests {
         assert_eq!(out.get("voice"), Some(&json!({ "tts": "silero" })));
     }
 
+    /// Мёртвая ручка в конфиге дороже, чем кажется: человек прочитал
+    /// `sessionsSpawnMax: 4` и заключил, что удалённый потолок вернулся. Ключ
+    /// уносим, остальное — не трогаем: чужие поля миграция не выбрасывает.
+    #[test]
+    fn the_dead_spawn_ceiling_is_swept_out_and_nothing_else_is() {
+        let mut m = Map::new();
+        m.insert("schemaVersion".into(), Value::from(1u64));
+        m.insert("sessionsSpawnMax".into(), Value::from(4));
+        m.insert("hotkey".into(), Value::from("Command+K"));
+        m.insert("autonomy".into(), json!({ "chatDayUsd": 10.0 }));
+        let out = run_migrations(m, 1);
+        assert!(out.get("sessionsSpawnMax").is_none(), "мёртвый ключ остался в файле");
+        assert_eq!(out.get("hotkey").and_then(Value::as_str), Some("Command+K"));
+        assert_eq!(out.get("autonomy"), Some(&json!({ "chatDayUsd": 10.0 })));
+        assert_eq!(out.get("schemaVersion").and_then(Value::as_u64), Some(SCHEMA_VERSION));
+    }
+
     #[test]
     fn current_version_is_idempotent() {
         let mut m = Map::new();
@@ -466,7 +635,7 @@ mod proxy_tests {
     fn store_with(v: Value) -> Store {
         let s = Store::new();
         let stamp = stamp_of(&s.path);
-        *s.cache.lock().unwrap() = Some((v, stamp));
+        *s.cache.lock().unwrap() = Some(Cached { value: v, stamp, broken: false });
         s
     }
 
@@ -690,5 +859,114 @@ mod persistence_tests {
         assert_eq!(store.load()["density"], "compact");
         assert_eq!(store.load()["theme"], "dark");
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Главное про запись: провал ВИДЕН вызывающему. Молчаливый `save` вернул
+    /// бы прежнее значение, и панель ответила бы человеку «сохранено» — хоткей
+    /// работал бы до перезапуска и исчез бы без объяснений.
+    #[test]
+    fn failed_persist_is_reported_to_the_caller() {
+        let dir = temp_dir("try-save");
+        let path = dir.join("settings.json");
+        fs::create_dir(&path).unwrap(); // переименовать поверх каталога нельзя
+        let store = Store::with_path(path);
+
+        let mut patch = Map::new();
+        patch.insert("hotkey".into(), Value::from("Command+K"));
+        let e = store.try_save(patch).expect_err("запись провалилась — обязан быть Err");
+        assert!(e.contains("настройки"), "причина в тексте: {e}");
+
+        let mut block = Map::new();
+        block.insert("enabled".into(), Value::from(true));
+        assert!(store.try_set_block("wake", block).is_err(), "и для блока тоже");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Битый settings.json: дефолты в памяти — вынужденно, но ОРИГИНАЛ обязан
+    /// пережить первую же правку. Иначе один тумблер стирает удалённые узлы,
+    /// хоткеи и гранты навсегда — бэкапа на этом пути раньше не было.
+    #[test]
+    fn a_broken_file_is_copied_aside_before_the_first_write() {
+        let dir = temp_dir("broken");
+        let path = dir.join("settings.json");
+        let garbage = "{ \"remotes\": [{\"name\":\"vps\"}], \"hotkey\": ";
+        fs::write(&path, garbage).unwrap();
+        let store = Store::with_path(path.clone());
+
+        // читается как дефолты (иначе приложение вообще не поднимется)…
+        assert_eq!(store.load()["remotes"], json!([]));
+        // …но правка не уносит оригинал с собой
+        store.set_top("theme", Value::from("dark"));
+        let copy = dir.join("settings.broken.json");
+        assert_eq!(
+            fs::read_to_string(&copy).unwrap(),
+            garbage,
+            "оригинал сохранён байт в байт"
+        );
+        assert_eq!(fs::metadata(&copy).unwrap().permissions().mode() & 0o777, 0o600);
+        // Ошибка требует исправления: даже при наличии копии исходный файл сохраняется.
+        assert_eq!(fs::read_to_string(&path).unwrap(), garbage);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Копию сделать не вышло — значит запись уничтожила бы единственный
+    /// экземпляр настроек. Тогда не пишем вовсе и говорим почему.
+    #[test]
+    fn without_a_copy_a_broken_file_is_not_overwritten() {
+        let dir = temp_dir("broken-nocopy");
+        let path = dir.join("settings.json");
+        fs::write(&path, "не json").unwrap();
+        // место под копию занято каталогом — fs::copy обязан провалиться
+        fs::create_dir(dir.join("settings.broken.json")).unwrap();
+        let store = Store::with_path(path.clone());
+
+        let e = store
+            .try_save(Map::from_iter([("theme".to_string(), Value::from("dark"))]))
+            .expect_err("без копии писать нельзя");
+        assert!(e.contains("повреждён"), "{e}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "не json", "файл цел");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Битый файл на старте: миграция его не трогает — но копию кладёт сразу,
+    /// не дожидаясь первой правки.
+    #[test]
+    fn startup_backs_up_a_broken_file() {
+        let dir = temp_dir("broken-startup");
+        let path = dir.join("settings.json");
+        fs::write(&path, "{ битьё").unwrap();
+        Store::with_path(path.clone()).migrate_on_startup();
+        assert_eq!(fs::read_to_string(dir.join("settings.broken.json")).unwrap(), "{ битьё");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{ битьё", "оригинал не тронут");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Файл из будущей версии: не мигрируем (вперёд-только), но снимок кладём —
+    /// даунгрейд трактует поля по-своему, и без копии откат необратим.
+    #[test]
+    fn a_file_from_the_future_is_kept_and_snapshotted() {
+        let dir = temp_dir("future");
+        let path = dir.join("settings.json");
+        let raw = format!(
+            "{{\"schemaVersion\":{},\"hotkey\":\"Command+K\"}}",
+            SCHEMA_VERSION + 5
+        );
+        fs::write(&path, &raw).unwrap();
+        Store::with_path(path.clone()).migrate_on_startup();
+        assert_eq!(fs::read_to_string(&path).unwrap(), raw, "файл не переписан");
+        assert_eq!(fs::read_to_string(dir.join("settings.bak.json")).unwrap(), raw);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Дописка к преамбуле агента (agentPreamble): дефолт пуст, правка человека
+    /// читается обратно как строка.
+    #[test]
+    fn agent_preamble_roundtrips() {
+        let dir = temp_dir("preamble");
+        let store = store_at(&dir);
+        assert_eq!(store.string("agentPreamble"), "");
+        store.set_top("agentPreamble", Value::from("Отвечай кратко."));
+        assert_eq!(store.string("agentPreamble"), "Отвечай кратко.");
+        let _ = fs::remove_dir_all(dir);
     }
 }

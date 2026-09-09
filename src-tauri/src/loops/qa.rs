@@ -34,20 +34,7 @@ impl Drop for Fixture {
     }
 }
 fn step(id: &str, kind: StepKind, next: &str) -> Step {
-    Step {
-        id: id.into(),
-        name: id.into(),
-        kind,
-        retries: 0,
-        next: if next.is_empty() {
-            vec![]
-        } else {
-            vec![Flow {
-                to: next.into(),
-                when: Cond::Always,
-            }]
-        },
-    }
+    Step::node(id, kind, if next.is_empty() { vec![] } else { vec![Flow::to(next, Cond::Always)] })
 }
 fn pipeline(repo: &Path, steps: Vec<Step>) -> Loop {
     let mut l = Loop {
@@ -56,6 +43,7 @@ fn pipeline(repo: &Path, steps: Vec<Step>) -> Loop {
         pipeline: Some(Pipeline {
             start: String::new(),
             steps,
+            ..Default::default()
         }),
         ..Default::default()
     };

@@ -585,6 +585,41 @@ pub struct PanesReply {
     pub error: String,
 }
 
+/// Живой агент на той машине: то, что узел нашёл в таблице процессов.
+///
+/// Нужен для двух вещей сверки, и обе — про «а он вообще жив»: pid отвечает на
+/// это честнее паны (пана бывает из ЧУЖОГО tmux-сервера), а `session_id` даёт
+/// подобрать сессию, о которой хуков не приходило вовсе.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RemoteAgent {
+    pub pid: i64,
+    /// "claude" | "codex".
+    pub agent: String,
+    pub cwd: String,
+    /// Пана `-L jarvis`, если агент растёт из неё; пусто — запущен мимо.
+    pub pane: String,
+    /// Имя tmux-сессии той паны.
+    pub session: String,
+    /// Идентификатор сессии агента (имя файла транскрипта). Пусто — узел не
+    /// смог связать процесс с транскриптом, и подбирать нечего.
+    pub session_id: String,
+    pub transcript: String,
+}
+
+/// Ответ `GET /agents?pids=` — один снимок «кто там сейчас работает».
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AgentsReply {
+    pub agents: Vec<RemoteAgent>,
+    /// Паны `-L jarvis` — инвариант «одна пана — одна сессия».
+    pub panes: Vec<String>,
+    /// Какие из спрошенных pid живы.
+    pub alive: Vec<i64>,
+    /// tmux не установлен или сервер не поднят.
+    pub error: String,
+}
+
 /// HTTP-клиент к одному узлу через его туннель.
 ///
 /// Два клиента, а не один: long-poll `/events` живёт до 25с, а ответ/пульт
@@ -792,6 +827,16 @@ impl NodeClient {
         let value: Value = self.get_json(&self.http, "/sessions", &[]).await?;
         if value.get("sessions").is_some_and(Value::is_array) { Ok(value) }
         else { Err("Узел не поддерживает каталог сессий — обнови jarvis-node".into()) }
+    }
+
+    /// Снимок живого: агенты, паны и живость спрошенных pid — одним запросом.
+    ///
+    /// Узел до этой ручки не знает и на неизвестный GET отвечает строкой
+    /// «jarvis-node ok» — разбор её не примет, и ошибка честно скажет, что
+    /// узел пора переустановить.
+    pub async fn agents(&self, pids: &[i64]) -> Result<AgentsReply, String> {
+        let list = pids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+        self.get_json(&self.http, "/agents", &[("pids", list)]).await
     }
 
     /// Оглавление проектов машины: где там работали. Узел отдаёт только

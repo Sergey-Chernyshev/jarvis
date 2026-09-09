@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -17,6 +18,18 @@ pub type Handler<C> = Box<dyn Fn(C, Value) -> HandlerFut + Send + Sync>;
 pub struct Entry<C> {
     pub meta: CapabilityMeta,
     pub handler: Handler<C>,
+    /// Свой дедлайн исполнения вместо общего (`GateConfig::handler_timeout`).
+    ///
+    /// `None` — общий, и это правильный ответ почти всегда: капабилити обязана
+    /// возвращаться быстро, а долгую работу отдавать фоновому сторожу (так
+    /// устроен `sessions.spawn` — талон сразу, связывание потом).
+    ///
+    /// Исключение ровно одно и оно осознанное: там, где УСПЕХ определён внешним
+    /// событием и отчитаться раньше него значит соврать. У `sessions.resume`
+    /// успех — это пришедший хук оживлённой сессии, и ждать его меньше, чем CLI
+    /// поднимает разговор с диска, бессмысленно: общий дедлайн 30 с обрубал бы
+    /// вызов на полпути и отдавал `failed:timeout` там, где сессия встаёт.
+    pub deadline: Option<Duration>,
 }
 
 pub struct Registry<C> {
@@ -36,7 +49,16 @@ impl<C> Registry<C> {
 
     pub fn register(&mut self, meta: CapabilityMeta, handler: Handler<C>) {
         debug_assert!(!self.entries.contains_key(meta.id), "дубликат капабилити: {}", meta.id);
-        self.entries.insert(meta.id, Entry { meta, handler });
+        self.entries.insert(meta.id, Entry { meta, handler, deadline: None });
+    }
+
+    /// Зарегистрировать капабилити со СВОИМ дедлайном исполнения (см.
+    /// [`Entry::deadline`]). Отдельный метод, а не поле в `CapabilityMeta`:
+    /// исключение обязано быть видно в месте регистрации, а не теряться среди
+    /// трёх десятков одинаковых литералов.
+    pub fn register_slow(&mut self, meta: CapabilityMeta, handler: Handler<C>, deadline: Duration) {
+        debug_assert!(!self.entries.contains_key(meta.id), "дубликат капабилити: {}", meta.id);
+        self.entries.insert(meta.id, Entry { meta, handler, deadline: Some(deadline) });
     }
 
     pub fn get(&self, id: &str) -> Option<&Entry<C>> {

@@ -23,6 +23,7 @@ pub mod agent;
 pub mod files;
 pub mod http;
 pub mod hooks;
+pub mod live;
 pub mod projects;
 pub mod sources;
 pub mod ring;

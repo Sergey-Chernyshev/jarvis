@@ -156,6 +156,9 @@ use std::sync::OnceLock;
 const HOOK_SRC: &str = include_str!("../../../bin/jarvis-hook");
 const SHIM_SRC: &str = include_str!("../../../bin/agent-shim");
 const CUSTOM_SHIM_SRC: &str = include_str!("../../../bin/custom-shim");
+/// Страж синтетического ввода: ставится в тот же каталог шимов под именами
+/// инструментов ввода (osascript/cliclick/…) и отказывает в них агенту.
+const INPUT_GUARD_SRC: &str = include_str!("../../../bin/input-guard");
 const TMUX_CONF_SRC: &str = include_str!("../../../bin/jarvis-tmux.conf");
 const SILERO_SERVER_SRC: &str = include_str!("../../../bin/silero-server.py");
 /// STT-сайдкар (Qwen3-ASR MLX): Python-сервер для диктовки (инкр. 9, Phase 8).
@@ -211,6 +214,32 @@ const CODEX_EVENTS: [(&str, &str); 9] = [
     ("SubagentStart", "subagent-start"),
     ("SubagentStop", "subagent-stop"),
     ("SessionEnd", "session-end"),
+];
+
+/// Событие Kimi Code CLI → аргумент шима. У Kimi богаче остальных: есть и
+/// `PermissionRequest` (waiting напрямую, без скрин-скрейпа), и `SessionEnd`
+/// (которого нет у Codex), и `SessionHeartbeat` — пульс раз в 60 с, дающий
+/// честную живость без опроса pid. (Дублируется с backend осознанно: этот
+/// модуль компилируется отдельным бинарём jarvis-setup без остального крейта.)
+///
+/// Важно: таймер heartbeat запускается ТОЛЬКО если на событие повешен хук —
+/// то есть пульс появляется ровно потому, что мы его просим.
+const KIMI_EVENTS: [(&str, &str); 12] = [
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "prompt"),
+    ("PreToolUse", "pre-tool"),
+    ("PostToolUse", "post-tool"),
+    ("PermissionRequest", "permission"),
+    ("Stop", "stop"),
+    ("StopFailure", "stop-failure"),
+    // Прерывание хода человеком. По документации Kimi «Stop не срабатывает
+    // при прерывании, вместо него срабатывает это событие» — без Interrupt
+    // прерванный ход не давал НИКАКОГО сигнала о завершении.
+    ("Interrupt", "interrupt"),
+    ("SessionEnd", "session-end"),
+    ("SessionHeartbeat", "heartbeat"),
+    ("SubagentStart", "subagent-start"),
+    ("SubagentStop", "subagent-stop"),
 ];
 
 /* ================= публичные типы (прогресс/статус) ================= */
@@ -294,6 +323,9 @@ pub struct Status {
     pub stt_engine_active: String,
     /// 3 ONNX-модели wake-word (инкр. 10) на месте (~3.5 МБ).
     pub wakeword_models: bool,
+    /// Движок wake-word вкомпилирован (feature `wakeword-ort`). Без неё детектор —
+    /// стаб: «Hey Jarvis» молчит даже со скачанными весами; источник правды для гейта.
+    pub wakeword_ort_built: bool,
 }
 
 impl Status {
@@ -590,6 +622,28 @@ fn mcp_config_dst() -> PathBuf {
     jarvis_dir().join("jarvis-mcp.json")
 }
 
+/// Имя моста — одно и то же в трёх местах: `[[bin]]` в Cargo.toml, файл рядом с
+/// exe и копия в `~/.jarvis/bin/`. Держим строку одной, чтобы связь была видна.
+const MCP_BIN: &str = "jarvis-mcp";
+
+/// Откуда взять `jarvis-mcp`, чтобы положить его в `~/.jarvis/bin/`: он всегда
+/// СИБЛИНГ текущего exe — и в дереве разработчика, и в установке из образа.
+///
+/// Это не совпадение и не «пока везёт». Бандлер tauri копирует в пакет КАЖДЫЙ
+/// `[[bin]]` манифеста, рядом с главным бинарём: на macOS в
+/// `Jarvis.app/Contents/MacOS/`, в deb/rpm/AppImage — в `usr/bin/`
+/// (`tauri-bundler`: `macos/app.rs::copy_binaries_to_bundle`,
+/// `linux/debian.rs::generate_data`, `linux/rpm.rs`). Проверено на released
+/// артефакте: `Jarvis_aarch64.app.tar.gz` содержит `Contents/MacOS/jarvis-mcp`.
+///
+/// Поэтому ни `externalBin`, ни `resources` мосту не нужны — см. build.rs, где
+/// расписано, почему `externalBin` вдобавок ломает сборку. Сторож на то, что
+/// `[[bin]]` никуда не делся, — в тестах ниже (`mcp_bridge_is_a_bundled_bin`).
+fn mcp_src(exe: &Path) -> Option<PathBuf> {
+    let candidate = exe.parent()?.join(MCP_BIN);
+    candidate.is_file().then_some(candidate)
+}
+
 /// Выдать/прочитать токен агента в ~/.jarvis/tokens.json (0600). Самодостаточно:
 /// install/mod.rs компилируется и в jarvis-setup (без `crate::capability`), поэтому
 /// логику токена дублируем минимально. Формат совпадает с `capability::tokens::TokenStore`
@@ -653,6 +707,53 @@ fn settings_path() -> PathBuf {
 }
 fn jarvis_settings_path() -> PathBuf {
     jarvis_dir().join("settings.json")
+}
+
+fn kimi_shim_dst() -> PathBuf {
+    shims_dir().join("kimi")
+}
+/// Kimi Code CLI: `$KIMI_CODE_HOME` или `~/.kimi-code`.
+///
+/// Именно `.kimi-code`, а НЕ `.kimi`: `~/.kimi` — дом старого продукта kimi-cli,
+/// у него другой набор хуков. Перепутать эти два — значит писать хуки в конфиг,
+/// который никто не читает.
+fn kimi_home() -> PathBuf {
+    match std::env::var("KIMI_CODE_HOME") {
+        Ok(d) if !d.is_empty() => PathBuf::from(d),
+        _ => home().join(".kimi-code"),
+    }
+}
+/// У Kimi хуки живут не отдельным файлом, а секциями `[[hooks]]` в общем конфиге.
+fn kimi_config_path() -> PathBuf {
+    kimi_home().join("config.toml")
+}
+
+/// Путь к бинарю `kimi` (минуя наш шим). Штатная установка кладёт бинарь в
+/// `<дом>/bin`, который может быть ещё не в PATH, — проверяем сначала его.
+///
+/// Резолвим ОДИН раз и отдаём путь: всякий, кто хочет позвать `kimi`, обязан
+/// звать этот бинарь, а не имя через `sh`. Иначе «нашли» и «смогли запустить»
+/// расходятся, и запуск через PATH возвращает 127 там, где бинарь есть.
+fn kimi_bin() -> Option<PathBuf> {
+    let bin = kimi_home().join("bin/kimi");
+    if fs::metadata(&bin).map(|m| m.is_file()).unwrap_or(false) {
+        return Some(bin);
+    }
+    let out = Command::new("/bin/sh")
+        .args(["-c", "command -v kimi"])
+        .env("PATH", augmented_path())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+/// Установлен ли `kimi` (PATH или `<дом>/bin`).
+fn kimi_found() -> bool {
+    kimi_bin().is_some()
 }
 
 /// Установлен ли `codex` в PATH (минуя наш шим).
@@ -1495,7 +1596,13 @@ fn has_block(content: &str) -> bool {
 
 /// Вставить или заменить блок. Идемпотентно.
 fn merge_block(content: &str, shims_dir: &str) -> String {
-    let block = block_body(shims_dir);
+    merge_marked_block(content, &block_body(shims_dir))
+}
+
+/// Вставить или заменить блок между маркерами. Общее ядро: тем же приёмом
+/// правится и `~/.zshrc` (PATH-шимы), и `config.toml` Kimi (секции `[[hooks]]`) —
+/// маркеры `# >>> jarvis >>>` валидны и как комментарий шелла, и как комментарий TOML.
+fn merge_marked_block(content: &str, block: &str) -> String {
     if has_block(content) {
         let re = regex::Regex::new(&format!(
             "{}[\\s\\S]*?{}",
@@ -1503,9 +1610,7 @@ fn merge_block(content: &str, shims_dir: &str) -> String {
             regex::escape(END)
         ))
         .unwrap();
-        return re
-            .replace_all(content, regex::NoExpand(block.as_str()))
-            .into_owned();
+        return re.replace_all(content, regex::NoExpand(block)).into_owned();
     }
     let sep = if !content.is_empty() && !content.ends_with('\n') {
         "\n"
@@ -1607,6 +1712,196 @@ fn install_hooks_into_with(path: &Path, hook_bin: &Path, label: &str, events: &[
         }
         Err(e) => progress(Step::warn("Хуки", format!("{e} — пропускаю хуки {label}"))),
     }
+}
+
+/* ================= хуки Kimi: TOML вместо JSON ================= */
+
+/// Экранирование для базовой TOML-строки: только `\` и `"` (остальное в путях
+/// не встречается, а control-символы в пути к бинарю — не наш случай).
+fn toml_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Блок `[[hooks]]` для `config.toml`.
+///
+/// Схема Kimi строгая (zod `.strict()`): допустимы ровно `event`, `command`,
+/// `matcher`, `timeout` — ЛЮБОЕ лишнее поле роняет загрузку всего конфига, а с
+/// ним и сам Kimi. Поэтому пишем только три из них и никогда не «улучшаем»
+/// запись. `matcher` не задаём: пустой matcher совпадает со всем, а нам нужны
+/// все события целиком.
+fn kimi_hooks_block(hook_bin: &str) -> String {
+    let mut out = String::from(BEGIN);
+    out.push_str("\n# Управляется Jarvis (npm run setup/teardown) — не редактируй вручную\n");
+    for (event, arg) in KIMI_EVENTS {
+        out.push_str(&format!(
+            "\n[[hooks]]\nevent = \"{event}\"\ncommand = \"{} kimi {arg}\"\ntimeout = 5\n",
+            toml_escape(hook_bin)
+        ));
+    }
+    out.push_str(END);
+    out
+}
+
+/// Все ли наши хуки уже прописаны в тексте конфига Kimi.
+fn kimi_hooks_present(content: &str, hook_bin: &str) -> bool {
+    has_block(content) && content.contains(&kimi_hooks_block(hook_bin))
+}
+
+/// Прописать хуки Jarvis в `~/.kimi-code/config.toml`.
+///
+/// Отличие от JSON-пути (Claude/Codex): конфиг Kimi — это ОБЩИЙ файл пользователя
+/// с его провайдерами, моделями и правилами прав, а не выделенный файл хуков.
+/// Поэтому: (1) правим managed-блоком, не переписывая остальное; (2) прогоняем
+/// `kimi doctor` ДО и ПОСЛЕ записи и откатываемся на бэкап, только если конфиг
+/// испортили именно мы. Цена ошибки здесь — не «хуки не работают», а «Kimi не
+/// запускается вообще»; цена ложного отката — вечный онбординг (health битый).
+fn install_kimi_hooks(progress: &Progress) {
+    install_kimi_hooks_at(
+        &kimi_config_path(),
+        &hook_dst().display().to_string(),
+        &backup,
+        &kimi_config_valid,
+        progress,
+    );
+}
+
+/// Тело `install_kimi_hooks` с вынесенными наружу файлом, бэкапом и doctor —
+/// ровно тем, что в тестах нельзя трогать по-настоящему.
+fn install_kimi_hooks_at(
+    path: &Path,
+    hook_bin: &str,
+    backup_fn: &dyn Fn(&Path) -> Option<PathBuf>,
+    doctor: &dyn Fn() -> Option<bool>,
+    progress: &Progress,
+) {
+    let existed = path.exists();
+    let content = if existed {
+        match fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                progress(Step::warn("Хуки", format!("{e} — пропускаю хуки kimi")));
+                return;
+            }
+        }
+    } else {
+        String::new()
+    };
+
+    if kimi_hooks_present(&content, hook_bin) {
+        progress(Step::done("Хуки", "kimi: уже установлены"));
+        return;
+    }
+
+    // Вердикт ДО правки — точка отсчёта. Без неё «doctor ругается» невозможно
+    // отличить от «doctor ругается на нас»: у свежего Kimi без логина он не
+    // доволен всегда, и откатывать по этому поводу чужой конфиг незачем.
+    let before = doctor();
+
+    // Бэкап обязателен: без него мы не сможем откатиться, а конфиг Kimi —
+    // общий файл пользователя (провайдеры, модели, права). Нет бэкапа —
+    // не трогаем файл вовсе.
+    let saved = if existed {
+        match backup_fn(path) {
+            Some(b) => Some(b),
+            None => {
+                progress(Step::warn(
+                    "Хуки",
+                    "kimi: не смог сделать бэкап config.toml — не трогаю конфиг",
+                ));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    atomic_write(path, &merge_marked_block(&content, &kimi_hooks_block(hook_bin)));
+
+    let after = doctor();
+    if !kimi_rollback_needed(before, after) {
+        let note = match after {
+            Some(true) => "",
+            // Хуки записаны, но doctor недоволен по своей причине (нет логина,
+            // нет провайдера) — это не про нас, и врать «проверено» нельзя.
+            Some(false) => " (doctor ругается и без наших правок)",
+            None => " (без проверки: doctor не ответил)",
+        };
+        progress(Step::done(
+            "Хуки",
+            format!("kimi: {} событий{note}", KIMI_EVENTS.len()),
+        ));
+        return;
+    }
+    // Откат: конфиг важнее наших хуков.
+    match &saved {
+        Some(b) => match fs::copy(b, path) {
+            Ok(_) => progress(Step::warn(
+                "Хуки",
+                "kimi: конфиг не прошёл проверку — вернул как было",
+            )),
+            Err(e) => progress(Step::warn(
+                "Хуки",
+                format!(
+                    "kimi: конфиг не прошёл проверку, и ОТКАТ НЕ УДАЛСЯ ({e}) — \
+                     верните вручную из {}",
+                    b.display()
+                ),
+            )),
+        },
+        // Бэкапа нет только когда файла не было: удаляем ровно то, что создали сами.
+        None => {
+            let _ = fs::remove_file(path);
+            progress(Step::warn("Хуки", "kimi: конфиг не прошёл проверку — убрал"));
+        }
+    }
+}
+
+/// Откатывать ли нашу правку по вердиктам `kimi doctor` до и после записи.
+///
+/// Откат — только если ДО было хорошо, а ПОСЛЕ стало плохо: только тогда виноват
+/// наш блок. «Не смогли спросить» (`None`) поводом считать конфиг битым не
+/// является, а «doctor и так ругался» — не наш повод стирать хуки.
+fn kimi_rollback_needed(before: Option<bool>, after: Option<bool>) -> bool {
+    after == Some(false) && before != Some(false)
+}
+
+/// `kimi doctor`: `Some(true)` — конфиг валиден, `Some(false)` — нет,
+/// `None` — спросить не удалось (бинаря нет, не запустился, 127 от шелла).
+fn kimi_config_valid() -> Option<bool> {
+    let bin = kimi_bin()?;
+    let code = Command::new(&bin)
+        .arg("doctor")
+        .env("PATH", augmented_path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?
+        .code();
+    doctor_verdict(code)
+}
+
+/// Трактовка кода возврата `kimi doctor`. 127/126 — это ответ шелла «не нашёл /
+/// не смог запустить», а не приговор конфигу: спросить не удалось (`None`).
+fn doctor_verdict(code: Option<i32>) -> Option<bool> {
+    match code {
+        Some(0) => Some(true),
+        Some(126) | Some(127) => None,
+        Some(_) => Some(false),
+        None => None, // убит сигналом — тоже «не спросили»
+    }
+}
+
+/// Снять наши хуки из конфига Kimi, не тронув остальное.
+fn uninstall_kimi_hooks(progress: &Progress) {
+    let path = kimi_config_path();
+    let Ok(content) = fs::read_to_string(&path) else {
+        return; // нет файла — нечего снимать
+    };
+    if !has_block(&content) {
+        return;
+    }
+    backup(&path);
+    atomic_write(&path, &remove_block(&content));
+    progress(Step::done("Хуки", "kimi: записи сняты"));
 }
 
 /// Слияние наших хуков в уже прочитанный JSON — чистая часть `install_hooks_into`.
@@ -1772,6 +2067,15 @@ fn atomic_write(file: &Path, content: &str) {
     atomic_write_mode(file, content, mode).expect("атомарная запись файла");
 }
 
+/// Сколько копий `<файл>.bak-*` держим. Пять — это несколько шагов назад по
+/// истории правок (обычно их одна-две за релиз) и при этом фиксированный
+/// потолок: `reconcile_hooks` крутится на каждом старте демона, и без потолка
+/// каталог зарастает бэкапами навсегда.
+const BACKUPS_KEEP: usize = 5;
+
+/// Копия рядом: `<файл>.bak-<UTC>`. `None` — файла не было ИЛИ скопировать не
+/// удалось; вызывающий обязан различать эти два случая сам (по `exists()` до
+/// вызова), потому что во втором трогать оригинал уже нельзя.
 fn backup(file: &Path) -> Option<PathBuf> {
     if !file.exists() {
         return None;
@@ -1779,7 +2083,30 @@ fn backup(file: &Path) -> Option<PathBuf> {
     let stamp = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S-%3fZ");
     let dst = PathBuf::from(format!("{}.bak-{stamp}", file.display()));
     fs::copy(file, &dst).ok()?;
+    prune_backups(file, BACKUPS_KEEP);
     Some(dst)
+}
+
+/// Оставить только `keep` последних бэкапов файла. Метка времени в имени — ISO,
+/// поэтому лексикографический порядок совпадает с хронологическим.
+fn prune_backups(file: &Path, keep: usize) {
+    let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else {
+        return;
+    };
+    let prefix = format!("{}.bak-", name.to_string_lossy());
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    let mut olds: Vec<String> = rd
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(&prefix))
+        .collect();
+    if olds.len() <= keep {
+        return;
+    }
+    olds.sort();
+    for name in &olds[..olds.len() - keep] {
+        let _ = fs::remove_file(dir.join(name));
+    }
 }
 
 fn is_ours(hook: &Value) -> bool {
@@ -1824,6 +2151,39 @@ fn group_has_cmd(group: &Value, cmd: &str) -> bool {
                 .iter()
                 .any(|h| h.get("command").and_then(Value::as_str) == Some(cmd))
         })
+}
+
+/// Каталог Jarvis, на который смотрят НАШИ хуки в этом файле, если он не наш.
+///
+/// Две копии приложения (обычная и dev) делят один `~/.claude/settings.json`, и
+/// установка из одной перенацеливает хуки на её каталог. Для другой это значит,
+/// что события уходят в чужой сокет, то есть не приходят вовсе. Отличить это от
+/// «хуков нет» обязательно: лечится оно одним нажатием, а выглядит одинаково.
+///
+/// Пусто — либо наших хуков нет, либо они уже наши.
+fn foreign_hooks_dir(json: &Value, events: &[(&str, &str)]) -> String {
+    let mine = hook_dst().display().to_string();
+    for (event, _) in events {
+        let Some(groups) = json.pointer(&format!("/hooks/{event}")).and_then(Value::as_array) else {
+            continue;
+        };
+        for g in groups {
+            let Some(hooks) = g.get("hooks").and_then(Value::as_array) else { continue };
+            for h in hooks {
+                let Some(cmd) = h.get("command").and_then(Value::as_str) else { continue };
+                if !cmd.contains(MARKER) || cmd.starts_with(&mine) {
+                    continue;
+                }
+                // `<путь>/bin/jarvis-hook <агент> <событие>` → каталог Jarvis.
+                if let Some(bin) = cmd.split_whitespace().next() {
+                    if let Some(dir) = bin.strip_suffix(&format!("/{MARKER}")) {
+                        return dir.to_string();
+                    }
+                }
+            }
+        }
+    }
+    String::new()
 }
 
 /// Содержит ли группа УСТАРЕВШИЙ наш хук — наш по MARKER, но команда не совпадает
@@ -1975,21 +2335,40 @@ pub struct IntegrationHealth {
     pub codex_present: bool,
     /// Все хуки Codex в ~/.codex/hooks.json — с актуальной командой (n/a → true).
     pub codex_hooks_ok: bool,
+    /// `kimi` найден (PATH или `<дом>/bin`).
+    pub kimi_present: bool,
+    /// Наш блок `[[hooks]]` в ~/.kimi-code/config.toml актуален (n/a → true).
+    pub kimi_hooks_ok: bool,
     /// Шим `claude` установлен в shims-каталог.
     pub claude_shim: bool,
     /// Шим `codex` установлен (опциональный tmux remote transport).
     pub codex_shim: bool,
+    /// Шим `kimi` установлен.
+    pub kimi_shim: bool,
+    /// Каталог Jarvis, на который смотрят наши хуки, если он ЧУЖОЙ (другая копия
+    /// приложения: обычная против dev). Пусто — хуки наши или их нет.
+    ///
+    /// Без этого поля «хуков нет» и «хуки уведены другой копией» выглядят
+    /// одинаково, а лечатся по-разному — и человек ходит по кругу.
+    pub hooks_elsewhere: String,
+    /// Страж синтетического ввода стоит (шим `osascript` в каталоге шимов).
+    ///
+    /// В `ok()` НЕ входит осознанно: без него интеграция работает, а вот
+    /// «неполная интеграция» ради этого поля заставила бы демон каждый старт
+    /// жаловаться на машинах, где ввода нет вовсе (Linux без xdotool).
+    pub input_guard: bool,
 }
 
 impl IntegrationHealth {
-    /// Всё критичное на месте: бинарь хука + корректные регистрации обоих агентов
-    /// (codex учитывается, только если установлен).
+    /// Всё критичное на месте: бинарь хука + корректные регистрации всех агентов
+    /// (codex и kimi учитываются, только если установлены).
     pub fn ok(&self) -> bool {
-        let any_agent = self.claude_present || self.codex_present;
+        let any_agent = self.claude_present || self.codex_present || self.kimi_present;
         self.hook_bin
             && any_agent
             && (!self.claude_present || self.claude_hooks_ok)
             && (!self.codex_present || self.codex_hooks_ok)
+            && (!self.kimi_present || self.kimi_hooks_ok)
     }
 }
 
@@ -1997,6 +2376,7 @@ impl IntegrationHealth {
 pub fn integration_health() -> IntegrationHealth {
     let instances = instance_health();
     let codex_present = instances.as_ref().map(|instances| instances.iter().any(|instance| instance.enabled && (instance.cli_available || Path::new(&instance.home).is_dir()))).unwrap_or(true);
+    let kimi_present = kimi_found();
     IntegrationHealth {
         jarvis_dir: jarvis_dir().display().to_string(),
         hook_bin: hook_dst().exists(),
@@ -2005,8 +2385,24 @@ pub fn integration_health() -> IntegrationHealth {
         claude_hooks_ok: hooks_all_correct(&settings_path(), "claude", &EVENTS),
         codex_present,
         codex_hooks_ok: instances.is_ok_and(|instances| instances.iter().filter(|instance| instance.enabled && Path::new(&instance.home).is_dir()).all(|instance| instance.rules_installed)),
+        kimi_present,
+        kimi_hooks_ok: !kimi_present || {
+            let hb = hook_dst().display().to_string();
+            fs::read_to_string(kimi_config_path())
+                .map(|c| kimi_hooks_present(&c, &hb))
+                .unwrap_or(false)
+        },
+        hooks_elsewhere: read_settings()
+            .map(|(_, json)| foreign_hooks_dir(&json, &EVENTS))
+            .unwrap_or_default(),
         claude_shim: shim_dst().exists(),
         codex_shim: codex_shim_dst().exists(),
+        kimi_shim: kimi_shim_dst().exists(),
+        // Проверяем по «всегда ставим»: если платформенного списка нет вовсе
+        // (Linux без найденных инструментов), стражу нечего охранять — и это
+        // не «не установлен», а «нечего перехватывать».
+        input_guard: GUARD_ALWAYS.is_empty()
+            || GUARD_ALWAYS.iter().all(|n| shims_dir().join(n).exists()),
     }
 }
 
@@ -2016,8 +2412,15 @@ pub fn integration_health() -> IntegrationHealth {
 /// верно, файлы не переписываются. Лечит главный баг: stale prod-путь/метка после
 /// смены dev↔prod профиля, из-за которого codex дёргал несуществующий бинарь.
 pub fn reconcile_hooks(progress: &Progress) {
+    sync_hook_files(progress);
+    // Страж синтетического ввода — тоже самолечение: он защитный, и на машине
+    // с уже готовой интеграцией должен появиться сам, без повторного setup.
+    install_input_guard(progress);
     install_hooks_into(&settings_path(), "claude", &EVENTS, progress);
     reconcile_codex_instances(progress);
+    if kimi_found() {
+        install_kimi_hooks(progress);
+    }
 }
 
 /// Починить/обновить ТОЛЬКО интеграцию агентов: hook binary + хуки
@@ -2030,13 +2433,18 @@ pub fn repair(progress: &Progress) {
     progress(Step::info(
         "Интеграция",
         format!(
-            "dir={} hook_bin={} claude_hooks={} codex={} codex_hooks={} codex_shim={} → {}",
+            "dir={} hook_bin={} claude_hooks={} codex={} codex_hooks={} codex_shim={} \
+             kimi={} kimi_hooks={} kimi_shim={} input_guard={} → {}",
             h.jarvis_dir,
             h.hook_bin,
             h.claude_hooks_ok,
             h.codex_present,
             h.codex_hooks_ok,
             h.codex_shim,
+            h.kimi_present,
+            h.kimi_hooks_ok,
+            h.kimi_shim,
+            h.input_guard,
             if h.ok() { "OK" } else { "НЕПОЛНО" },
         ),
     ));
@@ -2102,6 +2510,62 @@ fn write_executable(dst: &Path, content: &str) {
     fs::set_permissions(dst, fs::Permissions::from_mode(0o755)).expect("chmod");
 }
 
+/// Записать скрипт, только если на диске лежит не он. Возвращает «переписали».
+///
+/// Содержимое хука и шимов зашито в бинарь (`include_str!`), а на диске живёт
+/// копия от той версии, что ставила интеграцию. После автообновления копия
+/// устаревает молча — существование файла об этом не говорит ничего. Сверяем
+/// именно содержимое.
+fn write_if_changed(dst: &Path, content: &str) -> bool {
+    if fs::read_to_string(dst).ok().as_deref() == Some(content) {
+        return false;
+    }
+    write_executable(dst, content);
+    true
+}
+
+/// Тело transport-шима с запечённым текущим JARVIS_DIR — один источник и для
+/// установки, и для сверки содержимого на старте.
+fn shim_body() -> String {
+    // В рантайме (обычный терминал) env JARVIS_DIR не выставлен, а dev-сборка
+    // живёт в ~/.jarvis-dev. Без подмены дефолта шим искал бы tmux.conf в
+    // ~/.jarvis и падал (No such file).
+    SHIM_SRC.replacen(
+        "JARVIS_DIR=\"${JARVIS_DIR:-$HOME/.jarvis}\"",
+        &format!("JARVIS_DIR=\"${{JARVIS_DIR:-{}}}\"", jarvis_dir().display()),
+        1,
+    )
+}
+
+/// Привести хук-скрипт и уже установленные шимы к содержимому текущей сборки.
+///
+/// Зовётся из `reconcile_hooks` (каждый старт демона): регистрации в конфигах
+/// без актуального скрипта на диске бесполезны — при смене контракта события
+/// ломаются тихо. Новые шимы здесь не создаём: это дело `install_core`,
+/// который знает про tmux и про то, какие агенты вообще есть.
+fn sync_hook_files(progress: &Progress) {
+    let mut fixed = Vec::new();
+    if write_if_changed(&hook_dst(), HOOK_SRC) {
+        fixed.push("jarvis-hook");
+    }
+    let shim = shim_body();
+    for (name, dst) in [
+        ("шим claude", shim_dst()),
+        ("шим codex", codex_shim_dst()),
+        ("шим kimi", kimi_shim_dst()),
+    ] {
+        if dst.exists() && write_if_changed(&dst, &shim) {
+            fixed.push(name);
+        }
+    }
+    if !fixed.is_empty() {
+        progress(Step::done(
+            "Хуки",
+            format!("обновлены до версии сборки: {}", fixed.join(", ")),
+        ));
+    }
+}
+
 /// Метка, по которой свои шимы отличаются от всех прочих файлов.
 ///
 /// Чистка по метке, а не по списку: агент, удалённый из настроек, должен унести
@@ -2129,10 +2593,7 @@ fn sync_custom_shims_at(dir: &Path, agents: &[(String, String)]) {
                 &format!("JARVIS_DIR=\"${{JARVIS_DIR:-{}}}\"", jarvis_dir().display()),
                 1,
             );
-        let dst = dir.join(id);
-        if fs::read_to_string(&dst).ok().as_deref() != Some(&shim) {
-            write_executable(&dst, &shim);
-        }
+        write_if_changed(&dir.join(id), &shim);
     }
     // Осиротевшие: наш маркер есть, а агента в настройках больше нет.
     let keep: std::collections::HashSet<&str> = agents.iter().map(|(id, _)| id.as_str()).collect();
@@ -2145,6 +2606,113 @@ fn sync_custom_shims_at(dir: &Path, agents: &[(String, String)]) {
         let path = e.path();
         let ours = fs::read_to_string(&path)
             .is_ok_and(|t| t.lines().take(3).any(|l| l.contains(CUSTOM_SHIM_MARK)));
+        if ours {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+/* ================= страж синтетического ввода ================= */
+
+/// Инструменты, которые ставятся стражем ВСЕГДА (на своей платформе).
+///
+/// `cliclick` — тут даже если его нет на машине: его единственное назначение —
+/// синтетический ввод, и шим должен встретить агента, который решит доставить
+/// утилиту сам (`brew install cliclick`). `osascript` есть в любой macOS.
+#[cfg(target_os = "macos")]
+const GUARD_ALWAYS: &[&str] = &["osascript", "cliclick"];
+#[cfg(not(target_os = "macos"))]
+const GUARD_ALWAYS: &[&str] = &[];
+
+/// Инструменты, которые перехватываем, только если они реально стоят на машине.
+/// Выдумывать остальные нельзя: шим с именем несуществующей команды делает вид,
+/// что она есть, и ломает `command -v`-разведку чужих скриптов.
+const GUARD_IF_PRESENT: &[&str] = &[
+    "hs",      // Hammerspoon CLI: `hs -c 'hs.eventtap.keyStroke(…)'`
+    "xdotool", // X11
+    "ydotool", // Wayland (uinput)
+    "wtype",   // Wayland
+];
+
+/// Под какими именами ставить стража. Чистая функция от «что есть на машине» —
+/// проверяется тестом без обращения к PATH.
+fn input_guard_names(present: impl Fn(&str) -> bool) -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = GUARD_ALWAYS.to_vec();
+    names.extend(GUARD_IF_PRESENT.iter().copied().filter(|n| present(n)));
+    names
+}
+
+/// Есть ли команда в PATH МИМО каталога шимов. Через шим спрашивать нельзя:
+/// он сам себя и найдёт, и любой инструмент окажется «установлен».
+fn found_outside_shims(name: &str) -> bool {
+    let shims = shims_dir().display().to_string();
+    let clean: Vec<String> = augmented_path()
+        .split(':')
+        .filter(|d| !d.is_empty() && *d != shims)
+        .map(String::from)
+        .collect();
+    Command::new("/bin/sh")
+        .args(["-c", &format!("command -v {name}")])
+        .env("PATH", clean.join(":"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Тело стража с запечённым текущим JARVIS_DIR — тот же приём, что в `shim_body`:
+/// в обычном терминале переменной нет, а dev-профиль живёт в ~/.jarvis-dev, и
+/// без подмены страж писал бы отказы в чужой журнал.
+fn input_guard_body() -> String {
+    INPUT_GUARD_SRC.replacen(
+        "JARVIS_DIR=\"${JARVIS_DIR:-$HOME/.jarvis}\"",
+        &format!("JARVIS_DIR=\"${{JARVIS_DIR:-{}}}\"", jarvis_dir().display()),
+        1,
+    )
+}
+
+/// Метка своих файлов стража — чтобы снос не трогал чужое в каталоге шимов.
+const INPUT_GUARD_MARK: &str = "# jarvis-input-guard";
+
+fn install_input_guard_at(dir: &Path, names: &[&str]) -> usize {
+    let _ = fs::create_dir_all(dir);
+    let body = input_guard_body();
+    names
+        .iter()
+        .filter(|n| write_if_changed(&dir.join(n), &body))
+        .count()
+}
+
+/// Поставить/обновить стража синтетического ввода.
+///
+/// Зовётся и из установки, и из `reconcile_hooks` (каждый старт демона): это
+/// защитный контроль, и на уже установленной машине он обязан появиться сам, а
+/// не ждать, пока человек повторно прогонит setup.
+pub fn install_input_guard(progress: &Progress) {
+    let names = input_guard_names(found_outside_shims);
+    if names.is_empty() {
+        return;
+    }
+    let changed = install_input_guard_at(&shims_dir(), &names);
+    // PATH-блок обычно пишет транспорт, но он пропускается без tmux — а страж
+    // без каталога в PATH бесполезен, поэтому просим блок и здесь.
+    ensure_path_block();
+    if changed > 0 {
+        progress(Step::done(
+            "Транспорт",
+            format!("страж синтетического ввода: {}", names.join(", ")),
+        ));
+    }
+}
+
+/// Снять стража (при удалении интеграции). Чужие файлы с теми же именами не
+/// трогаем — только свои, по метке.
+fn uninstall_input_guard() {
+    for name in GUARD_ALWAYS.iter().chain(GUARD_IF_PRESENT.iter()) {
+        let path = shims_dir().join(name);
+        let ours = fs::read_to_string(&path)
+            .is_ok_and(|t| t.lines().take(3).any(|l| l.contains(INPUT_GUARD_MARK)));
         if ours {
             let _ = fs::remove_file(&path);
         }
@@ -2282,6 +2850,7 @@ pub fn status() -> Status {
         codex_sdk_sidecar: codex_sdk_sidecar_present(),
         stt_engine_active: stt_engine(),
         wakeword_models: wakeword_models_present(),
+        wakeword_ort_built: cfg!(feature = "wakeword-ort"),
     }
 }
 
@@ -2340,6 +2909,15 @@ pub fn status_report() -> String {
     if !live.is_empty() {
         out += &format!("  • живые сессии: {}\n", live.join(", "));
     }
+    let guard = input_guard_names(found_outside_shims);
+    out += "Страж синтетического ввода:\n";
+    if guard.is_empty() {
+        out += "  • нечего перехватывать на этой платформе\n";
+    } else {
+        for name in &guard {
+            out += &format!("  {} {}\n", mark(shims_dir().join(name).exists()), name);
+        }
+    }
     let engine = voice_engine();
     let yn = |b: bool| if b { "да" } else { "нет" };
     let silero_installed = silero_ready();
@@ -2373,8 +2951,19 @@ pub fn status_report() -> String {
     match read_settings() {
         Ok((true, json)) => {
             out += &format!("Settings: {}\n", settings_path().display());
+            let elsewhere = foreign_hooks_dir(&json, &EVENTS);
             for (event, _) in EVENTS {
-                out += &format!("  {} {event}\n", mark(event_installed(&json, event)));
+                // Хук, уведённый другой копией приложения, — это НЕ «установлен».
+                // События уходят в её сокет, то есть до нас не доходят вовсе.
+                let ours = event_installed(&json, event) && elsewhere.is_empty();
+                out += &format!("  {} {event}\n", mark(ours));
+            }
+            if !elsewhere.is_empty() {
+                out += &format!(
+                    "  ⚠ хуки зарегистрированы на другой каталог Jarvis: {elsewhere}
+     события уходят туда; переустанови интеграцию из ЭТОЙ сборки
+"
+                );
             }
         }
         Ok((false, _)) => {
@@ -2400,6 +2989,31 @@ pub fn status_report() -> String {
         Err(error) => out += &format!("  ⚠ {error}\n"),
     }
     out += &format!("  {} шим codex ({})\n", mark(codex_shim_dst().exists()), codex_shim_dst().display());
+    // Kimi наравне с остальными: его хуки живут в общем config.toml и ломаются
+    // чаще прочих, а status — единственный текстовый диагностический инструмент.
+    match kimi_bin() {
+        Some(bin) => {
+            out += &format!("Kimi:     ✓ {}\n", bin.display());
+            let path = kimi_config_path();
+            match fs::read_to_string(&path) {
+                Ok(c) => {
+                    let hb = hook_dst().display().to_string();
+                    out += &format!(
+                        "  {} блок [[hooks]] актуален ({})\n",
+                        mark(kimi_hooks_present(&c, &hb)),
+                        path.display()
+                    );
+                }
+                Err(e) => out += &format!("  ⚠ {} — {e}\n", path.display()),
+            }
+            out += &format!(
+                "  {} шим kimi ({})\n",
+                mark(kimi_shim_dst().exists()),
+                kimi_shim_dst().display()
+            );
+        }
+        None => out += "Kimi:     ✗ не найден\n",
+    }
     out
 }
 
@@ -2413,15 +3027,20 @@ pub fn install_core(progress: &Progress) -> IntegrationHealth {
     write_executable(&hook_dst(), HOOK_SRC);
 
     // R5: мост агента (jarvis-mcp) + токен + MCP-конфиг. Fail-safe: сбой не валит
-    // установку интеграции — просто агент будет недоступен. jarvis-mcp — это
-    // компилируемый бинарь-сиблинг текущего exe (в dev и в бандле .app).
+    // установку интеграции — просто агент будет недоступен. Где лежит мост и
+    // почему он есть и в бандле тоже — см. `mcp_src`.
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let src = dir.join("jarvis-mcp");
-            if src.exists() {
+        match mcp_src(&exe) {
+            Some(src) => {
                 let _ = fs::create_dir_all(mcp_dst().parent().unwrap());
-                if fs::copy(&src, mcp_dst()).is_ok() {
-                    let _ = fs::set_permissions(mcp_dst(), fs::Permissions::from_mode(0o755));
+                match fs::copy(&src, mcp_dst()) {
+                    Ok(_) => {
+                        let _ = fs::set_permissions(mcp_dst(), fs::Permissions::from_mode(0o755));
+                    }
+                    Err(e) => progress(Step::warn(
+                        "Хуки",
+                        format!("jarvis-mcp не скопирован ({e}) — MCP-агент будет недоступен"),
+                    )),
                 }
                 let token = ensure_agent_token();
                 let cfg = build_mcp_config(&mcp_dst().to_string_lossy(), &token);
@@ -2429,10 +3048,18 @@ pub fn install_core(progress: &Progress) -> IntegrationHealth {
                 if let Err(err) = atomic_write_mode(&mcp_config_dst(), &body, 0o600) {
                     progress(Step::warn("Хуки", format!("MCP-конфиг не записан: {err}")));
                 }
-            } else {
-                eprintln!(
-                    "[jarvis:install] jarvis-mcp рядом с exe не найден — агент будет недоступен"
-                );
+            }
+            None => {
+                // Не eprintln: stderr бандла никто не читает, а последствие
+                // видимое — «агент не отвечает». Печатаем путь: без него
+                // диагноз «мост пропал» занимает вечер.
+                progress(Step::warn(
+                    "Хуки",
+                    format!(
+                        "jarvis-mcp не найден рядом с exe ({}) — MCP-агент будет недоступен",
+                        exe.parent().unwrap_or(&exe).join(MCP_BIN).display()
+                    ),
+                ));
             }
         }
     }
@@ -2447,10 +3074,15 @@ pub fn install_core(progress: &Progress) -> IntegrationHealth {
     // (иначе незачем создавать ~/.codex/hooks.json для несуществующего CLI).
     install_hooks_into(&settings_path(), "claude", &EVENTS, progress);
     reconcile_codex_instances(progress);
+    if kimi_found() {
+        install_kimi_hooks(progress);
+    }
 
     // --- Фаза «Транспорт» (шим claude + tmux.conf + PATH-блок) ---
     progress(Step::start("Транспорт"));
     install_tmux_transport(progress);
+    // Страж ввода — вне tmux-ветки: он нужен, даже если tmux не поставлен.
+    install_input_guard(progress);
 
     // медиа-адаптер для паузы чужого звука (мгновенно, тихо)
     install_mediaremote();
@@ -2505,29 +3137,12 @@ pub fn install(progress: &Progress, proxy: Option<&str>) {
     }
 }
 
-fn install_tmux_transport(progress: &Progress) {
-    if !tmux_found() {
-        progress(Step::warn(
-            "Транспорт",
-            "tmux не найден (brew install tmux) — ввод-транспорт пропущен; уведомления работают",
-        ));
-        return;
-    }
-    // Запекаем актуальный JARVIS_DIR в шим: в рантайме (обычный терминал) env
-    // JARVIS_DIR не выставлен, а dev-сборка живёт в ~/.jarvis-dev. Без подмены
-    // дефолта шим искал бы tmux.conf в ~/.jarvis и падал (No such file).
-    let shim = SHIM_SRC.replacen(
-        "JARVIS_DIR=\"${JARVIS_DIR:-$HOME/.jarvis}\"",
-        &format!("JARVIS_DIR=\"${{JARVIS_DIR:-{}}}\"", jarvis_dir().display()),
-        1,
-    );
-    write_executable(&shim_dst(), &shim); // ~/.jarvis/shims/claude
-    if codex_found() {
-        // тот же скрипт под именем codex — поведение выбирается по basename "$0".
-        write_executable(&codex_shim_dst(), &shim);
-    }
-    fs::write(tmux_conf_dst(), TMUX_CONF_SRC).expect("запись tmux.conf");
-
+/// Дописать в rc-файлы блок «каталог шимов — ПЕРВЫМ в PATH». Идемпотентно.
+///
+/// Отдельной функцией, потому что нужна двум: транспорту (без шима агента tmux
+/// не увидит сессию) и стражу ввода (без первенства в PATH его просто обойдут,
+/// найдя /usr/bin/osascript). Порядок тут — не косметика, а всё условие работы.
+fn ensure_path_block() {
     let shims = shims_dir().display().to_string();
     for rc in rc_files() {
         let existed = rc.exists();
@@ -2544,13 +3159,39 @@ fn install_tmux_transport(progress: &Progress) {
             atomic_write(&rc, &merged);
         }
     }
+}
+
+fn install_tmux_transport(progress: &Progress) {
+    if !tmux_found() {
+        progress(Step::warn(
+            "Транспорт",
+            "tmux не найден (brew install tmux) — ввод-транспорт пропущен; уведомления работают",
+        ));
+        return;
+    }
+    let shim = shim_body();
+    write_executable(&shim_dst(), &shim); // ~/.jarvis/shims/claude
+    if codex_found() {
+        // тот же скрипт под именем codex — поведение выбирается по basename "$0".
+        write_executable(&codex_shim_dst(), &shim);
+    }
+    if kimi_found() {
+        write_executable(&kimi_shim_dst(), &shim);
+    }
+    fs::write(tmux_conf_dst(), TMUX_CONF_SRC).expect("запись tmux.conf");
+
+    ensure_path_block();
+    // Список агентов собираем, а не перечисляем тернарником: их уже трое.
+    let mut names = vec!["claude"];
+    if codex_found() {
+        names.push("codex");
+    }
+    if kimi_found() {
+        names.push("kimi");
+    }
     progress(Step::done(
         "Транспорт",
-        if codex_found() {
-            "шим claude+codex + tmux.conf + PATH-блок"
-        } else {
-            "шим claude + tmux.conf + PATH-блок"
-        },
+        format!("шим {} + tmux.conf + PATH-блок", names.join("+")),
     ));
 }
 
@@ -2564,7 +3205,8 @@ pub fn uninstall(progress: &Progress) {
         },
         Err(error) => progress(Step::warn("Хуки", error)),
     }
-    progress(Step::done("Хуки", "записи Jarvis сняты (claude + codex)"));
+    uninstall_kimi_hooks(progress); // у Kimi хуки в общем config.toml — снимаем блоком
+    progress(Step::done("Хуки", "записи Jarvis сняты (claude + codex + kimi)"));
 
     progress(Step::start("Транспорт"));
     for f in [
@@ -2572,10 +3214,12 @@ pub fn uninstall(progress: &Progress) {
         jarvis_dir().join("run.sock"),
         shim_dst(),
         codex_shim_dst(),
+        kimi_shim_dst(),
         tmux_conf_dst(),
     ] {
         let _ = fs::remove_file(&f);
     }
+    uninstall_input_guard();
     let _ = fs::remove_dir(shims_dir());
     for rc in rc_files() {
         if !rc.exists() {
@@ -2693,6 +3337,11 @@ pub struct ModelInfo {
     pub present: bool,
     /// Активна сейчас (для STT — текущий движок; для wake — единственная модель).
     pub active: bool,
+    /// Движок для этой модели вкомпилирован в бинарь. Whisper и wake-word живут
+    /// под cargo-фичами: без них веса скачаются, но работать будет нечему —
+    /// предлагать загрузку нечестно. Остальным всегда true (Qwen и Silero —
+    /// сайдкары, от фич сборки не зависят).
+    pub usable: bool,
 }
 
 /// Каталог локальных весов Qwen для ключа движка (qwen3-0.6b → …/stt-mlx/models/qwen3-0.6b).
@@ -2764,6 +3413,7 @@ pub fn model_inventory() -> Vec<ModelInfo> {
         bytes: fs::metadata(&wmp).map(|m| m.len()).unwrap_or(0),
         present: wmp.exists(),
         active: active_stt == "whisper-turbo",
+        usable: cfg!(feature = "whisper-native"),
     });
 
     // STT: Qwen3 веса (локальная папка сайдкара).
@@ -2779,6 +3429,7 @@ pub fn model_inventory() -> Vec<ModelInfo> {
             bytes: if dir.exists() { dir_size(&dir) } else { 0 },
             present: qwen_weights_present(key),
             active: active_stt == key,
+            usable: true,
         });
     }
 
@@ -2792,6 +3443,7 @@ pub fn model_inventory() -> Vec<ModelInfo> {
             bytes: dir_size_cached(&venv),
             present: stt_python().exists(),
             active: false,
+            usable: true,
         });
     }
 
@@ -2811,6 +3463,7 @@ pub fn model_inventory() -> Vec<ModelInfo> {
         bytes: silero_bytes,
         present: silero_ready(),
         active: voice_engine() == "silero",
+        usable: true,
     });
 
     // Wake-word: openWakeWord «Hey Jarvis» (3 ONNX).
@@ -2825,6 +3478,7 @@ pub fn model_inventory() -> Vec<ModelInfo> {
         bytes: wbytes,
         present: wakeword_models_present(),
         active: true,
+        usable: cfg!(feature = "wakeword-ort"),
     });
 
     v
@@ -2969,6 +3623,228 @@ mod tests {
             .any(|phase| { matches!(*phase, "Голос" | "STT" | "STT-MLX" | "Модели") }));
     }
 
+    /// Конфиг Kimi — общий файл пользователя (провайдеры, модели, правила прав),
+    /// а не выделенный файл хуков. Наш блок обязан быть идемпотентным и НЕ
+    /// трогать ничего вокруг, включая чужие `[[hooks]]`.
+    #[test]
+    fn kimi_hooks_block_is_idempotent_and_keeps_foreign_config() {
+        let user = "default_model = \"kimi-code/k3\"\n\n\
+                    [[permission.rules]]\ndecision = \"deny\"\npattern = \"Bash(rm *)\"\n\n\
+                    [[hooks]]\nevent = \"PreToolUse\"\ncommand = \"my-own-guard\"\n";
+        let block = kimi_hooks_block("/home/u/.jarvis/bin/jarvis-hook");
+
+        let once = merge_marked_block(user, &block);
+        assert!(once.contains("default_model"), "чужие настройки на месте");
+        assert!(once.contains("my-own-guard"), "чужой хук не тронут");
+        assert!(once.contains("pattern = \"Bash(rm *)\""), "правила прав на месте");
+        assert_eq!(once.matches(BEGIN).count(), 1, "блок ровно один");
+
+        // Повторная установка не плодит блоки и не меняет файл.
+        let twice = merge_marked_block(&once, &block);
+        assert_eq!(twice, once, "идемпотентность");
+        assert_eq!(twice.matches(BEGIN).count(), 1);
+
+        // Снятие возвращает пользователю его конфиг без наших следов.
+        let cleaned = remove_block(&twice);
+        assert!(!cleaned.contains(BEGIN) && !cleaned.contains("jarvis-hook"));
+        assert!(cleaned.contains("my-own-guard"), "чужой хук пережил снятие");
+        assert!(cleaned.contains("default_model"));
+    }
+
+    /// Схема Kimi строгая: лишнее поле роняет ВЕСЬ конфиг, а с ним и Kimi.
+    /// Поэтому в записи ровно `event`, `command`, `timeout` — и ничего больше.
+    #[test]
+    fn kimi_hooks_block_writes_only_allowed_fields() {
+        let block = kimi_hooks_block("/tmp/hook");
+        assert_eq!(
+            block.matches("[[hooks]]").count(),
+            KIMI_EVENTS.len(),
+            "по записи на событие"
+        );
+        for (event, arg) in KIMI_EVENTS {
+            assert!(block.contains(&format!("event = \"{event}\"")));
+            assert!(block.contains(&format!("command = \"/tmp/hook kimi {arg}\"")));
+        }
+        for forbidden in ["matcher =", "type =", "hooks =", "agent ="] {
+            assert!(!block.contains(forbidden), "лишнее поле {forbidden} уронит конфиг Kimi");
+        }
+        // heartbeat есть только у Kimi — на нём держится живость без опроса pid
+        assert!(block.contains("SessionHeartbeat"));
+    }
+
+    #[test]
+    fn toml_escape_protects_quotes_and_backslashes() {
+        assert_eq!(toml_escape(r#"/tmp/a"b"#), r#"/tmp/a\"b"#);
+        assert_eq!(toml_escape(r"/tmp/a\b"), r"/tmp/a\\b");
+        assert_eq!(toml_escape("/plain/path"), "/plain/path");
+    }
+
+    #[test]
+    fn kimi_hooks_present_detects_stale_path() {
+        let cur = kimi_hooks_block("/new/bin/jarvis-hook");
+        let old = merge_marked_block("", &kimi_hooks_block("/old/bin/jarvis-hook"));
+        assert!(!kimi_hooks_present(&old, "/new/bin/jarvis-hook"), "старый путь = не актуально");
+        assert!(kimi_hooks_present(&merge_marked_block("", &cur), "/new/bin/jarvis-hook"));
+    }
+
+    // 127 — это «команда не найдена», ответ шелла, а не приговор конфигу.
+    // Спутать одно с другим — значит откатить хуки у всех, у кого kimi стоит
+    // штатно в ~/.kimi-code/bin (каталог ещё не в PATH).
+    #[test]
+    fn doctor_127_is_not_an_invalid_config() {
+        assert_eq!(doctor_verdict(Some(127)), None, "не нашли — значит не спросили");
+        assert_eq!(doctor_verdict(Some(126)), None);
+        assert_eq!(doctor_verdict(None), None);
+        assert_eq!(doctor_verdict(Some(0)), Some(true));
+        assert_eq!(doctor_verdict(Some(1)), Some(false));
+    }
+
+    #[test]
+    fn kimi_rollback_only_when_we_broke_it() {
+        assert!(kimi_rollback_needed(Some(true), Some(false)), "сломали мы — откат");
+        assert!(
+            !kimi_rollback_needed(Some(false), Some(false)),
+            "doctor ругался и до нас (нет логина) — хуки не при чём"
+        );
+        assert!(!kimi_rollback_needed(Some(true), None), "не спросили — не откатываем");
+        assert!(!kimi_rollback_needed(Some(true), Some(true)));
+    }
+
+    fn kimi_tmp(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("jarvis-kimi-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const KIMI_USER_CFG: &str = "default_model = \"kimi-code/k3\"\n";
+
+    // Провал бэкапа и «файла не было» — разные исходы. Спутать их значит стереть
+    // общий конфиг пользователя (провайдеры, модели, права) без единой копии.
+    #[test]
+    fn kimi_failed_backup_never_deletes_config() {
+        let dir = kimi_tmp("nobackup");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, KIMI_USER_CFG).unwrap();
+        install_kimi_hooks_at(
+            &path,
+            "/hook",
+            &|_| None,                // бэкап не удался
+            &|| Some(false),          // doctor бы забраковал — до него дойти не должно
+            &|_: Step| {},
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), KIMI_USER_CFG, "конфиг не тронут");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kimi_asks_for_interrupt_and_claude_does_not() {
+        // У Kimi «Stop не срабатывает при прерывании, вместо него срабатывает
+        // Interrupt» — без него прерванный ход не давал НИКАКОГО сигнала о
+        // завершении, и наш же Esc для kimi проходил бесследно.
+        let kimi: Vec<&str> = KIMI_EVENTS.iter().map(|(e, _)| *e).collect();
+        assert!(kimi.contains(&"Interrupt"), "Kimi снова без Interrupt: {kimi:?}");
+        assert!(kimi.contains(&"Stop") && kimi.contains(&"StopFailure"),
+            "тройка завершения неполна: {kimi:?}");
+
+        // У Claude такого хука нет — попросить его значит прописать в конфиг
+        // событие, которого не существует.
+        let claude: Vec<&str> = EVENTS.iter().map(|(e, _)| *e).collect();
+        assert!(!claude.contains(&"Interrupt"), "Interrupt уехал в список Claude: {claude:?}");
+
+        // внутреннее имя одно на весь путь: конфиг → шим → редьюсер
+        let arg = KIMI_EVENTS.iter().find(|(e, _)| *e == "Interrupt").map(|(_, a)| *a);
+        assert_eq!(arg, Some("interrupt"));
+        assert!(include_str!("../daemon.rs").contains("\"interrupt\" =>"),
+            "редьюсер не разбирает interrupt — событие приходило бы в пустоту");
+    }
+
+    #[test]
+    fn kimi_hooks_survive_unaskable_doctor() {
+        let dir = kimi_tmp("nodoctor");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, KIMI_USER_CFG).unwrap();
+        install_kimi_hooks_at(&path, "/hook", &backup, &|| None, &|_: Step| {});
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert!(kimi_hooks_present(&got, "/hook"), "127 не должен стирать хуки");
+        assert!(got.contains("kimi-code/k3"), "чужие строки на месте");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kimi_rollback_restores_user_config() {
+        let dir = kimi_tmp("rollback");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, KIMI_USER_CFG).unwrap();
+        let calls = std::cell::Cell::new(0);
+        install_kimi_hooks_at(
+            &path,
+            "/hook",
+            &backup,
+            &|| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 { Some(true) } else { Some(false) }
+            },
+            &|_: Step| {},
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), KIMI_USER_CFG, "вернули как было");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kimi_keeps_hooks_when_doctor_was_already_unhappy() {
+        let dir = kimi_tmp("unhappy");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, KIMI_USER_CFG).unwrap();
+        install_kimi_hooks_at(&path, "/hook", &backup, &|| Some(false), &|_: Step| {});
+        assert!(
+            kimi_hooks_present(&std::fs::read_to_string(&path).unwrap(), "/hook"),
+            "свежий Kimi без логина — не повод откатывать наши хуки"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // После автообновления на диске лежит хук от старой версии: существование
+    // файла об этом молчит, поэтому сверяем содержимое.
+    #[test]
+    fn stale_hook_content_is_rewritten() {
+        let dir = kimi_tmp("stale-hook");
+        let dst = dir.join("jarvis-hook");
+        std::fs::write(&dst, "#!/bin/sh\n# старая версия\n").unwrap();
+        assert!(write_if_changed(&dst, HOOK_SRC), "расхождение → перезапись");
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), HOOK_SRC);
+        assert_eq!(
+            std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "перезаписанный хук обязан остаться исполняемым"
+        );
+        assert!(!write_if_changed(&dst, HOOK_SRC), "совпало → не трогаем");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn backups_are_pruned_to_the_last_few() {
+        let dir = kimi_tmp("prune");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, KIMI_USER_CFG).unwrap();
+        for i in 0..9 {
+            std::fs::write(dir.join(format!("config.toml.bak-2026-01-0{i}")), "x").unwrap();
+        }
+        std::fs::write(dir.join("config.toml.bak"), "чужой").unwrap();
+        prune_backups(&path, 3);
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("config.toml.bak-"))
+            .collect();
+        left.sort();
+        assert_eq!(left, ["config.toml.bak-2026-01-06", "config.toml.bak-2026-01-07", "config.toml.bak-2026-01-08"]);
+        assert!(dir.join("config.toml.bak").exists(), "не наш шаблон имени — не трогаем");
+        assert!(path.exists(), "оригинал не бэкап");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn integration_health_needs_an_available_agent_and_its_hooks() {
         let mut health = IntegrationHealth {
@@ -2979,10 +3855,15 @@ mod tests {
             claude_hooks_ok: true,
             codex_present: false,
             codex_hooks_ok: true,
-            claude_shim: false,
+            kimi_present: false,
+            kimi_hooks_ok: true,
+            hooks_elsewhere: String::new(),
+        claude_shim: false,
             codex_shim: false,
+            kimi_shim: false,
+            input_guard: false,
         };
-        assert!(!health.ok(), "без Claude/Codex интеграция не готова");
+        assert!(!health.ok(), "без единого агента интеграция не готова");
         health.claude_present = true;
         assert!(
             health.ok(),
@@ -2990,6 +3871,14 @@ mod tests {
         );
         health.claude_hooks_ok = false;
         assert!(!health.ok(), "hooks доступного агента обязательны");
+
+        // Агент может быть и один — любой из трёх делает интеграцию применимой.
+        health.claude_present = false;
+        health.claude_hooks_ok = true;
+        health.kimi_present = true;
+        assert!(health.ok(), "одного Kimi достаточно");
+        health.kimi_hooks_ok = false;
+        assert!(!health.ok(), "hooks доступного агента обязательны и для kimi");
     }
 
     #[test]
@@ -3041,6 +3930,73 @@ mod tests {
     fn download_channels_direct_then_proxy() {
         assert_eq!(super::download_channels(true), vec![true, false]);
         assert_eq!(super::download_channels(false), vec![true]);
+    }
+
+    /// Сторож упаковки: мост обязан ехать в бандле.
+    ///
+    /// Сам бандл в тесте не собрать, но механизм, который кладёт туда
+    /// `jarvis-mcp`, ровно один и он декларативный: бандлер tauri копирует в
+    /// пакет каждый `[[bin]]` манифеста рядом с главным бинарём. Значит,
+    /// достаточно стеречь объявление `[[bin]]` — и отдельно стеречь, чтобы
+    /// никто не «починил» несуществующую проблему через `externalBin`, который
+    /// роняет build.rs (подробности там же).
+    ///
+    /// Прецедент, ради которого сторож и заведён: узел `node/` из этого же
+    /// репозитория вынесли ОТДЕЛЬНЫМ крейтом — именно чтобы он в бандл не
+    /// попадал. Такой же «вынесем мост из манифеста» молча оставит агента без
+    /// единого инструмента у всех, кто ставит из образа, и ни один тест сегодня
+    /// этого не заметит.
+    #[test]
+    fn mcp_bridge_is_a_bundled_bin() {
+        let cargo_toml = include_str!("../../Cargo.toml");
+        // Грубый разбор без зависимости на toml-парсер: ищем секцию [[bin]] с
+        // нужным именем. Достаточно точно — имя в манифесте пишется одной
+        // строкой и уникально.
+        let declared = cargo_toml
+            .split("[[bin]]")
+            .skip(1)
+            .any(|sec| sec.lines().any(|l| l.trim() == format!("name = \"{MCP_BIN}\"")));
+        assert!(
+            declared,
+            "{MCP_BIN} обязан оставаться [[bin]] в src-tauri/Cargo.toml: только так \
+             бандлер кладёт его рядом с jarvis (Contents/MacOS, usr/bin), и только \
+             оттуда install_core его берёт"
+        );
+
+        let conf: Value = serde_json::from_str(include_str!("../../tauri.conf.json"))
+            .expect("tauri.conf.json — валидный JSON");
+        assert!(
+            conf["bundle"]["externalBin"].is_null(),
+            "externalBin мосту не нужен (он и так в бандле) и ломает build.rs: \
+             tauri-build копирует внешние бинари ДО того, как cargo соберёт цель \
+             того же манифеста"
+        );
+    }
+
+    /// Мост берётся сиблингом exe — тем самым путём, который даёт и дерево
+    /// разработчика, и `Jarvis.app/Contents/MacOS`, и `/usr/bin` в deb/rpm.
+    #[test]
+    fn mcp_is_taken_from_next_to_the_executable() {
+        let dir = std::env::temp_dir().join(format!("jarvis-mcp-src-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Jarvis.app/Contents/MacOS")).unwrap();
+        let macos = dir.join("Jarvis.app/Contents/MacOS");
+        let exe = macos.join("jarvis");
+        std::fs::write(&exe, "").unwrap();
+
+        assert!(
+            super::mcp_src(&exe).is_none(),
+            "без моста рядом ничего не выдумываем — иначе установка молча \
+             пропишет в MCP-конфиг несуществующий путь"
+        );
+
+        std::fs::write(macos.join(MCP_BIN), "").unwrap();
+        assert_eq!(
+            super::mcp_src(&exe),
+            Some(macos.join(MCP_BIN)),
+            "мост лежит рядом с exe — так его кладёт бандлер в .app и в deb/rpm"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3112,6 +4068,35 @@ mod tests {
         let foreign = json!({ "command": "/usr/local/bin/other-hook" });
         assert!(is_ours(&ours));
         assert!(!is_ours(&foreign));
+    }
+
+    /// Хук отдаёт пану только со своего сервера tmux.
+    ///
+    /// Шим не оборачивает запуск, если человек уже сидит в СВОЁМ tmux, а хук
+    /// срабатывает всё равно и раньше слал `TMUX_PANE` безусловно. Номера пан у
+    /// разных серверов независимы, поэтому чужой `%5`, попав в реестр, гасился
+    /// бы как `tmux -L jarvis kill-pane -t %5` — по нашей пане с тем же номером,
+    /// то есть по чужой работе. Проверка идёт по имени сокета в `$TMUX`: спросить
+    /// об этом сам tmux нельзя — с флагом `-L jarvis` он ответит про наш сервер,
+    /// где бы мы ни находились, и соврёт ровно в том случае, ради которого
+    /// проверка и заводится.
+    #[test]
+    fn the_hook_reports_a_pane_only_from_our_own_tmux_server() {
+        assert!(
+            HOOK_SRC.contains("*/jarvis,*)"),
+            "пропала проверка сервера — чужая пана снова попадёт в реестр"
+        );
+        // Косая черта перед именем обязательна: без неё под «свой» подошёл бы и
+        // сервер `notjarvis`, а это ровно чужая работа.
+        assert!(
+            !HOOK_SRC.contains("*jarvis,*)") || HOOK_SRC.contains("*/jarvis,*)"),
+            "проверка ослабла до подстроки — совпадёт с чужим именем сокета"
+        );
+        // Безусловной отправки не осталось: иначе проверка выше ничего не значит.
+        assert!(
+            !HOOK_SRC.contains(r#"json_safe "${TMUX_PANE:-}""#),
+            "пана всё ещё уходит мимо проверки сервера"
+        );
     }
 
     #[test]
@@ -3519,6 +4504,20 @@ mod tests {
         }
     }
 
+    /// Инвентарь обязан честно говорить, есть ли движок в ЭТОЙ сборке: иначе
+    /// настройки предложат скачать веса, которым нечем работать.
+    #[test]
+    fn model_inventory_reports_engine_availability() {
+        let inv = model_inventory();
+        let usable = |id: &str| inv.iter().find(|m| m.id == id).map(|m| m.usable);
+
+        assert_eq!(usable("whisper-turbo"), Some(cfg!(feature = "whisper-native")));
+        assert_eq!(usable("hey_jarvis"), Some(cfg!(feature = "wakeword-ort")));
+        // Qwen и Silero — сайдкары, от фич сборки не зависят
+        assert_eq!(usable("qwen3-0.6b"), Some(true));
+        assert_eq!(usable("silero"), Some(true));
+    }
+
     #[test]
     fn model_inventory_kinds_correct() {
         let inv = model_inventory();
@@ -3787,5 +4786,426 @@ mod custom_shim_tests {
         assert!(CUSTOM_SHIM_SRC.contains("session-end"));
         assert!(CUSTOM_SHIM_SRC.contains("--jarvis-run"), "самоперезапуск внутри tmux пропал");
         assert!(CUSTOM_SHIM_SRC.contains("jarvis-hook"), "хуки должны идти общим транспортом");
+    }
+}
+
+/// Страж синтетического ввода: классификация скриптов и попадание в установку.
+///
+/// Тесты гоняют НАСТОЯЩИЙ встроенный скрипт через `/bin/sh`, а не его копию на
+/// Rust: логика классификации живёт в одном месте (шелл), и дублировать её ради
+/// тестируемости значило бы завести второй источник правды, который разъедется
+/// первым же правкой. Поэтому вокруг шима строится песочница: свой каталог
+/// шимов, свой «настоящий» бинарь-заглушка и свой JARVIS_DIR под аудит.
+#[cfg(test)]
+mod input_guard_tests {
+    use super::*;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    /// Исходник этого же модуля — «сторож» на то, что установка зовёт стража.
+    /// Файл на диске и есть источник правды, и никакой мок его не заменит.
+    const SELF_SRC: &str = include_str!("mod.rs");
+
+    struct Sandbox {
+        root: PathBuf,
+        shims: PathBuf,
+        real: PathBuf,
+        jarvis: PathBuf,
+    }
+
+    struct Run {
+        code: i32,
+        out: String,
+        err: String,
+    }
+
+    /// Свой каталог на тест: модуль собирается в ДВА бинаря (jarvis и
+    /// jarvis-setup), и одинаковые пути дали бы плавающие падения.
+    fn sandbox(tag: &str) -> Sandbox {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-guard-{tag}-{}-{}",
+            std::process::id(),
+            env!("CARGO_CRATE_NAME"),
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let sb = Sandbox {
+            shims: root.join("shims"),
+            real: root.join("real"),
+            jarvis: root.join("jarvis"),
+            root,
+        };
+        for d in [&sb.shims, &sb.real, &sb.jarvis] {
+            fs::create_dir_all(d).unwrap();
+        }
+        sb
+    }
+
+    impl Drop for Sandbox {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    impl Sandbox {
+        /// Поставить встроенный скрипт под нужными именами — ровно как установщик.
+        fn install(&self, names: &[&str]) {
+            install_input_guard_at(&self.shims, names);
+        }
+
+        /// Заглушка «настоящего» бинаря: печатает маркер и свои аргументы, а
+        /// потом переливает stdin — так виден и факт запуска, и то, что скрипт
+        /// со stdin дошёл до него целиком.
+        fn fake_real(&self, name: &str) {
+            let path = self.real.join(name);
+            write_executable(&path, "#!/bin/sh\necho REAL_RAN \"$@\"\ncat\n");
+        }
+
+        fn run(&self, name: &str, args: &[&str], stdin: Option<&str>) -> Run {
+            self.run_with_path(name, args, stdin, &[&self.shims, &self.real], &[])
+        }
+
+        fn run_with_path(
+            &self,
+            name: &str,
+            args: &[&str],
+            stdin: Option<&str>,
+            dirs: &[&PathBuf],
+            env: &[(&str, &str)],
+        ) -> Run {
+            let mut path: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+            // Скрипту нужны sed/tr/grep/cut/date/mktemp/ps — системные каталоги
+            // обязаны быть в PATH, иначе тест проверял бы отсутствие coreutils.
+            path.extend(["/usr/bin".into(), "/bin".into(), "/usr/sbin".into()]);
+            let mut cmd = Command::new(self.shims.join(name));
+            cmd.args(args)
+                .env("PATH", path.join(":"))
+                .env("JARVIS_DIR", &self.jarvis)
+                .env_remove("JARVIS_INPUT_GUARD")
+                .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            for (k, v) in env {
+                cmd.env(k, v);
+            }
+            let mut child = cmd.spawn().expect("шим не запустился");
+            if let Some(text) = stdin {
+                child.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
+            }
+            let out = child.wait_with_output().unwrap();
+            Run {
+                code: out.status.code().unwrap_or(-1),
+                out: String::from_utf8_lossy(&out.stdout).into_owned(),
+                err: String::from_utf8_lossy(&out.stderr).into_owned(),
+            }
+        }
+
+        fn audit(&self) -> Vec<Value> {
+            fs::read_to_string(self.jarvis.join("audit.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .map(|l| serde_json::from_str(l).expect("строка аудита — не JSON"))
+                .collect()
+        }
+    }
+
+    fn assert_refused(r: &Run, why: &str) {
+        assert_ne!(r.code, 0, "отказ обязан быть ненулевым: {why}");
+        assert!(!r.out.contains("REAL_RAN"), "настоящий бинарь всё-таки запустился: {why}");
+        assert!(r.err.contains("ЗАПРЕЩЕНО"), "отказ не громкий: {}", r.err);
+    }
+
+    fn assert_passed(r: &Run, why: &str) {
+        assert_eq!(r.code, 0, "безобидный вызов не прошёл ({why}): {}", r.err);
+        assert!(r.out.contains("REAL_RAN"), "настоящий бинарь не позвали: {why}");
+    }
+
+    /* ---------- классификация: что считается вводом, а что нет ---------- */
+
+    #[test]
+    fn harmless_osascript_passes_through() {
+        let sb = sandbox("harmless");
+        sb.install(&["osascript"]);
+        sb.fake_real("osascript");
+        assert_passed(&sb.run("osascript", &["-e", "return 1+1"], None), "арифметика");
+        // Собственные вызовы Jarvis обязаны продолжать работать: громкость и
+        // перепись процессов через System Events — не ввод.
+        assert_passed(
+            &sb.run("osascript", &["-e", "set volume output volume 50"], None),
+            "громкость",
+        );
+        assert_passed(
+            &sb.run(
+                "osascript",
+                &["-e", "tell application \"System Events\" to get the unix id of every process whose background only is false"],
+                None,
+            ),
+            "System Events без глаголов ввода",
+        );
+        assert!(sb.audit().is_empty(), "пропуск не должен сорить в журнал");
+    }
+
+    #[test]
+    fn keystroke_is_refused() {
+        let sb = sandbox("keystroke");
+        sb.install(&["osascript"]);
+        sb.fake_real("osascript");
+        let r = sb.run(
+            "osascript",
+            &["-e", "tell application \"System Events\" to keystroke \"x\""],
+            None,
+        );
+        assert_refused(&r, "keystroke");
+        // Три законных пути обязаны быть в тексте: без них отказ бесполезен —
+        // агент не узнает, что делать вместо.
+        assert!(r.err.contains("headless"), "нет пути 1: {}", r.err);
+        assert!(r.err.contains("скриншот"), "нет пути 2: {}", r.err);
+        assert!(r.err.contains("человека нажать"), "нет пути 3: {}", r.err);
+    }
+
+    /// Многострочный скрипт: триггер не в первом `-e`, а в середине.
+    #[test]
+    fn multiline_script_is_scanned_whole() {
+        let sb = sandbox("multiline");
+        sb.install(&["osascript"]);
+        sb.fake_real("osascript");
+        let r = sb.run(
+            "osascript",
+            &[
+                "-e",
+                "tell application \"Jarvis\"",
+                "-e",
+                "  set frontmost to true",
+                "-e",
+                "end tell",
+            ],
+            None,
+        );
+        assert_refused(&r, "set frontmost во второй строке");
+        assert_eq!(sb.audit()[0]["args"]["match"], "set frontmost");
+    }
+
+    /// Скрипт файлом — третий способ доставки, наравне с -e и stdin.
+    #[test]
+    fn script_file_is_read_and_classified() {
+        let sb = sandbox("file");
+        sb.install(&["osascript"]);
+        sb.fake_real("osascript");
+        let script = sb.root.join("s.applescript");
+        fs::write(&script, "tell application \"Terminal\" to activate\n").unwrap();
+        assert_refused(
+            &sb.run("osascript", &[&script.display().to_string()], None),
+            "activate из файла",
+        );
+    }
+
+    /// stdin надо ВЫЧИТАТЬ (иначе не классифицируешь) и передать дальше целиком
+    /// (иначе безобидный скрипт получит пустой ввод и молча ничего не сделает).
+    #[test]
+    fn stdin_script_is_buffered_and_forwarded() {
+        let sb = sandbox("stdin-ok");
+        sb.install(&["osascript"]);
+        sb.fake_real("osascript");
+        let r = sb.run("osascript", &["-"], Some("return 2+2\n"));
+        assert_passed(&r, "скрипт со stdin");
+        assert!(r.out.contains("return 2+2"), "stdin не дошёл до бинаря: {}", r.out);
+    }
+
+    #[test]
+    fn stdin_script_with_click_is_refused() {
+        let sb = sandbox("stdin-deny");
+        sb.install(&["osascript"]);
+        sb.fake_real("osascript");
+        let r = sb.run(
+            "osascript",
+            &[],
+            Some("tell application \"System Events\"\n  click at {10, 20}\nend tell\n"),
+        );
+        // Без аргументов osascript тоже читает stdin — этот путь обязан ловиться.
+        assert_refused(&r, "click со stdin без явного `-`");
+    }
+
+    /// Слово-триггер внутри строкового литерала.
+    ///
+    /// Мы его ЛОВИМ — и это сознательный выбор, а не недосмотр. Отличить
+    /// инертную строку от вложенного скрипта (`run script "… keystroke …"`)
+    /// грепом нельзя, а цена ошибок разная: ложный отказ стоит переформулировки
+    /// и виден сразу, ложный пропуск — нажатой за человека кнопки подтверждения
+    /// и не виден вообще. Тест фиксирует именно это решение.
+    #[test]
+    fn trigger_word_inside_a_string_literal_is_refused_on_purpose() {
+        let sb = sandbox("literal");
+        sb.install(&["osascript"]);
+        sb.fake_real("osascript");
+        assert_refused(
+            &sb.run("osascript", &["-e", "display dialog \"нажми activate в меню\""], None),
+            "activate внутри литерала",
+        );
+        // Обратная сторона выбора: строка без триггеров проходит как обычно.
+        assert_passed(
+            &sb.run("osascript", &["-e", "display dialog \"готово\""], None),
+            "литерал без триггеров",
+        );
+    }
+
+    #[test]
+    fn cliclick_is_always_refused() {
+        let sb = sandbox("cliclick");
+        sb.install(&["cliclick"]);
+        sb.fake_real("cliclick");
+        for args in [vec!["c:100,200"], vec!["-V"], vec![]] {
+            assert_refused(&sb.run("cliclick", &args, None), "cliclick");
+        }
+    }
+
+    #[test]
+    fn hammerspoon_eventtap_is_refused_but_queries_pass() {
+        let sb = sandbox("hs");
+        sb.install(&["hs"]);
+        sb.fake_real("hs");
+        assert_refused(
+            &sb.run("hs", &["-c", "hs.eventtap.keyStroke({}, \"a\")"], None),
+            "eventtap",
+        );
+        assert_passed(
+            &sb.run("hs", &["-c", "print(hs.screen.mainScreen():name())"], None),
+            "запрос экрана",
+        );
+    }
+
+    /* ---------- поведение отказа: журнал, коды, живучесть ---------- */
+
+    /// Формат строки — тот же, что у гейта (capability::audit::AuditEntry).
+    /// Журнал один, и читает его одна капабилити: разъехавшийся формат означал
+    /// бы, что попытки ввода в `audit.query` просто не видно.
+    #[test]
+    fn refusal_is_recorded_in_the_gate_audit_format() {
+        let sb = sandbox("audit");
+        sb.install(&["osascript"]);
+        sb.fake_real("osascript");
+        sb.run("osascript", &["-e", "tell app \"X\" to activate"], None);
+        let rows = sb.audit();
+        assert_eq!(rows.len(), 1, "отказ обязан оставить ровно одну строку");
+        let r = &rows[0];
+        for key in ["ts", "consumer", "id", "class", "args", "provenance", "outcome", "ms"] {
+            assert!(r.get(key).is_some(), "в строке нет поля {key}: {r}");
+        }
+        assert_eq!(r["id"], "input.osascript");
+        assert_eq!(r["class"], "control");
+        assert_eq!(r["outcome"], "denied:synthetic-input");
+        assert!(r["ms"].is_number(), "ms должно быть числом, как у гейта");
+        assert_eq!(r["args"]["match"], "activate");
+        // Аргументы попытки — чтобы человек видел, ЧТО пытались нажать.
+        assert!(
+            r["args"]["argv"].as_array().is_some_and(|a| !a.is_empty()),
+            "argv потерялся: {r}"
+        );
+    }
+
+    /// Тумблер для человека в своём терминале существует, но он не тихий:
+    /// пропуск тоже попадает в журнал, иначе стал бы дырой без следов.
+    #[test]
+    fn human_bypass_still_leaves_a_trace() {
+        let sb = sandbox("bypass");
+        sb.install(&["osascript"]);
+        sb.fake_real("osascript");
+        let r = sb.run_with_path(
+            "osascript",
+            &["-e", "tell app \"X\" to activate"],
+            None,
+            &[&sb.shims, &sb.real],
+            &[("JARVIS_INPUT_GUARD", "off")],
+        );
+        assert_passed(&r, "тумблер off");
+        assert_eq!(sb.audit()[0]["outcome"], "bypass:synthetic-input");
+    }
+
+    /// Нет настоящего бинаря — шим обязан внятно сказать это и не звать себя.
+    /// `hs` берём потому, что его заведомо нет в /usr/bin: так проверяется
+    /// именно ненайденный бинарь, а не отсутствие coreutils.
+    #[test]
+    fn missing_real_binary_is_reported_not_looped() {
+        let sb = sandbox("norealbin");
+        sb.install(&["hs"]);
+        let r = sb.run_with_path("hs", &["-c", "print(1)"], None, &[&sb.shims], &[]);
+        assert_eq!(r.code, 127, "не найденный бинарь — это 127");
+        assert!(r.err.contains("не найден"), "молчаливый провал: {}", r.err);
+    }
+
+    /// Отказ не должен зависеть от наличия настоящего бинаря: «нечего звать» —
+    /// не повод пропустить попытку молча.
+    #[test]
+    fn refusal_works_without_the_real_binary() {
+        let sb = sandbox("denynoreal");
+        sb.install(&["osascript"]);
+        let r = sb.run_with_path("osascript", &["-e", "keystroke \"a\""], None, &[&sb.shims], &[]);
+        assert!(r.err.contains("ЗАПРЕЩЕНО"), "отказ пропал без бинаря: {}", r.err);
+        assert_eq!(sb.audit().len(), 1, "отказ без бинаря обязан попасть в журнал");
+    }
+
+    /* ---------- установка: страж действительно доезжает до диска ---------- */
+
+    #[test]
+    fn installer_writes_executable_guards_with_our_mark() {
+        let sb = sandbox("install");
+        sb.install(&["osascript", "cliclick"]);
+        for name in ["osascript", "cliclick"] {
+            let path = sb.shims.join(name);
+            let body = fs::read_to_string(&path).unwrap();
+            assert!(body.contains(INPUT_GUARD_MARK), "нет метки — снос не найдёт свой файл");
+            let mode = fs::metadata(&path).unwrap().permissions().mode();
+            assert_ne!(mode & 0o111, 0, "шим не исполняемый");
+        }
+        // Идемпотентность: второй проход ничего не переписывает.
+        assert_eq!(install_input_guard_at(&sb.shims, &["osascript"]), 0);
+    }
+
+    #[test]
+    fn guard_names_are_platform_honest() {
+        // Несуществующее не выдумываем: шим с именем отсутствующей команды врёт
+        // `command -v` и ломает чужие скрипты.
+        let none = input_guard_names(|_| false);
+        assert!(!none.contains(&"hs"), "hs поставлен без Hammerspoon на машине");
+        let all = input_guard_names(|_| true);
+        assert!(all.contains(&"hs"), "найденный hs обязан перехватываться");
+        if cfg!(target_os = "macos") {
+            assert!(none.contains(&"osascript") && none.contains(&"cliclick"));
+        }
+        // Снос обязан знать про КАЖДОЕ имя, которое умеет поставить установка,
+        // иначе после удаления интеграции в PATH останется мёртвый шим.
+        for name in all {
+            assert!(
+                GUARD_ALWAYS.contains(&name) || GUARD_IF_PRESENT.contains(&name),
+                "{name} ставится, но не сносится"
+            );
+        }
+    }
+
+    /// JARVIS_DIR запекается: dev-профиль (~/.jarvis-dev) обязан писать отказы
+    /// в свой журнал, а не в чужой.
+    #[test]
+    fn jarvis_dir_is_baked_into_the_guard() {
+        let body = input_guard_body();
+        assert!(!body.contains("${JARVIS_DIR:-$HOME/.jarvis}"), "дефолт не подменён");
+        assert!(body.contains(&jarvis_dir().display().to_string()));
+    }
+
+    /// Сторож на проводку: страж бесполезен, если установка его не зовёт.
+    /// Проверяем исходник модуля — источник правды тут именно он.
+    #[test]
+    fn install_and_reconcile_actually_call_the_guard() {
+        let calls = SELF_SRC.matches("install_input_guard(progress)").count();
+        assert!(
+            calls >= 2,
+            "страж обязан ставиться и из install_core, и из reconcile_hooks (нашли {calls})"
+        );
+        assert!(
+            SELF_SRC.contains("uninstall_input_guard();"),
+            "снос интеграции обязан уносить стража"
+        );
+        // Первенство в PATH — единственное условие работы стража.
+        assert!(
+            INPUT_GUARD_SRC.contains("# jarvis-input-guard"),
+            "метка стража пропала из скрипта"
+        );
     }
 }

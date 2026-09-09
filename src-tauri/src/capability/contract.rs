@@ -82,6 +82,11 @@ pub enum GateError {
     Denied(String),
     /// Пользователь отклонил подтверждение side-effect.
     Rejected,
+    /// Решения не было: карточку сняли, не дождавшись ответа (смерть демона,
+    /// снятый nonce). Не отказ: человек ничего не решал — и, скорее всего, не знает.
+    Expired,
+    /// Разрешено, но цель уехала, пока ждали ответа (INV-CONFIRM-BIND).
+    Stale,
     /// Хендлер капабилити вернул ошибку (сбой сервиса/поставщика).
     Failed(String),
 }
@@ -93,6 +98,8 @@ impl GateError {
             GateError::NotFound(_) => "not_found",
             GateError::Denied(_) => "denied",
             GateError::Rejected => "rejected",
+            GateError::Expired => "expired",
+            GateError::Stale => "stale",
             GateError::Failed(_) => "failed",
         }
     }
@@ -104,6 +111,16 @@ impl std::fmt::Display for GateError {
             GateError::NotFound(id) => write!(f, "капабилити не найдена: {id}"),
             GateError::Denied(why) => write!(f, "отказано: {why}"),
             GateError::Rejected => write!(f, "пользователь отклонил подтверждение"),
+            // Текст читает агент: он должен понять, что запрета не было — было
+            // молчание, и продолжать «как будто нельзя» неправильно.
+            GateError::Expired => write!(
+                f,
+                "человек не ответил на карточку — действие НЕ выполнено; это не отказ: скажи об этом в чате и предложи повторить"
+            ),
+            GateError::Stale => write!(
+                f,
+                "цель изменилась, пока ждали ответа — действие НЕ выполнено; проверь состояние и спроси заново"
+            ),
             GateError::Failed(e) => write!(f, "сбой исполнения: {e}"),
         }
     }

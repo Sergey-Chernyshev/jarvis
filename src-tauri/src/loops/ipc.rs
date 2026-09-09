@@ -36,7 +36,179 @@ pub fn push(d: &Arc<Daemon>) {
 
 #[tauri::command]
 pub fn loops_get(app: AppHandle) -> Value {
-    snapshot(&Daemon::get(&app))
+    let d = Daemon::get(&app);
+    // Панель спросила состояние — самый момент проверить, не сохранил ли
+    // человек что-то в модельере. Здесь, а не в `push`: `push` летит на каждом
+    // шаге запуска, и трогать диск в этом темпе незачем.
+    sync_from_files(&d);
+    snapshot(&d)
+}
+
+/* ================= обмен с Camunda Modeler ================= */
+
+/// Куда кладём файлы пайплайнов. Отдельный каталог, а не рядом с проектом:
+/// это файл ИНСТРУМЕНТА, и класть его в чужой репозиторий без спроса нельзя.
+fn bpmn_dir() -> std::path::PathBuf {
+    crate::util::jarvis_dir().join("pipelines")
+}
+
+fn default_bpmn_path(item: &Loop) -> std::path::PathBuf {
+    bpmn_dir().join(format!("{}-{}.bpmn", slug(&item.name), item.id))
+}
+
+fn mtime_ms(p: &std::path::Path) -> i64 {
+    std::fs::metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Записать пайплайн в связанный с ним файл и запомнить время правки.
+///
+/// Время запоминаем ОБЯЗАТЕЛЬНО: без этого следующая же проверка увидела бы
+/// свой собственный файл как «человек что-то сохранил» и втянула бы его обратно.
+fn write_bpmn(p: &mut super::pipeline::Pipeline, name: &str) -> Result<(), String> {
+    let path = std::path::PathBuf::from(&p.bpmn_file);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, super::bpmn::to_xml(p, name)).map_err(|e| e.to_string())?;
+    p.bpmn_mtime = mtime_ms(&path);
+    Ok(())
+}
+
+/// Выгрузить пайплайн в `.bpmn` и (по просьбе) открыть его системой.
+///
+/// Открываем именно системой: ассоциация `.bpmn` у человека своя — Camunda
+/// Modeler, bpmn.io в браузере, что угодно. Догадываться, чем он рисует, и
+/// звать это по имени — самый быстрый способ не открыть ничего.
+#[tauri::command]
+pub fn loops_bpmn_export(app: AppHandle, id: String, path: Option<String>, open: Option<bool>) -> Value {
+    let d = Daemon::get(&app);
+    let Some(mut item) = d.loops.store.get(&id) else {
+        return json!({ "ok": false, "error": "цикл не найден" });
+    };
+    let Some(linked) = item.pipeline.as_ref().map(|p| p.bpmn_file.clone()) else {
+        return json!({ "ok": false, "error": "у этого цикла нет пайплайна — рисовать нечего" });
+    };
+    let target = match path.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        Some(x) => std::path::PathBuf::from(crate::util::expand_home(&x)),
+        None if !linked.is_empty() => std::path::PathBuf::from(&linked),
+        None => default_bpmn_path(&item),
+    };
+    let name = item.name.clone();
+    let p = item.pipeline.as_mut().unwrap();
+    p.bpmn_file = target.to_string_lossy().into_owned();
+    if let Err(e) = write_bpmn(p, &name) {
+        return json!({ "ok": false, "error": format!("не записал файл: {e}") });
+    }
+    d.loops.store.save(item.clone());
+    push(&d);
+    if open.unwrap_or(false) {
+        if let Err(e) = crate::ipc::open_path(&target, false) {
+            return json!({ "ok": true, "path": target, "warning": e });
+        }
+    }
+    json!({ "ok": true, "path": target })
+}
+
+/// Забрать пайплайн обратно из файла.
+#[tauri::command]
+pub fn loops_bpmn_import(app: AppHandle, id: String, path: Option<String>) -> Value {
+    let d = Daemon::get(&app);
+    let Some(mut item) = d.loops.store.get(&id) else {
+        return json!({ "ok": false, "error": "цикл не найден" });
+    };
+    let linked = item.pipeline.as_ref().map(|p| p.bpmn_file.clone()).unwrap_or_default();
+    let target = match path.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        Some(x) => std::path::PathBuf::from(crate::util::expand_home(&x)),
+        None if !linked.is_empty() => std::path::PathBuf::from(&linked),
+        None => return json!({ "ok": false, "error": "нечего забирать: файл не выгружен" }),
+    };
+    let text = match std::fs::read_to_string(&target) {
+        Ok(t) => t,
+        Err(e) => return json!({ "ok": false, "error": format!("{}: {e}", target.display()) }),
+    };
+    let mut fresh = match super::bpmn::from_xml(&text) {
+        Ok(p) => p,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    fresh.bpmn_file = target.to_string_lossy().into_owned();
+    fresh.bpmn_mtime = mtime_ms(&target);
+    let problems = fresh.problems();
+    item.pipeline = Some(fresh);
+    d.loops.store.save(item);
+    push(&d);
+    json!({ "ok": true, "path": target, "problems": problems })
+}
+
+/// Разорвать связь с файлом — панель снова единственный источник правды.
+#[tauri::command]
+pub fn loops_bpmn_unlink(app: AppHandle, id: String) -> Value {
+    let d = Daemon::get(&app);
+    let Some(mut item) = d.loops.store.get(&id) else {
+        return json!({ "ok": false, "error": "цикл не найден" });
+    };
+    if let Some(p) = item.pipeline.as_mut() {
+        p.bpmn_file.clear();
+        p.bpmn_mtime = 0;
+    }
+    d.loops.store.save(item);
+    push(&d);
+    json!({ "ok": true })
+}
+
+/// Втянуть правки, сделанные в модельере.
+///
+/// Правило простое и одно: **файл свежее — файл и главнее**. Человек только что
+/// сохранил в редакторе, где видит схему целиком; молча оставить его правку за
+/// бортом было бы худшим из возможных. Обратное направление — правка в панели —
+/// пишет файл сразу же (`loops_save`), поэтому спор двух правок невозможен: у
+/// того, кто сохранил позже, время и больше.
+fn sync_from_files(d: &Arc<Daemon>) -> bool {
+    let mut changed = false;
+    for mut item in d.loops.store.all() {
+        let Some(p) = item.pipeline.as_ref() else { continue };
+        if p.bpmn_file.is_empty() {
+            continue;
+        }
+        let path = std::path::PathBuf::from(&p.bpmn_file);
+        let mtime = mtime_ms(&path);
+        if mtime == 0 || mtime <= p.bpmn_mtime {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        match super::bpmn::from_xml(&text) {
+            Ok(mut fresh) => {
+                fresh.bpmn_file = p.bpmn_file.clone();
+                fresh.bpmn_mtime = mtime;
+                crate::log::line(&format!(
+                    "[loops] {}: забрал правку из {} — шагов {}",
+                    item.name,
+                    path.display(),
+                    fresh.steps.len()
+                ));
+                item.pipeline = Some(fresh);
+                d.loops.store.save(item);
+                changed = true;
+            }
+            // Битый файл не должен стирать рабочий пайплайн. Помечаем время
+            // прочитанным, чтобы не жаловаться на него в каждом обновлении.
+            Err(e) => {
+                crate::log::line(&format!("[loops] {}: {} не разобрался — {e}", item.name, path.display()));
+                if let Some(p) = item.pipeline.as_mut() {
+                    p.bpmn_mtime = mtime;
+                }
+                d.loops.store.save(item);
+            }
+        }
+    }
+    if changed {
+        push(d);
+    }
+    changed
 }
 
 /// Справочник конструктора: модели агентов и каталог заготовок.
@@ -46,19 +218,23 @@ pub fn loops_get(app: AppHandle) -> Value {
 /// платить за него каждые несколько секунд. Панель зовёт это один раз и кэширует.
 #[tauri::command]
 pub fn loops_catalog() -> Value {
-    let models = |a: crate::backend::Agent| -> Vec<Value> {
-        crate::backend::backend(a)
-            .models()
-            .iter()
-            .map(|(id, label)| json!({ "id": id, "label": label }))
-            .collect()
-    };
+    // Карта собирается из Agent::all(), а не перечислением ключей: раньше здесь
+    // жили ровно два литерала, и третий агент молча остался бы без моделей в
+    // конструкторе. Форма ответа прежняя — панель читает `models[agent]`.
+    let models: serde_json::Map<String, Value> = crate::backend::Agent::all()
+        .iter()
+        .map(|a| {
+            let list: Vec<Value> = crate::backend::backend(*a)
+                .models()
+                .iter()
+                .map(|(id, label)| json!({ "id": id, "label": label }))
+                .collect();
+            (a.label().to_string(), Value::Array(list))
+        })
+        .collect();
     json!({
         "ok": true,
-        "models": {
-            "claude": models(crate::backend::Agent::Claude),
-            "codex": models(crate::backend::Agent::Codex),
-        },
+        "models": models,
         "presets": super::presets::all(),
     })
 }
@@ -145,6 +321,25 @@ pub fn loops_save(app: AppHandle, item: Value) -> Value {
         }
         if parsed.created_at == 0 {
             parsed.created_at = old.created_at;
+        }
+        // Связь с файлом `.bpmn` — свойство цикла, а не формы. Панель могла
+        // собрать пайплайн заново (кнопкой заготовки), и потерять из-за этого
+        // связку с открытым в модельере файлом было бы неприятным сюрпризом.
+        if let (Some(p), Some(o)) = (parsed.pipeline.as_mut(), old.pipeline.as_ref()) {
+            if p.bpmn_file.is_empty() {
+                p.bpmn_file = o.bpmn_file.clone();
+                p.bpmn_mtime = o.bpmn_mtime;
+            }
+        }
+    }
+    // Правка из панели уезжает в файл сразу: иначе следующее открытие в
+    // модельере показало бы вчерашний граф и затёрло бы сегодняшний.
+    if let Some(p) = parsed.pipeline.as_mut() {
+        if !p.bpmn_file.is_empty() {
+            let name = parsed.name.clone();
+            if let Err(e) = write_bpmn(p, &name) {
+                crate::log::line(&format!("[loops] не записал .bpmn: {e}"));
+            }
         }
     }
     d.loops.store.save(parsed.clone());
@@ -419,6 +614,21 @@ mod tests {
             None,
             "после подъёма стена отодвинулась"
         );
+    }
+
+    /// Ключ на КАЖДОГО агента и прежняя форма `{id,label}`: панель читает
+    /// `catalog.models[agent]`, и пропущенный ключ — пустой селект моделей.
+    #[test]
+    fn catalog_lists_models_of_every_agent() {
+        let cat = loops_catalog();
+        let models = cat.get("models").and_then(Value::as_object).expect("models — объект");
+        assert_eq!(models.len(), crate::backend::Agent::all().len());
+        for a in crate::backend::Agent::all() {
+            let list = models.get(a.label()).and_then(Value::as_array);
+            let list = list.unwrap_or_else(|| panic!("нет ключа {}", a.label()));
+            assert!(!list.is_empty(), "{} без моделей", a.label());
+            assert!(list.iter().all(|m| m.get("id").is_some() && m.get("label").is_some()));
+        }
     }
 
     #[test]

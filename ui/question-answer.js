@@ -9,7 +9,10 @@
   // keep the conservative Claude-only fallback until a screen is identified.
   function customAllowed(agent, item, question) {
     if (typeof item?.customAllowed === 'boolean') return item.customAllowed;
-    return agent !== 'codex' && !question?.fromScreen;
+    if (question?.fromScreen) return false;
+    const catalog = item?.get ? item : globalThis.JarvisAgents;
+    if (catalog?.get && catalog.get(agent)?.customAnswer === false) return false;
+    return agent !== 'codex' && agent !== 'kimi';
   }
 
   // Нормализация поля «Свой ответ…»: пробельный ввод — не ответ.

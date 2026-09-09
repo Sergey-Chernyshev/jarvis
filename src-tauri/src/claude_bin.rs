@@ -607,6 +607,54 @@ fn parse_codex_sdk_output(stdout: &str) -> Option<String> {
     None
 }
 
+/// Пометить каталог доверенным для claude — тем же способом, что и сам CLI по
+/// кнопке «Yes, I trust this folder».
+///
+/// Зачем: в незнакомом каталоге claude показывает вопрос и ЖДЁТ клавишу, то есть
+/// сессия, поднятая агентом, висит молча. Проверено вживую на 2.1.233;
+/// `--dangerously-skip-permissions` этот вопрос не снимает. Бьёт прежде всего по
+/// `isolate: true`, где worktree — всегда новый каталог.
+///
+/// Путь канонизируем: claude кладёт ключ по разыменованному cwd (`/tmp` →
+/// `/private/tmp`), и без резолва отметка легла бы мимо — тот же класс промаха,
+/// что был у транскриптов.
+pub fn ensure_workspace_trust(cwd: &std::path::Path) -> Result<(), String> {
+    let real = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let key = real.to_string_lossy().to_string();
+    let path = crate::util::home_dir().join(".claude.json");
+
+    let mut root: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !root.is_object() {
+        return Err("~/.claude.json не объект — не трогаю".into());
+    }
+    let projects = root
+        .as_object_mut()
+        .unwrap()
+        .entry("projects")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(projects) = projects.as_object_mut() else {
+        return Err("projects в ~/.claude.json не объект — не трогаю".into());
+    };
+    let entry = projects.entry(key).or_insert_with(|| serde_json::json!({}));
+    let Some(entry) = entry.as_object_mut() else {
+        return Err("запись проекта не объект — не трогаю".into());
+    };
+    if entry.get("hasTrustDialogAccepted").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Ok(()); // уже доверен — чужой файл лишний раз не переписываем
+    }
+    entry.insert("hasTrustDialogAccepted".into(), serde_json::json!(true));
+
+    // Атомарно: ~/.claude.json — рабочий файл человека, оборванная запись
+    // стоила бы ему настроек CLI, а не только нашей отметки.
+    let text = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.jarvis-tmp");
+    std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

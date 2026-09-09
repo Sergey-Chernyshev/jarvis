@@ -1,0 +1,36 @@
+{
+  "id": "example-hello",
+  "name": "Пример: Привет",
+  "version": "1.0.0",
+  "description": "Референсный внешний плагин: показывает протокол трубы целиком",
+  "icon": "blocks",
+  "kind": "external",
+  "entry": { "path": "bin/plug" },
+  "capabilities": ["read"],
+  "uses": ["sessions.list"],
+  "defaultEnabled": false,
+  "tray": true,
+  "settings": [
+    {
+      "key": "кого",
+      "type": "text",
+      "title": "Кого приветствовать",
+      "hint": "Подставляется в строку статуса и в пункт трея.",
+      "default": "мир"
+    },
+    {
+      "key": "часто",
+      "type": "segmented",
+      "title": "Как часто здороваться",
+      "default": "редко",
+      "options": [
+        { "value": "редко", "label": "Редко" },
+        { "value": "часто", "label": "Часто" }
+      ]
+    }
+  ],
+  "commands": [
+    { "name": "привет", "title": "Поздороваться" },
+    { "name": "сломаться", "title": "Упасть (проверить надзор)" }
+  ]
+}

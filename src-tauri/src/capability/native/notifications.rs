@@ -27,11 +27,11 @@ pub fn register(reg: &mut DaemonRegistry) {
             id: "limits.get",
             class: RiskClass::Read,
             provenance: Provenance::Trusted,
-            description: "Состояние лимитов провайдера (когда сброс, упёрлись ли).",
+            description: "Лимиты провайдеров: когда сброс, упёрлись ли, доля недели и окна, \
+                          норма в сутки, прогноз запаса хода, ступень лестницы, резерв, \
+                          свежесть чисел и ночной режим.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
-        make_handler(|d: Arc<Daemon>, _args: Value| async move {
-            serde_json::to_value(d.limits.state()).map_err(|e| e.to_string())
-        }),
+        make_handler(|d: Arc<Daemon>, _args: Value| async move { Ok(crate::limits::state_json(&d)) }),
     );
 }

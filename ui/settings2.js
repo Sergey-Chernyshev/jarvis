@@ -31,6 +31,8 @@
   // текст последней ошибки (показываем в строке + retry), вместо тихого сброса.
   let activeDownload = null;
   const dlState = {};
+  // Установка Codex-SDK идёт минутами и не привязана к id модели — своё поле.
+  const codexInstall = { busy: false, step: null };
   // Мультивыбор моделей для «Скачать выбранное» (чекбоксы в строках, id → выбран).
   const selectedModels = new Set();
   const machineDetails = new Map();
@@ -129,7 +131,7 @@
 
   // Shared, locally bundled Phosphor icons; each label remains real text.
   function icon(name) {
-    return window.jarvisIcons.create(name);
+    return window.jarvisIcons?.create(name) || document.createElement('span');
   }
   // обёртка <span> с иконкой внутри (для inline-вставки)
   function iconSpan(name, cls) {
@@ -449,7 +451,7 @@
       fire(() => window.jarvis.hotkeysSuspend(true));
       cap.classList.add('recording');
       cap.classList.remove('none');
-      note(isSel ? 'Нажмите сочетание с цифрой…' : 'Нажмите сочетание…');
+      note(isSel ? 'Нажми сочетание с цифрой…' : 'Нажми сочетание…');
       recTimer = setTimeout(stopRec, 12000); // раньше авто-ресюма бэкенда (15 с)
       onKey = (e) => {
         e.preventDefault(); e.stopPropagation();
@@ -516,6 +518,21 @@
     return bar;
   }
 
+  /* ── Живая строка загрузки ───────────────────────────────────────────────
+   * Состояние загрузки держим в модуле, а не в замыкании кнопки: тяжёлые
+   * установки (Codex-SDK ~2.6 ГБ, PyTorch) идут минутами, а reRenderPane за это
+   * время рисует строку заново — и человек видел свежую «Установить» и жал её
+   * второй раз, пока поток в бэкенде продолжал качать. Отмены в IPC нет, поэтому
+   * говорим честно: закрывать можно, прервать — нет. */
+  function paintProgress(node, dl) {
+    node.textContent = '';
+    if (!dl || !dl.busy) return;
+    const step = dl.step || {};
+    node.appendChild(el('div.loadcap', { text: step.msg || 'качаю…' }));
+    if (typeof step.pct === 'number') node.appendChild(progressBar(step.pct));
+    node.appendChild(el('div.loadcap', { text: 'идёт в фоне · прервать нельзя' }));
+  }
+
   /* ── Кнопка удаления модели с двойным подтверждением «Точно?» ────────────*/
   function makeDeleteButton(id, after) {
     const del = el('button.btn.sm.danger', { type: 'button', 'aria-label': 'Удалить модель ' + id });
@@ -569,6 +586,7 @@
 #settings2 .snav .item.sel { background: var(--accent-soft); color:var(--ink); font-weight:500; }
 #settings2 .snav .item .ic { width:22px; height:22px; border-radius:7px; display:grid; place-items:center; font-size:12px; flex:none; }
 #settings2 .snav .sep { height:1px; background:var(--line); margin:9px 9px; }
+#settings2 .snav-none { padding:10px; font-size:12.5px; color:var(--ink-faint); }
 #settings2 .snav .grp { font:500 12px/1 var(--s2-font); letter-spacing:0; text-transform:none; color:var(--ink-mute); padding:12px 10px 6px; }
 
 /* ── Детальная панель ────────────────────────────────────────────────── */
@@ -636,6 +654,10 @@
 #settings2 .s2-secret{width:100%;max-width:340px;background:var(--paper);border:0;box-shadow:inset 0 0 0 1.5px var(--line-strong);border-radius:9px;color:var(--ink);font:12.5px/1.3 var(--s2-mono,ui-monospace,monospace);padding:10px 12px;outline:none;transition:box-shadow .12s ease}
 #settings2 .s2-secret:focus{box-shadow:inset 0 0 0 1.5px var(--accent)}
 #settings2 .s2-secret::placeholder{color:var(--ink-faint)}
+/* Дописка к преамбуле — текст в несколько строк, а не значение в одну: поле
+   шире прочих и тянется вниз. Горизонтально не тянется: перенос читается, а
+   уехавшая вправо строка — нет. */
+#settings2 textarea.s2preamble{max-width:none;resize:vertical;min-height:96px;line-height:1.45;margin-top:8px}
 #settings2 .loadcap.err{color:var(--danger)}
 
 /* ── статус-точка: монохром + краска, как в списке сессий ────────────── */
@@ -861,9 +883,162 @@
     else document.head.appendChild(style);
   }
 
+
+  /* ========================================================================
+   * Вкладка «Плагины». Ни одного упоминания конкретного плагина: список,
+   * настройки, права и команды рисуются из манифестов, которые отдал хост
+   * (спека 2026-08-19-everything-is-plugin-design.md §7).
+   * ====================================================================== */
+  const PLUG_STATUS = {
+    running: 'работает',
+    stopped: 'выключен',
+    error: 'ошибка',
+    incompatible: 'несовместим',
+  };
+
+  function fmtUptime(ms) {
+    const s = Math.max(0, Math.round((ms || 0) / 1000));
+    if (s < 60) return s + 'с';
+    const m = Math.round(s / 60);
+    if (m < 60) return m + 'м';
+    const h = Math.floor(m / 60);
+    return h + 'ч ' + (m % 60) + 'м';
+  }
+
+  // Контрол для одного поля схемы манифеста. Тип = уже существующий компонент.
+  function pluginField(p, spec, values) {
+    const cur = values && Object.prototype.hasOwnProperty.call(values, spec.key)
+      ? values[spec.key] : spec.default;
+    const save = (v) => fire(() => window.jarvis.pluginSet(p.id, spec.key, v));
+    switch (spec.type) {
+      case 'toggle':
+        return toggle(!!cur, save);
+      case 'segmented':
+        return segmented((spec.options || []).map((o) => ({ value: o.value, label: o.label })), cur, save);
+      case 'select':
+        return customSelect((spec.options || []).map((o) => ({ value: o.value, label: o.label })), cur, save).node;
+      case 'number': {
+        const inp = el('input.s2-secret', {
+          type: 'number', value: cur == null ? '' : String(cur),
+          style: 'width:96px;text-align:right',
+        });
+        if (spec.min != null) inp.setAttribute('min', String(spec.min));
+        if (spec.max != null) inp.setAttribute('max', String(spec.max));
+        inp.addEventListener('change', () => {
+          const n = Number(inp.value);
+          if (Number.isFinite(n)) save(n);
+        });
+        return inp;
+      }
+      default: {
+        const inp = el('input.s2-secret', {
+          type: 'text', value: cur == null ? '' : String(cur), autocomplete: 'off',
+        });
+        inp.addEventListener('change', () => save(inp.value));
+        return inp;
+      }
+    }
+  }
+
+  // Карточка одного плагина: шапка с тумблером, настройки, права, здоровье.
+  function pluginCard(p) {
+    const g = el('div.dgroup');
+    const health = p.health || {};
+    const st = PLUG_STATUS[health.status] || health.status || '—';
+    const kind = p.builtin ? 'встроенный' : 'внешний';
+    const head = [p.name, p.version ? 'v' + p.version : null, '·', kind, '·', st]
+      .filter(Boolean).join(' ');
+    g.appendChild(drow(head, p.description || '',
+      toggle(!!p.enabled, (on) => {
+        fire(() => window.jarvis.pluginCmd(p.id, '_enable', { on }));
+        setTimeout(() => reRenderPane('plugins'), 300);
+      })));
+
+    if (health.error) {
+      g.appendChild(drow('Не работает', String(health.error), [], { dot: 'red' }));
+    }
+
+    // Настройки: либо здесь по схеме, либо честная отсылка в свою вкладку.
+    const schema = Array.isArray(p.settingsSchema) ? p.settingsSchema : [];
+    const values = p.settingsValues || {};
+    if (p.pane) {
+      if (schema.length) {
+        const tab = (NAV.find((n) => n.pane === p.pane) || {}).label || p.pane;
+        g.appendChild(drow('Настройки', 'Живут во вкладке «' + tab + '».', []));
+      }
+    } else {
+      for (const spec of schema) {
+        // depends: поле показывается, только если другое поле включено
+        if (spec.depends && !values[spec.depends]) continue;
+        g.appendChild(drow(spec.title || spec.key, spec.hint || '', pluginField(p, spec, values)));
+      }
+    }
+
+    // Права: что плагин просит. Встроенный не просит ничего — он и есть ядро.
+    const classes = (p.capabilities || []).join(', ');
+    const uses = (p.uses || []).join(', ');
+    if (classes || uses) {
+      g.appendChild(drow('Права',
+        [classes ? 'классы: ' + classes : null, uses ? 'вызывает: ' + uses : null]
+          .filter(Boolean).join(' · '), []));
+    } else if (!p.builtin) {
+      g.appendChild(drow('Права', 'Ничего не просит.', []));
+    }
+
+    // Команды из манифеста — те, у которых есть подпись для человека.
+    const cmds = (p.commands || []).filter((c) => c && c.title);
+    if (cmds.length && p.enabled) {
+      g.appendChild(drow('Действия', '', cmds.map((c) => button(c.title, () => {
+        fire(() => window.jarvis.pluginCmd(p.id, c.name, c.args || {}));
+        setTimeout(() => reRenderPane('plugins'), 300);
+      }, 'sm'))));
+    }
+
+    // Здоровье: только у внешних — у встроенного нет ни pid, ни падений.
+    if (!p.builtin) {
+      const bits = [];
+      if (health.pid) bits.push('pid ' + health.pid);
+      if (health.uptimeMs) bits.push('живёт ' + fmtUptime(health.uptimeMs));
+      if (health.restarts) bits.push('перезапусков: ' + health.restarts);
+      g.appendChild(drow('Здоровье', bits.join(' · ') || 'не запущен',
+        button('Перезапустить', async () => {
+          await safe(() => window.jarvis.pluginCmd(p.id, '_enable', { on: false }), null);
+          await safe(() => window.jarvis.pluginCmd(p.id, '_enable', { on: true }), null);
+          reRenderPane('plugins');
+        }, 'sm')));
+    }
+    return g;
+  }
+
+  async function renderPlugins(pane) {
+    pane.appendChild(el('div.dtitle', { text: 'Плагины' }));
+    const _sk = skelGroup(3); pane.appendChild(_sk);
+    const plugins = await safe(() => window.jarvis.getPlugins(), []);
+    _sk.remove();
+    const list = Array.isArray(plugins) ? plugins : [];
+    if (!list.length) {
+      pane.appendChild(el('div.dgroup', null, [
+        drow('Пусто', 'Внешние плагины ставятся вручную в ~/.jarvis/plugins/<id>/.', []),
+      ]));
+      return;
+    }
+    pane.appendChild(el('div.dgroup', null, [
+      drow('Как это работает',
+        'Способности Jarvis — плагины. Встроенные живут в самом приложении и не '
+        + 'изолированы: «выключен» значит «не держит ресурс», а не «выгружен». '
+        + 'Внешние — отдельные процессы, ходят в ядро через гейт и получают '
+        + 'ровно те права, что просят в манифесте.', []),
+    ]));
+    for (const p of list) if (p && p.id) pane.appendChild(pluginCard(p));
+  }
+
   /* ========================================================================
    * Список вкладок сайдбара.
    * ====================================================================== */
+  /* `find` — то, что лежит внутри раздела: половина названий («Под капотом»,
+   * «Бодрость») о содержимом не говорит ничего, и человек идёт в поиск именно
+   * поэтому. Список ключей короткий и держится рядом с разделом, чтобы не
+   * разъезжаться с ним. */
   const NAV = [
     { pane: 'general', label: 'Основное', icon: 'settings', ic: 'gray', group: 'Приложение' },
     { pane: 'look', label: 'Вид', icon: 'palette', ic: 'green' },
@@ -877,6 +1052,7 @@
     { pane: 'wake', label: 'Пробуждение', icon: 'mic', ic: 'blue' },
     { pane: 'awake', label: 'Бодрость', icon: 'coffee', ic: 'orange', group: 'Система' },
     { pane: 'service', label: 'Под капотом', icon: 'cpu', ic: 'purple' },
+    { pane: 'plugins', label: 'Плагины', icon: 'blocks', ic: 'violet' },
     { pane: 'about', label: 'О программе', icon: 'info', ic: 'gray' },
   ];
 
@@ -894,9 +1070,9 @@
     keys: [['Горячие клавиши', 'сочетания клавиатура хоткей shortcut диктовка панель']],
     launch: [['Терминал', 'tmux iterm kitty локальный запуск'], ['Шаблон команды', 'custom'], ['Команда прокси', 'proxy https сеть'], ['Разрешения без настроек задачи', 'опасный режим разрешения sandbox yolo legacy']],
     service: [['Бэкенд служебного LLM', 'claude codex модель'], ['Проверить ответ', 'тест'], ['Egress-прокси', 'proxy https сеть'], ['Подключить аккаунт', 'авторизация claude api ключ токен'], ['Модель Codex', 'gpt'], ['Глубина рассуждений', 'reasoning effort'], ['Codex-SDK сайдкар', 'установить python']],
-    integration: [['Тихий режим', 'звук уведомления'], ['Переустановить интеграцию', 'claude codex cli хуки события подключение mcp'], ['Удалить интеграцию', 'отключить']],
+    integration: [['Тихий режим', 'звук уведомления'], ['Переустановить интеграцию', 'claude codex kimi cli хуки события подключение mcp'], ['Удалить интеграцию', 'отключить']],
     remotes: [['SSH-подключения', 'удалённые ssh сервер vps машина добавить подключение ключ пароль'], ['Виртуальные машины', 'agent-vm avm vm linux lima tart запустить остановить'], ['Docker', 'образ контейнер container docker изоляция'], ['Отдельная ветка', 'worktree git проект изоляция']],
-    agents: [['Агенты', 'cli claude codex qwen opencode добавить']],
+    agents: [['Агенты', 'cli claude codex kimi qwen opencode добавить']],
     about: [['Версия', 'обновление'], ['Лицензии', 'компоненты']],
   };
   const searchIndex = Object.entries(SEARCH_ROWS).filter(([pane]) => pane !== 'remotes').flatMap(([pane, rows]) => rows.map(([label, words]) => ({ pane, label, words })));
@@ -979,10 +1155,12 @@
       v.engine,
       async (engine) => {
         sel.setBusy(true);
+        cap.classList.remove('err');
         cap.textContent = 'переключаю модель…';
         cap.style.display = '';
-        try { await required(() => window.jarvis.sttSetEngine(engine)); reRenderPane('stt'); }
-        finally { sel.setBusy(false); cap.style.display = 'none'; }
+        try { await required(() => window.jarvis.sttSetEngine(engine)); cap.style.display = 'none'; reRenderPane('stt'); }
+        catch (error) { cap.textContent = error.message; cap.classList.add('err'); throw error; }
+        finally { sel.setBusy(false); }
       });
     const engCtl = el('div.dctl', { style: 'flex-direction:column;align-items:flex-end;gap:6px' }, [sel.node, cap]);
     const engRow = el('div.drow', null, [
@@ -1088,6 +1266,7 @@
       const ids = idsInGroup.filter((id) => selectedModels.has(id));
       if (!ids.length) return;
       b.disabled = true; b.replaceChildren(document.createTextNode('Качаю…'));
+      for (const id of ids) dlState[id] = { busy: true };
       if (!await action(b, () => window.jarvis.modelsInstall(ids))) {
         b.disabled = false; b.textContent = 'Скачать выбранное';
       }
@@ -1097,7 +1276,7 @@
 
   // выбор download-action по id (порт downloadActionFor из renderer.js)
   function downloadActionFor(m) {
-    if (m.present || m.available === false) return null;
+    if (m.present || m.available === false || m.usable === false) return null;
     switch (m.id) {
       case 'whisper-turbo': return { label: 'Скачать (~574 МБ)', run: () => window.jarvis.sttInstallWhisper() };
       case 'qwen3-0.6b': return { label: 'Скачать (~1 ГБ)', run: () => window.jarvis.sttInstallQwen('qwen3-0.6b') };
@@ -1127,19 +1306,22 @@
     grow.appendChild(titleRow);
     // Статус: явный успех «✓ размер» (видно, что скачалось) либо «не скачана».
     grow.appendChild(el('div.dd', { text: m.present ? '✓ установлена · ' + fmtBytes(m.bytes) : 'не скачана' }));
-    if (m.available === false) grow.appendChild(el('div.dd', { text: m.unavailableReason || 'Недоступно в этой сборке.' }));
+    if (m.available === false || m.usable === false) grow.appendChild(el('div.dd', { text: m.unavailableReason || 'Недоступно в этой сборке.' }));
     // Ошибка прошлой попытки — прямо в строке (вместо тихого сброса), с подсказкой про retry.
     if (dlState[m.id] && dlState[m.id].error) grow.appendChild(dlErrorNote(dlState[m.id].error));
 
-    const action = downloadActionFor(m);
-    if (action) {
+    const download = downloadActionFor(m);
+    if (download) {
       // не скачана: чекбокс (мультивыбор) + кнопка «Скачать»/«Повторить» + место прогресса
       const wrap = el('div.dctl', { style: 'flex-direction:column;align-items:flex-end;gap:6px' });
-      const retry = !!(dlState[m.id] && dlState[m.id].error);
-      const label = retry ? 'Повторить' : action.label;
-      const btn = el('button.btn.sm', null, [iconSpan(retry ? 'rotate-ccw' : 'download'), document.createTextNode(label)]);
+      const dl = dlState[m.id] || null;
+      const busy = !!(dl && dl.busy); // загрузка пережила перерисовку вкладки
+      const retry = !!(dl && dl.error);
+      const label = busy ? 'Качаю…' : (retry ? 'Повторить' : download.label);
+      const btn = el('button.btn.sm', null, [iconSpan(retry && !busy ? 'rotate-ccw' : 'download'), document.createTextNode(label)]);
+      btn.disabled = busy;
       btn.addEventListener('click', async () => {
-        delete dlState[m.id];             // сбросить прежнюю ошибку
+        dlState[m.id] = { busy: true };   // сбросить прежнюю ошибку и запомнить загрузку
         btn.disabled = true; btn.replaceChildren(document.createTextNode('Качаю…'));
         // единый путь: оркестратор шлёт прогресс/финал по id модели
         if (!await action(btn, () => window.jarvis.modelsInstall([m.id]))) {
@@ -1153,16 +1335,18 @@
       });
       const btnRow = el('div', { style: 'display:flex;align-items:center' }, [cb, btn]);
       wrap.appendChild(btnRow);
-      wrap.appendChild(el('div', { 'data-model': m.id })); // плейсхолдер прогресса
+      const prog = el('div', { 'data-model': m.id }); // плейсхолдер прогресса
+      paintProgress(prog, dl);
+      wrap.appendChild(prog);
       return el('div.drow', null, [dot, grow, wrap]);
     }
 
     const ctl = el('div.dctl');
-    if (m.kind === 'stt' && m.present && m.available !== false && !m.active) {
+    if (m.kind === 'stt' && m.present && m.available !== false && m.usable !== false && !m.active) {
       ctl.appendChild(button('Сделать активной', async (b) => {
         b.disabled = true; b.textContent = 'Включаю…';
-        await required(() => window.jarvis.sttSetEngine(m.id));
-        reRenderPane('stt');
+        try { await required(() => window.jarvis.sttSetEngine(m.id)); reRenderPane('stt'); }
+        catch (error) { let note = grow.querySelector('.loadcap.err'); if (!note) { note = el('div.loadcap.err'); grow.appendChild(note); } note.textContent = error.message; b.disabled = false; b.textContent = 'Сделать активной'; throw error; }
       }, 'sm'));
     }
     if (canDeleteModel(m)) {
@@ -1240,12 +1424,20 @@
       : 'Актуальное состояние захвата звука.';
     group.appendChild(drow('Состояние микрофона', hint, el('span.sval', { text: audioLabels[audioState] || audioState, role: 'status' })));
 
+    // Детектор может быть не вкомпилирован (нет фичи wakeword-ort): веса тогда
+    // качаются, строка зеленеет, тумблер доступен — а включение бэкенд молча
+    // отбивает, и человек решает, что сломан микрофон. Старый бэкенд поля не
+    // шлёт (undefined) — по догадке не отнимаем, как и с моделями сборки.
+    const noOrt = v.ort_built === false;
+
     // вкл/выкл активацию по фразе
     group.appendChild(drow('Активация по фразе',
-      v.model_present
-        ? 'Скажи «Hey Jarvis», чтобы разбудить ассистента. Работает офлайн.'
-        : 'Сначала скачайте модель openWakeWord ниже, чтобы включить.',
-      toggle(!!v.enabled, async (on) => { await required(() => window.jarvis.wakeSetEnabled(on)); reRenderPane('wake'); }, !v.model_present)));
+      noOrt
+        ? 'Детектор не вкомпилирован — «Hey Jarvis» недоступно в этой сборке даже со скачанными весами.'
+        : v.model_present
+          ? 'Скажи «Hey Jarvis», чтобы разбудить ассистента. Работает офлайн.'
+          : 'Сначала скачай модель openWakeWord ниже, чтобы включить.',
+      toggle(!!v.enabled && !noOrt, async (on) => { await required(() => window.jarvis.wakeSetEnabled(on)); reRenderPane('wake'); }, noOrt || !v.model_present)));
 
     // заглушить микрофон (mute у источника)
     group.appendChild(drow('Заглушить микрофон', 'Полностью отключить микрофон у источника.',
@@ -1257,20 +1449,33 @@
     range.value = String(v.threshold != null ? v.threshold : 0.5);
     range.addEventListener('input', () => { thVal.textContent = Number(range.value).toFixed(2); });
     range.addEventListener('change', () => fire(() => window.jarvis.wakeSetThreshold(Number(range.value))));
+    range.disabled = noOrt; // крутить порог мёртвого детектора незачем
     group.appendChild(drow('Порог срабатывания', 'Чувствительность детектора фразы.', [thVal, range]));
 
     // модели openWakeWord
-    if (v.model_present) {
+    if (noOrt) {
+      // веса тут ни при чём — качать их незачем, работать будет нечему
+      group.appendChild(drow('Модели openWakeWord',
+        'недоступно в этой сборке — нужен движок детектора (--features wakeword-ort)',
+        el('span.sval', { text: '—' }), { dot: '' }));
+    } else if (v.model_present) {
       group.appendChild(drow('Модели openWakeWord', 'ONNX-модели «Hey Jarvis» на месте.',
         el('span.sval.on', { text: 'на месте' }), { dot: 'done' }));
     } else {
-      const werr = dlState['hey_jarvis'] && dlState['hey_jarvis'].error;
+      const wdl = dlState['hey_jarvis'] || null;
+      const werr = wdl && wdl.error;
+      const wbusy = !!(wdl && wdl.busy);
       const wctl = el('div.dctl', { style: 'flex-direction:column;align-items:flex-end;gap:6px' });
-      wctl.appendChild(button(werr ? 'Повторить' : 'Скачать (~3.5 МБ)', async (b) => {
-        activeDownload = 'hey_jarvis'; delete dlState['hey_jarvis'];
+      const wbtn = button(wbusy ? 'Скачиваю…' : (werr ? 'Повторить' : 'Скачать (~3.5 МБ)'), async (b) => {
+        activeDownload = 'hey_jarvis'; dlState['hey_jarvis'] = { busy: true };
         b.disabled = true; b.textContent = 'Скачиваю…';
         await required(() => window.jarvis.wakeInstallModels());
-      }, 'sm'));
+      }, 'sm');
+      wbtn.disabled = wbusy;
+      wctl.appendChild(wbtn);
+      const wprog = el('div', { 'data-model': 'hey_jarvis' });
+      paintProgress(wprog, wdl);
+      wctl.appendChild(wprog);
       if (werr) wctl.appendChild(dlErrorNote(werr));
       group.appendChild(drow('Модели openWakeWord', 'Нужно скачать модели (~3.5 МБ), чтобы детектор заработал.',
         wctl, { dot: '' }));
@@ -1501,7 +1706,25 @@
       ? readiness.coreReady
       : (st.hooks && st.shim);
 
-    pane.appendChild(el('div.dsection', { text: 'Claude Code · ' + (integrated ? 'подключено' : 'не подключено') }));
+    // Бэкенд считает готовность КАЖДОГО CLI (claude, codex, kimi) со своей
+    // причиной. Раньше вкладка брала отсюда один глобальный coreReady и рисовала
+    // «Claude Code · не подключено» даже тогда, когда сломан был Kimi.
+    const agents = Array.isArray(readiness.agents) ? readiness.agents : [];
+    if (agents.length) {
+      pane.appendChild(el('div.dsection', { text: 'Агенты' }));
+      const ag = el('div.dgroup');
+      for (const a of agents) {
+        const ready = !!a.ready;
+        const found = a.available !== false;
+        const val = ready ? 'подключён' : (found ? 'нужна настройка' : 'CLI не найден');
+        const desc = [a.detail, ready ? null : a.action].filter(Boolean).join(' · ');
+        ag.appendChild(drow(a.label || a.id, desc,
+          el('span.sval' + (ready ? '.on' : ''), { text: val }), { dot: ready ? 'done' : '' }));
+      }
+      pane.appendChild(ag);
+    }
+
+    pane.appendChild(el('div.dsection', { text: 'Общий контур · ' + (integrated ? 'подключён' : 'не подключён') }));
     const statusGroup = el('div.dgroup');
     const rows = [
       ['Хуки событий', 'Уведомляют Jarvis о действиях агента.', st.hooks],
@@ -1515,8 +1738,17 @@
     }
     pane.appendChild(statusGroup);
 
+    // предупреждения бэкенда написаны словами — их незачем прятать в онбординге
+    const warnings = Array.isArray(readiness.warnings) ? readiness.warnings : [];
+    for (const w of warnings) {
+      pane.appendChild(el('div.s2err', { style: 'max-width:none;margin:-14px 2px 8px' }, [
+        el('span.s2err-ic', null, icon('alert-triangle')),
+        el('span.s2err-txt', { text: w }),
+      ]));
+    }
+
     if (info.foreign_hooks > 0) {
-      pane.appendChild(el('div.dd', { text: 'При удалении сохранятся ' + info.foreign_hooks + ' чужих хук(ов) — трогаем только свои.', style: 'margin:-12px 2px 18px' }));
+      pane.appendChild(el('div.dd', { text: 'При удалении сохранятся ' + info.foreign_hooks + ' ' + JarvisMarkdown.plural(info.foreign_hooks, 'чужой хук', 'чужих хука', 'чужих хуков') + ' — трогаем только свои.', style: 'margin:' + (warnings.length ? '6px' : '-12px') + ' 2px 18px' }));
     }
 
     // разработчик: тихий режим
@@ -1542,7 +1774,7 @@
         }
         reRenderPane('integration');
       });
-      manGroup.appendChild(drow('Удалить интеграцию', 'Отключить Jarvis от Claude Code (чужие хуки сохранятся).', rm));
+      manGroup.appendChild(drow('Удалить интеграцию', 'Отключить Jarvis от агентских CLI (чужие хуки сохранятся).', rm));
     }
     // модели голоса/диктовки на диске (из info.models — Artifact[]: {id,label,bytes})
     for (const m of (info.models || [])) {
@@ -1571,11 +1803,11 @@
       status.textContent = 'Проверяю…';
       const r = await safe(() => window.jarvis.updateCheckInstall(), { ok: false, error: 'нет связи с апдейтером' });
       if (r && r.ok && r.updated) {
-        status.textContent = 'Установлена v' + (r.version || '') + ' — перезапустите.';
+        status.textContent = 'Установлена v' + (r.version || '') + ' — перезапусти Jarvis.';
         ctl.textContent = '';
         ctl.appendChild(button('Перезапустить', () => window.jarvis.relaunch(), 'primary'));
       } else if (r && r.ok) {
-        status.textContent = 'У вас последняя версия.';
+        status.textContent = 'У тебя последняя версия.';
         checkBtn.disabled = false;
       } else {
         status.textContent = 'Ошибка: ' + ((r && r.error) || 'не удалось проверить');
@@ -1675,6 +1907,13 @@
 
   async function renderService(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Под капотом' }));
+    // По названию раздела не угадывается ничего — говорим прямо, что внутри и
+    // чего тут НЕТ (иначе соседние настройки вынуждены объяснять это за него).
+    pane.appendChild(el('div.dd', {
+      style: 'margin:-12px 2px 18px;max-width:520px',
+      text: 'Всё, чем Jarvis пользуется сам: служебный LLM для саммари и заголовков, его сеть и аккаунты. '
+        + 'Сами сессии агентов и их запуск — в разделах «Агенты» и «Запуск».',
+    }));
     const _sk = skelGroup(3); pane.appendChild(_sk);
     const v = await required(() => window.jarvis.serviceGet());
     _sk.remove();
@@ -1774,7 +2013,7 @@
     ]));
     pane.appendChild(ng);
 
-    // 3. Аккаунт Claude — подписка (claude setup-token) или API-ключ
+    // 3. Аккаунт Claude — явный API-ключ или токен для CLI
     await renderClaudeAccount(pane);
 
     // 4. Codex (Python SDK): модель + effort + установка сайдкара
@@ -1804,8 +2043,13 @@
         el('span.sval.on', { text: 'на месте' })));
     } else {
       const wrap = el('div.dctl', { style: 'flex-direction:column;align-items:flex-end;gap:6px' });
-      const btn = el('button.btn.sm', null, [iconSpan('download'), document.createTextNode('Установить')]);
+      const btn = el('button.btn.sm', null, [
+        iconSpan('download'),
+        document.createTextNode(codexInstall.busy ? 'Ставлю…' : 'Установить'),
+      ]);
+      btn.disabled = codexInstall.busy; // установка пережила переключение вкладки
       btn.addEventListener('click', async () => {
+        codexInstall.busy = true; codexInstall.step = null;
         btn.disabled = true;
         btn.replaceChildren(document.createTextNode('Ставлю…'));
         if (!await action(btn, () => window.jarvis.codexInstallSidecar())) {
@@ -1814,11 +2058,13 @@
         // финал прилетит codex_install_done → перерисует панель
       });
       wrap.appendChild(btn);
-      wrap.appendChild(el('div', { id: 's2-codex-progress' })); // плейсхолдер прогресса
+      const prog = el('div', { id: 's2-codex-progress' }); // плейсхолдер прогресса
+      paintProgress(prog, codexInstall);
+      wrap.appendChild(prog);
       cg.appendChild(el('div.drow', null, [
         el('div.grow', null, [
           el('div.dt', { text: 'Codex-SDK сайдкар' }),
-          el('div.dd', { text: 'Нужен для бэкенда Codex: Python-venv + openai-codex (тянет codex-бинарь). Ставится один раз.' }),
+          el('div.dd', { text: 'Нужен для бэкенда Codex: Python-venv + openai-codex (тянет codex-бинарь, ~2.6 ГБ). Ставится один раз, минутами.' }),
         ]),
         wrap,
       ]));
@@ -2447,9 +2693,9 @@
       grow.appendChild(el('div.s2raccess-state.warn', { text: 'Нужно подготовить ' + runtime.missing.join(' + ') + '. Инструкция — ниже.' }));
       if (runtime.command) details.appendChild(el('pre.s2rpre', { text: runtime.command }));
     } else grow.appendChild(el('div.dd', { text: 'Подключим Jarvis и найденные профили агентов.' }));
-    if (!p.claude && !p.codex) {
+    if (!p.claude && !p.codex && !p.kimi) {
       grow.appendChild(remoteHintLine('alert-triangle',
-        'Claude Code и Codex не найдены. Их нужно установить отдельно.', true));
+        'Claude Code, Codex и Kimi не найдены. Их нужно установить отдельно.', true));
     }
     grow.appendChild(settingsDetails('s2-preflight-details', 'Результат проверки', [details]));
 
@@ -3085,7 +3331,185 @@
     paintInventory(); paintDetail(); syncEditor(); add.disabled = !ready;
   }
 
-  /* 1d. Агенты (agents) — свои CLI помимо claude и codex.
+  /* Разрешено без спроса: поимённый список капабилити, которые гейт пропускает
+   * без карточки подтверждения (settings.grants.agent.autoApprove).
+   *
+   * Тумблеров ровно три, и это не лень. Авто-одобрение снимает вопрос, а не
+   * добавляет прав, поэтому в переключатели попадает только обратимое и уже
+   * ограниченное вторым механизмом: запись в живую сессию, подъём новой и
+   * оживление мёртвой (последние две держит бюджет). Разложить остальные два
+   * десятка id чекбоксами — значит предложить раздать необратимое одним
+   * движением, ради чего гейт и писали. Правкой файла редкий id всё ещё
+   * добавляется: он виден в списке ниже и снимается кнопкой, а не поиском по
+   * settings.json. */
+  const TRUST_REPLY = 'sessions.reply';
+  const TRUST_TOGGLES = [
+    { id: TRUST_REPLY, title: 'Писать в сессии без подтверждения',
+      desc: 'Промпт из чата уходит в сессию сразу, без карточки «разрешить». '
+        + 'Риск: текст, который агент где-то прочитал (письмо, страница, чужой репозиторий), '
+        + 'уйдёт промптом в сессию с доступом к твоим файлам. Остальные действия агент по-прежнему спрашивает.' },
+    { id: 'sessions.spawn', title: 'Поднимать сессии без подтверждения',
+      desc: 'Агент сам открывает новую сессию CLI (claude / kimi / codex) под задачу и сразу отдаёт ей первый промпт. '
+        + 'Риск: каждая сессия — это деньги и отдельный процесс с доступом к каталогу, который выбрал агент, а не ты.' },
+    /* Оживление отличается от соседей по тумблеру одним: у него нет дешёвого
+     * случая. Каждое воскрешение оплачивает ВЕСЬ контекст сразу — первый ход
+     * после `--resume` идёт по холодному кэшу. Поэтому здесь единственный
+     * тумблер, у которого разрешение неполное: мелкое идёт молча, крупное
+     * спрашивает всё равно, и порог назван прямо в описании, а не спрятан. */
+    { id: 'sessions.resume', title: 'Оживлять мёртвые сессии без подтверждения',
+      desc: 'Агент сам поднимает умершую сессию с её прежним контекстом — после перезагрузки, '
+        + 'закрытого терминала, упавшего CLI. Рабочий каталог берётся из транскрипта. '
+        + 'Риск: первый ход после оживления оплачивается как весь контекст сразу, по холодному кэшу. '
+        + 'Поэтому разрешение неполное: крупные транскрипты спрашивают тебя даже при включённом тумблере, '
+        + 'ночью крупные отклоняются вовсе, а каждое оживление ложится строкой в чат — что подняли, зачем и почём.' },
+  ];
+  // Человеческие имена для списка: id из файла может быть любым — тогда покажем как есть.
+  const TRUST_LABELS = {
+    'sessions.reply': 'Писать в сессии',
+    'sessions.spawn': 'Поднимать новые сессии',
+    'sessions.resume': 'Оживлять мёртвые сессии',
+    'sessions.close': 'Закрывать свои дочерние сессии',
+    'sessions.control': 'Управлять сессией (стоп, ответ на вопрос)',
+    'sessions.rename': 'Переименовывать сессии',
+    'settings.set': 'Менять настройки',
+    'entities.publish': 'Публиковать сущности',
+  };
+
+  async function renderAgentTrust(pane) {
+    const s = await safe(() => window.jarvis.getSettings(), {});
+    const grants = s.grants || {};
+    const raw = (grants.agent || {}).autoApprove;
+    const auto = Array.isArray(raw) ? raw.filter((x) => typeof x === 'string') : [];
+
+    // Отказ записи виден человеку: гейт закрывает ключ grants, и «не сохранилось»
+    // молча — это тумблер, который врёт про права до самого перезапуска.
+    const errLine = el('div.s2err.s2trust-err', { style: 'display:none;margin:-16px 2px 20px' }, [
+      el('span.s2err-ic', null, icon('alert-triangle')),
+      el('span.s2err-txt'),
+    ]);
+    async function writeAuto(next) {
+      errLine.style.display = 'none';
+      const agent = Object.assign({}, grants.agent, { autoApprove: next });
+      // settings мержит только верхний уровень — шлём весь объект grants целиком
+      const r = await safe(() => window.jarvis.setSettings({ grants: Object.assign({}, grants, { agent }) }), null);
+      if (!r || r.ok === false) {
+        errLine.querySelector('.s2err-txt').textContent = (r && r.error) || 'права не сохранились';
+        errLine.style.display = '';
+        return false;
+      }
+      reRenderPane('agents'); // список обязан совпасть с тем, что реально записалось
+      return true;
+    }
+
+    pane.appendChild(el('div.dsection', { text: 'Разрешено без спроса' }));
+    const group = el('div.dgroup');
+    for (const c of TRUST_TOGGLES) {
+      const tg = toggle(auto.indexOf(c.id) >= 0, async (on) => {
+        const next = auto.filter((x) => x !== c.id).concat(on ? [c.id] : []);
+        if (!(await writeAuto(next))) throw new Error(errLine.querySelector('.s2err-txt').textContent);
+      });
+      group.appendChild(drow(c.title, c.desc, tg));
+    }
+    /* Где именно проходит денежная граница у оживления — числами, а не «крупные».
+     * Пока карточка спрашивала о каждом подъёме, порога не существовало;
+     * теперь он единственное, что стоит между грантом и недельным лимитом,
+     * и человек вправе видеть его там же, где выдал грант. */
+    if (auto.indexOf('sessions.resume') >= 0) {
+      const r = s.resume || {};
+      const mb = Number(r.confirmMb) > 0 ? Number(r.confirmMb) : 20;
+      const usd = Number(r.confirmUsd) > 0 ? Number(r.confirmUsd) : 1;
+      const night = Number(r.nightUsd) > 0 ? Number(r.nightUsd) : 3;
+      group.appendChild(drow('Где у оживления проходит порог',
+        'Спрошу всё равно, если транскрипт крупнее ' + mb + ' МБ или первый ход дороже $' + usd.toFixed(2) + '. '
+        + 'Ночью откажу без вопроса всему дороже $' + night.toFixed(2) + ' — будить ради денег, которые подождут до утра, незачем. '
+        + 'Числа правятся в ~/.jarvis/settings.json, ключи resume.confirmMb, resume.confirmUsd и resume.nightUsd.',
+        []));
+    }
+    group.appendChild(drow('Разрешение без спроса не означает разрешение молча',
+      'Число одновременных сессий не ограничено — сколько нужно задаче. Но тратят они один недельный лимит: '
+      + 'бюджет и лестница порогов считаются перед каждым запуском, упрётся — получит отказ с числами, а не карточку; '
+      + 'ночной потолок расхода — отдельно и раньше дневного. '
+      + 'Каждый вызов виден строкой в чате агента и пишется в аудит и ~/.jarvis/jarvis.log. '
+      + 'Прав этот список не даёт: класс капабилити, поимённый запрет (аудит, микрофон) и security-ключи проверяются до него.',
+      []));
+    pane.appendChild(group);
+    pane.appendChild(errLine); // отказ — рядом с тем, что его вызвало, а не в конце вкладки
+
+    pane.appendChild(el('div.dsection', { text: 'сейчас в списке' }));
+    const list = el('div.dgroup.s2trust-list');
+    if (!auto.length) {
+      list.appendChild(drow('Пока ничего', 'Каждое действие с последствиями агент спрашивает карточкой.', []));
+    }
+    for (const id of auto) {
+      list.appendChild(drow(TRUST_LABELS[id] || id,
+        TRUST_LABELS[id] ? id : id + ' — не из списка известных, добавлено правкой settings.json',
+        button('Убрать', () => writeAuto(auto.filter((x) => x !== id)), 'sm')));
+    }
+    // sessions.close карточки не просит и без списка (SELF_LIMITED в гейте) —
+    // молчать об этом нельзя: иначе «подъём разрешён, закрытие нет» читается как
+    // приглашение копить брошенные сессии.
+    list.appendChild(drow('Закрывать свои дочерние сессии — всегда',
+      'sessions.close спрашивать нечего: погасить можно только то, что агент поднял сам, '
+      + 'а разрешений там ровно столько, сколько уже дали на запуск. Твою и чужую сессию он не закроет — придёт отказ.',
+      []));
+    pane.appendChild(list);
+    renderPreambleExtra(pane, s);
+  }
+
+  /* Личная дописка к инструкциям Джарвиса (`agentPreamble`).
+   *
+   * Зачем поле, а не правка файла. Ключ закрыт для агентов навсегда — агент,
+   * правящий собственные инструкции, это дыра того же класса, что нажатие
+   * собственной карточки подтверждения (`grant.rs`, allowlist deny-by-default;
+   * попытка положить туда текст уже отклонялась гейтом, и правильно). Значит
+   * написать сюда может только человек — и лезть за этим в JSON ему незачем.
+   *
+   * Дописка ДОБАВЛЯЕТСЯ к базовым инструкциям, заменить их нельзя: базовый
+   * текст живёт в коде (`agent/mod.rs`) и переживает чистые настройки,
+   * переустановку и новые чаты. Подпись говорит об этом прямо — иначе человек
+   * напишет сюда «инструкцию целиком» и будет считать, что остального нет. */
+  function renderPreambleExtra(pane, s) {
+    pane.appendChild(el('div.dsection', { text: 'Инструкции Джарвиса' }));
+    const g = el('div.dgroup');
+    const area = el('textarea.s2-secret.s2preamble', {
+      rows: '5', spellcheck: 'false',
+      placeholder: 'например: отчитывайся таблицей; в этом проекте не трогай каталог infra/',
+    });
+    area.value = typeof s.agentPreamble === 'string' ? s.agentPreamble : '';
+    const cap = el('span.loadcap', { style: 'display:none' });
+    const save = button('Сохранить', async (b) => {
+      const val = area.value.trim();
+      b.disabled = true; b.textContent = 'Сохраняю…';
+      cap.classList.remove('err'); cap.style.display = ''; cap.textContent = 'сохраняю…';
+      const r = await safe(() => window.jarvis.setSettings({ agentPreamble: val }), null);
+      b.disabled = false; b.textContent = 'Сохранить';
+      if (r && r.ok !== false) {
+        cap.classList.remove('err');
+        // Про «со следующего хода» молчать нельзя: преамбула уезжает при запуске
+        // хода, и человек, не увидевший изменений сразу, решит, что не сохранилось.
+        cap.textContent = val ? 'сохранено ✓ — подхватится со следующего хода' : 'очищено ✓';
+      } else {
+        cap.classList.add('err');
+        cap.textContent = (r && r.error) || 'не сохранилось';
+      }
+    }, 'sm primary');
+    g.appendChild(el('div.drow', null, [
+      el('div.grow', null, [
+        el('div.dt', { text: 'Личная дописка' }),
+        el('div.dd', {
+          text: 'Добавляется к базовым инструкциям, а не заменяет их. Базовые живут в коде приложения: '
+            + 'кто такой Джарвис, как выбирать исполнителя и модель, что читать как контекст, а что как команду, '
+            + 'как считать бюджет и чего не делать с твоим окном. Сюда пиши только своё — привычки, границы проекта, '
+            + 'формат отчёта. Агент это поле менять не может: свои инструкции он не правит.',
+        }),
+        area, cap,
+      ]),
+      el('div.dctl', null, [save]),
+    ]));
+    pane.appendChild(g);
+  }
+
+  /* 1d. Агенты (agents) — доверие агент-чату и свои CLI помимо claude и codex.
    *
    * Человек вводит путь до бинарника — остальное (tmux-шим и хуки жизненного
    * цикла) настраивается само при сохранении. Возможности честно ограничены:
@@ -3094,6 +3518,7 @@
   async function renderAgents(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Агенты' }));
     if (window.JarvisInstances) await window.JarvisInstances.render(pane);
+    await renderAgentTrust(pane);
     const ready = typeof window.jarvis.agentsList === 'function';
     const _sk = skelGroup(2); pane.appendChild(_sk);
     const res = ready ? await safe(() => window.jarvis.agentsList(), null) : null;
@@ -3287,6 +3712,7 @@
     awake: renderAwake,
     keys: renderKeys,
     launch: renderLaunch,
+    plugins: renderPlugins,
     service: renderService,
     integration: renderIntegration,
     about: renderAbout,
@@ -3346,6 +3772,21 @@
     }
   }
 
+  /* Загрузка могла начаться до того, как открыли настройки (онбординг, прошлое
+   * окно панели): сам факт живёт в бэкенде (readiness.job), и без этого запроса
+   * настройки рисовали бы «Установить» поверх идущей закачки. */
+  function seedRunningDownloads() {
+    safe(() => window.jarvis.integrationGet(), null).then((info) => {
+      const job = info && info.readiness && info.readiness.job;
+      if (!job || job.state !== 'running' || job.kind !== 'models') return;
+      for (const id of (job.tasks || [])) if (!dlState[id]) dlState[id] = { busy: true };
+      for (const s of (job.steps || [])) {
+        if (s && s.scope && dlState[s.scope]) dlState[s.scope].step = s; // последний шаг задачи
+      }
+      reRenderPane(activePane);
+    });
+  }
+
   /* ========================================================================
    * Подписка на live-события (идемпотентно — модульный флаг subscribed).
    * ====================================================================== */
@@ -3355,13 +3796,12 @@
     // прогресс установки STT → ТОЛЬКО в строку качаемой модели (не во все сразу)
     try {
       window.jarvis.onSttInstallProgress((step) => {
-        if (!currentRoot || !activeDownload) return;
-        const pct = step && typeof step.pct === 'number' ? step.pct : null;
-        const h = currentRoot.querySelector('#s2-pane-stt [data-model="' + activeDownload + '"]');
-        if (!h) return;
-        h.textContent = '';
-        if (step && step.msg) h.appendChild(el('span.loadcap', { text: step.msg }));
-        if (pct != null) h.appendChild(progressBar(pct));
+        if (!activeDownload) return;
+        const dl = dlState[activeDownload] || (dlState[activeDownload] = {});
+        dl.busy = true; dl.step = step || null;
+        if (!currentRoot) return;
+        // одна модель может стоять сразу в двух вкладках (wake + список моделей)
+        for (const h of currentRoot.querySelectorAll('[data-model="' + activeDownload + '"]')) paintProgress(h, dl);
       });
     } catch (e) {}
     // финал установки STT → записать успех/ошибку и перерисовать stt-панель
@@ -3369,17 +3809,19 @@
     // прогресс установки Codex-SDK сайдкара → обновить плейсхолдер в панели service
     try {
       window.jarvis.onCodexInstallProgress((step) => {
+        codexInstall.busy = true; codexInstall.step = step || null;
         if (!currentRoot) return;
         const h = currentRoot.querySelector('#s2-codex-progress');
-        if (!h) return;
-        h.textContent = '';
-        if (step && step.msg) h.appendChild(el('span.loadcap', { text: step.msg }));
-        const pct = step && typeof step.pct === 'number' ? step.pct : null;
-        if (pct != null) h.appendChild(progressBar(pct));
+        if (h) paintProgress(h, codexInstall);
       });
     } catch (e) {}
-    // финал установки Codex-SDK → перерисовать service-панель
-    try { window.jarvis.onCodexInstallDone(() => { reRenderPane('service'); }); } catch (e) {}
+    // финал установки Codex-SDK → снять «идёт» и перерисовать service-панель
+    try {
+      window.jarvis.onCodexInstallDone(() => {
+        codexInstall.busy = false; codexInstall.step = null;
+        reRenderPane('service');
+      });
+    } catch (e) {}
     // финал установки wake-моделей → записать успех/ошибку, перерисовать wake + stt
     try { window.jarvis.onWakeInstallDone((res) => { finishDownload(res); reRenderPane('wake'); reRenderPane('stt'); }); } catch (e) {}
     // состояние аудио → обновить индикаторы wake-панели (если открыта)
@@ -3388,13 +3830,11 @@
     // ── Единые события мультизагрузки (models_install) — прогресс по id модели ──
     try {
       window.jarvis.onModelInstallProgress(({ id, step }) => {
-        if (!currentRoot || !id) return;
-        const h = currentRoot.querySelector('[data-model="' + id + '"]');
-        if (!h) return;
-        h.textContent = '';
-        if (step && step.msg) h.appendChild(el('span.loadcap', { text: step.msg }));
-        const pct = step && typeof step.pct === 'number' ? step.pct : null;
-        if (pct != null) h.appendChild(progressBar(pct));
+        if (!id) return;
+        const dl = dlState[id] || (dlState[id] = {});
+        dl.busy = true; dl.step = step || null; delete dl.error;
+        if (!currentRoot) return;
+        for (const h of currentRoot.querySelectorAll('[data-model="' + id + '"]')) paintProgress(h, dl);
       });
     } catch (e) {}
     try {
@@ -3487,6 +3927,9 @@
 
     // ── Сайдбар ──
     const sidebar = el('div.sidebar');
+    // Поиск фильтрует сайдбар: разделов 14, и по названию не всегда ясно, где
+    // что лежит. Enter — открыть первый оставшийся, Esc — сбросить.
+
     sidebar.appendChild(el('div.ssearch', null, [
       el('span.si', null, icon('search')),
       el('input#settingsSearch', { placeholder: 'Найти настройку…', 'aria-label': 'Поиск настроек' }),
@@ -3502,6 +3945,7 @@
     });
     const snav = el('div.snav');
     const navItems = {};
+    const navSeps = [];
     for (const n of NAV) {
       if (n.sep) { snav.appendChild(el('div.sep')); continue; }
       if (n.group) snav.appendChild(el('div.grp', { text: n.group }));
@@ -3609,6 +4053,15 @@
       if (paneNodes[pane] && currentRoot === rootEl && win.isConnected) selectPane(pane);
       else if (Object.prototype.hasOwnProperty.call(RENDERERS, pane)) lastSettingsPane = pane;
     };
+
+    // глобальный «клик мимо» закрывает открытые селекты (ставим один раз)
+    if (!docClickBound) {
+      docClickBound = true;
+      document.addEventListener('click', () => { if (currentRoot) closeAllSelects(null); });
+    }
+
+    subscribeOnce();
+    seedRunningDownloads();
 
     // отрисовать активную панель сразу (через сериализованный reRenderPane)
     reRenderPane(activePane);

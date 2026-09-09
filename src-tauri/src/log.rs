@@ -9,13 +9,18 @@
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use crate::util::jarvis_dir;
 use regex::Regex;
 
 const MAX_BYTES: u64 = 4 * 1024 * 1024; // при разрастании — ротация в .old
 static ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Включена ли диагностика (пишем ли в ~/.jarvis/jarvis.log).
+pub fn enabled() -> bool {
+    ENABLED.load(Ordering::Relaxed)
+}
 
 pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
@@ -92,6 +97,37 @@ fn open_secure_append(path: &std::path::Path) -> std::io::Result<std::fs::File> 
     Ok(file)
 }
 
+/// Одна запись за раз: ротация и сама строка — под общим замком.
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Дописать готовую запись одним write(2).
+///
+/// `writeln!` по `File` шлёт каждый кусок формата отдельным системным вызовом,
+/// и сосед вклинивался между меткой времени и текстом: в файле оставалось
+/// «…сайдкар запущен на :873202:05:48.585» — конец одной строки и начало
+/// другой в одной. Собираем строку целиком в буфер: один write(2) в режиме
+/// O_APPEND атомарен, а замок держит порядок внутри процесса и заодно не даёт
+/// двум потокам одновременно ротировать файл.
+fn append(path: &std::path::Path, stamp: &str, msg: &str) {
+    let _lock = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if std::fs::metadata(path)
+        .map(|m| m.len() > MAX_BYTES)
+        .unwrap_or(false)
+    {
+        let old_path = path.with_extension("log.old");
+        let _ = std::fs::rename(path, &old_path);
+        let _ = std::fs::set_permissions(&old_path, std::fs::Permissions::from_mode(0o600));
+    }
+    if let Ok(mut f) = open_secure_append(path) {
+        let mut buf = String::with_capacity(stamp.len() + msg.len() + 2);
+        buf.push_str(stamp);
+        buf.push(' ');
+        buf.push_str(msg);
+        buf.push('\n');
+        let _ = f.write_all(buf.as_bytes());
+    }
+}
+
 /// Дописать строку в лог (и продублировать в stdout — его ловит nohup).
 pub fn line(msg: &str) {
     if cfg!(test) || !ENABLED.load(Ordering::Relaxed) {
@@ -99,19 +135,8 @@ pub fn line(msg: &str) {
     }
     let msg = sanitize(msg);
     println!("{msg}"); // stdout → daemon.log при запуске под nohup
-    let path = log_path();
     let _ = std::fs::create_dir_all(jarvis_dir());
-    if std::fs::metadata(&path)
-        .map(|m| m.len() > MAX_BYTES)
-        .unwrap_or(false)
-    {
-        let old_path = path.with_extension("log.old");
-        let _ = std::fs::rename(&path, &old_path);
-        let _ = std::fs::set_permissions(&old_path, std::fs::Permissions::from_mode(0o600));
-    }
-    if let Ok(mut f) = open_secure_append(&path) {
-        let _ = writeln!(f, "{} {}", stamp(), msg);
-    }
+    append(&log_path(), &stamp(), &msg);
 }
 
 #[cfg(test)]
@@ -165,6 +190,44 @@ mod tests {
             & 0o777;
         let _ = std::fs::remove_file(&path);
         assert_eq!(mode, 0o600);
+    }
+
+    /// Лог читают глазами и грепают по времени, поэтому «две записи в одной
+    /// строке» — не косметика: метка времени внутри чужого текста ломает и то,
+    /// и другое.
+    #[test]
+    fn parallel_writers_do_not_glue_records_together() {
+        const STAMP: &str = "02:05:48.585";
+        const WRITERS: usize = 4;
+        const EACH: usize = 200;
+        let path = std::env::temp_dir().join(format!("jarvis-log-parallel-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let hands: Vec<_> = (0..WRITERS)
+            .map(|w| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    // длинный текст: короткий влезал в один write и без замка
+                    let tail = "сайдкар запущен на :8732 ".repeat(8);
+                    for i in 0..EACH {
+                        append(&path, STAMP, &format!("[{w}/{i}] {tail}"));
+                    }
+                })
+            })
+            .collect();
+        for h in hands {
+            h.join().expect("поток писателя упал");
+        }
+
+        let text = std::fs::read_to_string(&path).expect("прочитать лог");
+        let _ = std::fs::remove_file(&path);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), WRITERS * EACH, "записи потерялись или удвоились");
+        let glued = lines
+            .iter()
+            .filter(|l| !l.starts_with(STAMP) || l.matches(STAMP).count() != 1)
+            .count();
+        assert_eq!(glued, 0, "склеенные строки: {glued}");
     }
 }
 

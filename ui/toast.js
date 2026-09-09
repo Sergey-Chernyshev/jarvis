@@ -129,6 +129,48 @@ function existingCard(id) {
   return retiring;
 }
 
+/* ── тело карточки: хвост не теряется молча ───────────────────────────────
+ * `.body` в toast.html обрезан клампом на шести строках, и длинный ответ
+ * заканчивался ничем — как обрезанный транскрипт, только без предупреждения.
+ * Ширина окна тостов фиксирована (440px), так что верхнюю границу знаков в
+ * строке назвать можно; берём её с запасом, чтобы пометка означала «хвост
+ * точно не влез», а не «наверное». */
+const BODY_LINES = 6;
+const BODY_COLS = 60;
+const MORE_NOTE = 'показан не весь текст — нажми, чтобы дочитать';
+
+function bodyClipped(text) {
+  let lines = 0;
+  for (const src of String(text || '').split('\n')) {
+    lines += Math.max(1, Math.ceil(src.length / BODY_COLS));
+    if (lines > BODY_LINES) return true;
+  }
+  return false;
+}
+
+// Проставить текст тела и пометку про обрезанный хвост (создав узлы, если надо).
+function setBody(card, text) {
+  let body = card.querySelector('.body');
+  if (!body) {
+    body = document.createElement('div');
+    body.className = 'body';
+    card.appendChild(body);
+  }
+  body.textContent = text || '';
+  const more = card.querySelector('.bmore');
+  if (!bodyClipped(text)) {
+    if (more) more.remove();
+    return;
+  }
+  if (more) return;
+  const note = document.createElement('div');
+  note.className = 'bmore';
+  note.textContent = MORE_NOTE;
+  // сразу под телом; при первой сборке карточки тело ещё последнее — в конец
+  if (body.parentNode && body.nextSibling) body.parentNode.insertBefore(note, body.nextSibling);
+  else card.appendChild(note);
+}
+
 function removeCard(id, instant) {
   const c = cards.get(id);
   if (!c) return;
@@ -175,6 +217,53 @@ function armTimer(id) {
   // `0` — явный пользовательский выбор «Не прятать», а не отсутствие TTL.
   if (c.ttl === 0) return;
   c.timer = setTimeout(() => removeCard(id), c.ttl);
+}
+
+/* ── доставка ответа: отказ виден человеку ────────────────────────────────
+ * Ответ на вопрос и «Продолжить» уходят в пану tmux, а она к этому моменту
+ * часто мертва (ноут проснулся, терминал закрыли) — ровно ради этого случая
+ * кнопка и существует. Раньше карточка исчезала одинаково при успехе и при
+ * {ok:false}, и человек был уверен, что ответил. Теперь отказ остаётся на
+ * экране причиной, а карточка становится липкой — уйдёт только по ✕. */
+function sendFailText(res) {
+  if (!res) return 'Не удалось отправить — Jarvis не ответил';
+  if (res.error) return String(res.error);
+  if (res.needsTmux) {
+    return 'Сессия вне tmux — ответь в терминале' + (res.resumeCmd ? `: ${res.resumeCmd}` : '');
+  }
+  return 'Не удалось отправить';
+}
+
+function showSendError(id, text) {
+  const c = cards.get(id);
+  if (!c) return;
+  clearTimeout(c.timer);
+  c.sticky = true; // причину нельзя прятать по таймеру: её ещё не прочитали
+  c.el.classList.add('sticky');
+  let err = c.el.querySelector('.derr');
+  if (!err) {
+    err = document.createElement('div');
+    err.className = 'derr';
+    c.el.appendChild(err);
+  }
+  err.textContent = text;
+  reportHeight();
+}
+
+// общий путь «кликнул вариант / Продолжить»: снимаем карточку только на успехе
+function sendThen(p, id, opts) {
+  const o = opts || {};
+  Promise.resolve(p).then((res) => {
+    if (res && res.ok === false) {
+      showSendError(id, sendFailText(res));
+      if (o.onFail) o.onFail();
+      return;
+    }
+    if (!o.keep) removeCard(id);
+  }).catch((e) => {
+    showSendError(id, sendFailText({ error: (e && e.message) || String(e) }));
+    if (o.onFail) o.onFail();
+  });
 }
 
 // карточка под курсором по y (DOM-координата из нативного поллинга) → .hot
@@ -295,12 +384,7 @@ window.toast.onAdd((d) => {
       card.appendChild(meta);
     }
 
-    if (d.body) {
-      const body = document.createElement('div');
-      body.className = 'body';
-      body.textContent = d.body;
-      card.appendChild(body);
-    }
+    if (d.body) setBody(card, d.body);
 
     // варианты вопроса (AskUserQuestion). Payload плоский: первый вопрос +
     // count. Инлайн-чипы — только для одиночного вопроса; мульти-вопрос
@@ -380,8 +464,11 @@ window.toast.onAdd((d) => {
       cont.textContent = 'Продолжить';
       cont.addEventListener('click', (e) => {
         e.stopPropagation();
-        window.toast.continueSession(d.sessionId);
-        removeCard(d.id);
+        cont.disabled = true;
+        cont.textContent = 'Отправляю…';
+        sendThen(window.toast.continueSession(d.sessionId), d.id, {
+          onFail: () => { cont.disabled = false; cont.textContent = 'Повторить'; },
+        });
       });
       card.appendChild(cont);
     }

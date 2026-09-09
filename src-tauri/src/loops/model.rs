@@ -247,6 +247,12 @@ impl Loop {
         // претензии к полям, которых в его цикле нет.
         if let Some(p) = &self.pipeline {
             out.extend(p.problems());
+            // Параллель без отдельных деревьев — это два агента в одном
+            // каталоге: они затрут друг другу файлы, и «параллельно» окажется
+            // просто ложью.
+            if p.has_parallel() && !self.sandbox.worktree {
+                out.push("параллельные ветви требуют отдельного рабочего дерева — включи worktree".into());
+            }
             if self.limits.tokens == 0 && self.limits.iterations == 0 && self.limits.minutes == 0 {
                 out.push("нет ни одного ограничителя".into());
             }
@@ -305,6 +311,46 @@ pub fn slug(name: &str) -> String {
     }
 }
 
+/// Имя дорожки параллели в вид, пригодный и для ветки git, и для каталога.
+///
+/// В отличие от [`slug`], кириллицу НЕ выбрасывает — и это не мелочь: имена
+/// дорожек берутся из идентификаторов узлов, а они у людей русские. После
+/// ascii-slug «фронт» и «бэк» превращались в одно и то же слово, и вторая
+/// ветка ложилась в каталог первой, затирая её работу. Git и файловые системы
+/// UTF-8 переваривают; выбрасывать буквы, чтобы потом ловить столкновения, —
+/// плохой размен.
+pub fn ref_slug(name: &str) -> String {
+    let mut out = String::new();
+    let mut dash = false;
+    for ch in name.chars() {
+        if ch.is_alphanumeric() {
+            out.extend(ch.to_lowercase());
+            dash = false;
+        } else if !dash && !out.is_empty() {
+            out.push('-');
+            dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        // Имя из одних знаков препинания: своего слова нет, но чужого каталога
+        // занимать нельзя — берём отпечаток.
+        format!("lane-{:08x}", fnv1a(name))
+    } else {
+        trimmed
+    }
+}
+
+/// FNV-1a: нужен ровно для запасного имени дорожки, не для криптографии.
+fn fnv1a(s: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in s.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
 /// Чем закончилась итерация.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -357,6 +403,11 @@ pub struct Iteration {
     /// итерация одна на всё.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub step: String,
+    /// Ветка параллели, в которой шаг работал. Пусто — основная дорожка.
+    /// Без этого журнал параллельного прогона нечитаем: три «правка» подряд, и
+    /// непонятно, которая из них чья.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lane: String,
 }
 
 /// Почему запуск закончился.
@@ -418,6 +469,34 @@ pub struct Ask {
     pub step: String,
 }
 
+/// Где стоит один ход пайплайна. Токен в терминах BPMN — и назван так же,
+/// потому что это ровно он: параллельных ходов бывает несколько.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TokenState {
+    /// Узел, на котором ход стоит.
+    pub node: String,
+    /// Откуда пришёл — по его результату развилка и выбирает переход.
+    pub from: String,
+    /// Дорожка (ветка параллели). Пусто — основная.
+    pub lane: String,
+}
+
+/// Рабочее место одной ветки: свой worktree и своя ветка git.
+///
+/// Отдельное дерево — не украшение и не осторожность: два агента в одном
+/// каталоге затирают друг другу файлы, и «параллельно» без этого было бы
+/// просто ложью.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LaneState {
+    pub name: String,
+    /// Дорожка, из которой эта отпочковалась и в которую вольётся.
+    pub parent: String,
+    pub dir: String,
+    pub branch: String,
+}
+
 /// Один запуск цикла.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -447,6 +526,31 @@ pub struct Run {
     pub pipeline_vars: std::collections::HashMap<String, super::pipeline::Outcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline_next: Option<String>,
+
+    /* ---- состояние пайплайна: живые ходы и их рабочие места ---- */
+    /// Где стоят живые ходы. Пусто — прогон ещё не начинался или это обычный
+    /// цикл. Имя не `tokens` нарочно: рядом уже есть `tokens` — расход, и два
+    /// разных смысла на одном слове однажды сложились бы в тихую ошибку.
+    ///
+    /// Лежат в запуске, а не в памяти движка, ровно по той же причине, по
+    /// которой там лежит журнал: прогон переживает перезапуск приложения и
+    /// вопрос человеку, а параллельный прогон без сохранённых ходов после
+    /// такого пришлось бы начинать заново.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tokens_at: Vec<TokenState>,
+    /// Ходы, уже пришедшие в слияние и ждущие остальные ветки.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waiting_at: Vec<TokenState>,
+    /// Рабочие места веток.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lanes: Vec<LaneState>,
+    /// Результаты шагов — то, что подставляется в `${шаг.вывод}`.
+    ///
+    /// Тоже в запуске: раньше при возобновлении после вопроса человеку
+    /// переменные терялись, и промт следующего шага молча приезжал с
+    /// неподставленным `${…}` вместо вывода тестов.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub vars: std::collections::HashMap<String, super::pipeline::Outcome>,
 }
 
 impl Run {
@@ -515,19 +619,12 @@ mod tests {
         l.limits.iterations = 3;
         l.pipeline = Some(Pipeline {
             start: String::new(),
-            steps: vec![Step {
-                id: "правка".into(),
-                name: String::new(),
-                kind: StepKind::Agent {
-                    prompt: "делай".into(),
-                    model: String::new(),
-                },
-                retries: 0,
-                next: vec![Flow {
-                    to: String::new(),
-                    when: Cond::Always,
-                }],
-            }],
+            steps: vec![Step::node(
+                "правка",
+                StepKind::Agent { prompt: "делай".into(), model: String::new() },
+                vec![Flow::to("", Cond::Always)],
+            )],
+            ..Default::default()
         });
         assert!(l.problems().is_empty(), "{:?}", l.problems());
         // Пустой пайплайн — это дыра, и о ней говорят прямо.
@@ -538,7 +635,46 @@ mod tests {
             l.problems()
         );
     }
+
+    /// Параллель без отдельного рабочего дерева — два агента в одном каталоге.
+    /// Это не «немного рискованно», это гарантированно затёртые файлы.
+    #[test]
+    fn parallel_branches_demand_separate_worktrees() {
+        use super::super::pipeline::{Cond, Flow, Pipeline, Step, StepKind};
+        let step = Step::node;
+        let mut l = Loop { name: "сборка".into(), ..Default::default() };
+        l.sandbox.repo = "/srv/p".into();
+        l.sandbox.worktree = false;
+        l.limits.iterations = 3;
+        l.pipeline = Some(Pipeline {
+            start: "разойтись".into(),
+            steps: vec![
+                step("разойтись", StepKind::Fork, vec![Flow::to("a", Cond::Always), Flow::to("b", Cond::Always)]),
+                step("a", StepKind::Agent { prompt: "x".into(), model: String::new() }, vec![Flow::to("свести", Cond::Always)]),
+                step("b", StepKind::Agent { prompt: "y".into(), model: String::new() }, vec![Flow::to("свести", Cond::Always)]),
+                step("свести", StepKind::Join, vec![Flow::to("", Cond::Always)]),
+            ],
+            ..Default::default()
+        });
+        assert!(l.problems().iter().any(|x| x.contains("worktree")), "{:?}", l.problems());
+        l.sandbox.worktree = true;
+        assert!(l.problems().is_empty(), "{:?}", l.problems());
+    }
     use super::*;
+
+    /// Ровно та ошибка, из-за которой две параллельные ветки лезли в один
+    /// каталог: ascii-slug схлопывал русские имена в одно слово.
+    #[test]
+    fn lane_names_keep_cyrillic_and_stay_distinct() {
+        assert_eq!(ref_slug("фронт"), "фронт");
+        assert_ne!(ref_slug("фронт"), ref_slug("бэк"));
+        assert_eq!(ref_slug("фронт/стили"), "фронт-стили");
+        assert_eq!(ref_slug("Тесты API"), "тесты-api");
+        // Имя из одних знаков препинания своего слова не даёт — но и чужого
+        // каталога занимать не должно.
+        assert!(ref_slug("!!!").starts_with("lane-"));
+        assert_ne!(ref_slug("!!!"), ref_slug("???"));
+    }
 
     #[test]
     fn slug_survives_cyrillic_and_punctuation() {

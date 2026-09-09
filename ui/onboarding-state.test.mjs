@@ -59,6 +59,34 @@ test('selection plan includes explicit models only and expands no UI-only runtim
   assert.deepEqual(State.selectedPlan({}), []);
 });
 
+/* Движок за выключенной cargo-фичей: скачивать нечего — план обязан выкинуть
+ * такую модель, даже если галочка уцелела с прошлого снимка. */
+test('selection plan drops models whose engine is missing from this build', () => {
+  const capabilities = [
+    { id: 'whisper-turbo', ready: false, available: false },
+    { id: 'hey_jarvis', ready: false, available: false },
+    { id: 'silero', ready: false, available: true },
+  ];
+  assert.deepEqual(
+    State.selectedPlan({ whisper: true, wake: true, silero: true }, capabilities),
+    ['silero'],
+  );
+  assert.equal(State.capabilityAvailable(capabilities, 'whisper'), false);
+  assert.equal(State.capabilityAvailable(capabilities, 'silero'), true);
+});
+
+/* Бэкенд не прислал поле (старая сборка) — это «нет данных», а не «нельзя».
+ * Молчание не должно отнимать модель, которая там работала. */
+test('selection plan keeps models when the backend says nothing about the build', () => {
+  assert.deepEqual(State.selectedPlan({ whisper: true }, []), ['whisper-turbo']);
+  assert.deepEqual(State.selectedPlan({ whisper: true }, undefined), ['whisper-turbo']);
+  assert.deepEqual(
+    State.selectedPlan({ whisper: true }, [{ id: 'whisper-turbo', ready: false }]),
+    ['whisper-turbo'],
+  );
+  assert.equal(State.capabilityAvailable(null, 'wake'), true);
+});
+
 test('cold start is an explicit checking state', () => {
   const view = State.derive(null);
   assert.equal(view.screen, 'checking');

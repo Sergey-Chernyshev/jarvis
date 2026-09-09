@@ -35,9 +35,174 @@
   .dot{ width:7px; height:7px; border-radius:50%; background: var(--accent); flex: none; }
   .title{ font-size:15px; font-weight:600; letter-spacing:-0.01em; }
   .sub{ color: var(--ink-mute); font-size:12.5px; margin-left:auto; font-variant-numeric: tabular-nums; }
-  #provider{ -webkit-app-region:no-drag; max-width:150px; min-height:30px; border:1px solid var(--line);
-    border-radius:8px; background:var(--surface); color:var(--ink); font:inherit; padding:3px 8px }
-  #provider:focus-visible{ outline:2px solid var(--accent); outline-offset:2px }
+  /* Счётчик контекста живёт в theme.css: вкладка панели и это окно рисуют его
+     одинаково, а вторая копия правил разъехалась бы на первой же правке. */
+  /* метка продолжения: висит, пока диалог тянется из прошлого запуска окна */
+  .tag{ font-size:11.5px; color: var(--ink-mute); background: var(--surface); border-radius: var(--r-chip); padding:3px 8px; }
+  .tag[hidden]{ display:none }
+  .ghost{
+    -webkit-app-region: no-drag; margin-left:10px; flex:none;
+    height:26px; padding:0 10px; border:0; border-radius: var(--r-chip);
+    background: var(--accent-soft); color: var(--ink); font: 600 12px/1 var(--font); cursor:default;
+  }
+  .ghost:hover{ filter: brightness(1.04) }
+
+  /* Колонка разговоров слева, переписка справа. Раскладка и язык строки — те
+     же, что во вкладке панели: окно из трея и вкладка обязаны вести себя
+     одинаково, а не расходиться на первой же правке. */
+  .agwrap{ flex:1 1 auto; display:flex; min-height:0; position:relative }
+  .agpane{ flex:1; display:flex; flex-direction:column; min-width:0; min-height:0 }
+  .agside{
+    flex:none; width:260px; min-width:0; position:relative;
+    display:flex; flex-direction:column;
+    border-right:1px solid var(--line); background: var(--paper);
+  }
+  /* Свёрнута — до рейки, а не в ноль: вместе со списком исчезла бы дорога назад */
+  .agside.off{ width:40px }
+  /* Узкое окно (это окно и есть узкое): колонка кроет переписку, а не теснит
+     её, и уходит после выбора. 260 колонки и 200 переписки — две нечитаемые
+     полосы вместо одного разговора */
+  .agwrap.narrow .agside:not(.off){
+    position:absolute; left:0; top:0; bottom:0; z-index:4; box-shadow: var(--shadow-pop);
+  }
+  .agrail{ display:flex; flex-direction:column; align-items:center; gap:6px; padding:8px 0 }
+  .agtop{ display:flex; align-items:center; gap:6px; padding:8px 8px 6px }
+  /* «Новый чат» сверху и всегда на виду: его ищут чаще, чем всё остальное */
+  .agnew{
+    flex:1; min-width:0; padding:7px 10px; border-radius: var(--r-chip);
+    background: var(--accent-soft); color: var(--ink); cursor:default;
+    font: 600 12.5px/1.35 var(--font);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .agnew:hover{ filter: brightness(0.97) }
+  .agnew.rail{ flex:none; width:26px; padding:4px 0; text-align:center; background: var(--surface) }
+  .agfold{
+    flex:none; width:26px; height:26px; border-radius: var(--r-pill);
+    display:flex; align-items:center; justify-content:center;
+    color: var(--ink-faint); cursor:default;
+  }
+  .agfold:hover{ background: var(--fill-1); color: var(--ink) }
+  .agchev{ flex:none; transition: transform 100ms ease }
+  .agside:not(.off) .agfold .agchev{ transform: rotate(180deg) }
+  .agfind{
+    margin:0 8px 6px; padding:6px 10px; border:0; outline:none;
+    border-radius: var(--r-pill); background: var(--surface); color: var(--ink);
+    font: 400 12.5px/1.35 var(--font);
+    -webkit-user-select:text; user-select:text;
+  }
+  .agfind::placeholder{ color: var(--ink-faint) }
+  .agfind:focus{ box-shadow: inset 0 0 0 1px var(--accent) }
+  .aglist{
+    flex:1; min-height:0; display:flex; flex-direction:column; gap:1px;
+    padding:0 8px 8px; overflow-y:auto; scrollbar-width:none;
+  }
+  .aglist::-webkit-scrollbar{ width:0 }
+  /* Границу тянут мышью — полоса захвата шире линии, иначе в неё не попасть */
+  .aggrip{ position:absolute; top:0; bottom:0; right:-3px; width:7px; cursor:col-resize; z-index:5 }
+  .aggrip:hover{ background: var(--accent-line) }
+  .agchat{
+    display:flex; align-items:center; gap:6px; flex:none;
+    padding:7px 8px; border-radius: var(--r-row); cursor:default;
+  }
+  .agchat:hover{ background: var(--fill-1) }
+  .agchat.on{ background: var(--accent-soft) }
+  .agmain{ flex:1; min-width:0 }
+  .agline{ display:flex; align-items:baseline; gap:6px; min-width:0 }
+  .agline .spacer{ flex:1 }
+  .agchat .agname{
+    font-size:13px; font-weight:500; color: var(--ink);
+    min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .agchat.on .agname{ font-weight:600 }
+  /* Разговор, который отвечает прямо сейчас. Точка и вес имени — те же, что у
+     идущего цикла (theme.css, .lp-row.running): краска одна на всё, занятость
+     читается формой. Без этого уходишь в соседний чат и теряешь первый из виду */
+  .agchat.busy .agname{ font-weight:600 }
+  .agchat.busy .agname::before, .agrail .agbusy{
+    content:''; display:inline-block; width:6px; height:6px; margin-right:6px;
+    border-radius:50%; background: var(--accent); animation: agPulse 1.6s ease-in-out infinite;
+  }
+  .agrail .agbusy{ margin:2px 0 0 }
+  @keyframes agPulse{ 0%,100%{ opacity:1 } 50%{ opacity:.35 } }
+  /* Разговор, найденный на диске: чата за ним ещё нет. Отличаем формой —
+     контурный бейдж, как у удалённого узла в строке сессии, — а не краской */
+  .agdisk{
+    flex:none; font-size:10.5px; color: var(--ink-mute);
+    border-radius: var(--r-pill); padding:1px 6px;
+    box-shadow: inset 0 0 0 1px var(--line-strong);
+  }
+  /* время и счётчик реплик — то, по чему строку в списке и выбирают; блёклый
+     тон (--ink-faint, 2.5:1) читается хуже нормы, а это не декор */
+  .agtime{ flex:none; font-size:11px; color: var(--ink-mute); font-variant-numeric: tabular-nums }
+  .agsub{ display:flex; align-items:baseline; gap:8px; min-width:0; margin-top:2px }
+  .agprev{ flex:1; min-width:0; font-size:12px; color: var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  /* Недописанная реплика вытесняет превью: строка отвечает на «где я
+     остановился». Краска — та же единственная, что у занятости */
+  .agdraft{ flex:1; min-width:0; font-size:12px; color: var(--accent); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  .agmeta{ flex:none; font-size:11px; color: var(--ink-mute); font-variant-numeric: tabular-nums }
+  /* Чат, который работает сам, — значком в строке: краска та же единственная,
+     что у занятости, потому что это про «здесь идёт работа без тебя» */
+  .agauto{ flex:none; font-size:11px; line-height:1; color: var(--accent) }
+  /* И его расход рядом: «дорого» обязано быть числом, а не ощущением */
+  .agspend{ flex:none; font-size:11px; color: var(--ink-mute); font-variant-numeric: tabular-nums }
+  /* «…» — вход в меню строки. Три иконки в ряд читались как три равные кнопки,
+     хотя одна из них необратима; редкие действия ушли под один знак */
+  .agdots{ flex:none; width:18px; text-align:center; color: var(--ink-faint); opacity:0; font-size:13px; line-height:1 }
+  .agchat:hover .agdots, .agchat.on .agdots{ opacity:1 }
+  /* ручка перетаскивания: тянуть можно только за неё — иначе обычный клик
+     «открыть чат» превращается в лотерею */
+  .aggrab{ flex:none; width:14px; text-align:center; color: var(--ink-faint); opacity:0; cursor:grab; font-size:11px; line-height:1; user-select:none }
+  .agchat:hover .aggrab, .agchat.on .aggrab{ opacity:1 }
+  .agchat.drag{ opacity:.5 }
+  .agchat.over{ box-shadow: inset 0 2px 0 var(--accent-line) }
+  /* история с диска — своя группа: её порядок задаёт время, а не человек */
+  .aggroup{ display:flex; align-items:center; gap:6px; padding:7px 10px; cursor:pointer; color: var(--ink-mute); font-size:11.5px }
+  .aggroup svg{ transition: transform var(--dur) ease }
+  .aggroup.on svg{ transform: rotate(90deg) }
+  .aggroupname{ letter-spacing:.02em }
+  .agdots:hover{ color: var(--ink) }
+  /* Меню строки, правка имени и вопрос про удаление — слой ПОВЕРХ колонки.
+     Внутри строки они жили ровно до первого события соседнего чата: список
+     перерисовывается, и открытый вопрос исчезал из-под руки */
+  .agpop{ position:absolute; left:8px; right:12px; z-index:6 }
+  .agpop[hidden]{ display:none }
+  .agmenu{
+    display:flex; flex-direction:column; gap:1px; padding:5px;
+    border-radius: var(--r-card); background: var(--paper); box-shadow: var(--shadow-pop);
+  }
+  .agmi{ padding:7px 10px; border-radius: var(--r-pill); font-size:12.5px; color: var(--ink); cursor:default }
+  .agmi:hover{ background: var(--fill-1) }
+  /* Необратимое отличимо словом, весом и краской беды — но без крика: это пункт
+     меню за отбивкой, а не красная кнопка в ряду обратимых */
+  .agmi.danger{ margin-top:4px; padding-top:10px; box-shadow: inset 0 1px 0 var(--line); color: var(--danger) }
+  .agmi.danger:hover{ background: var(--danger-soft) }
+  .agask{
+    display:flex; flex-direction:column; gap:8px; padding:10px;
+    border-radius: var(--r-card); background: var(--paper); box-shadow: var(--shadow-pop);
+  }
+  .agasktext{ font-size:12.5px; line-height:1.45; color: var(--ink) }
+  .agaskbtns{ display:flex; gap:6px }
+  .agbtn{
+    padding:5px 12px; border-radius: var(--r-chip); border:0; cursor:default;
+    background: var(--surface); color: var(--ink); font: 600 12.5px/1.35 var(--font);
+  }
+  .agbtn.danger{ background: var(--danger); color: var(--on-accent) }
+  .agbtn:hover{ filter: brightness(1.04) }
+  /* «Скрыто N · вернуть» — единственный след скрытия: без него оно тихая потеря */
+  .aghidden{
+    flex:none; margin-top:4px; padding:6px 10px; border-radius: var(--r-row);
+    font-size:12px; color: var(--ink-mute); cursor:default;
+  }
+  .aghidden:hover{ background: var(--fill-1); color: var(--ink) }
+  /* пустое состояние — единственный текст на экране: его читают, а не скользят мимо */
+  .agempty{ padding:10px; font-size:12.5px; color: var(--ink-mute); line-height:1.5 }
+  .agside input.agrename{
+    font: 500 13px/1.35 var(--font); color: var(--ink);
+    background: var(--surface); border:0;
+    box-shadow: inset 0 0 0 1px var(--accent);
+    border-radius: var(--r-row); padding:7px 10px; outline:none;
+    -webkit-user-select:text; user-select:text;
+  }
 
   /* лента: подпись сверху, текст колонкой — без пузырей */
   #msgs{ flex:1 1 auto; overflow-y:auto; padding:22px 24px 8px; display:flex; flex-direction:column; gap:18px }
@@ -56,10 +221,75 @@
     -webkit-user-select: text; user-select: text;
   }
   .msg.err .bubble{ color: var(--danger); }
+  .msg.note::before{ content:"jarvis · заметка"; }
+  .msg.note .bubble{ color: var(--ink-mute); font-size:13px }
+  /* Момент сжатия контекста — своя строка ленты: без неё разрыв в памяти агента
+     читается как его ошибка. Тише реплики, но не невидимо */
+  .msg.squeeze::before{ content:"контекст"; }
+  .msg.squeeze .bubble{ color: var(--ink-mute); font-size:12.5px }
   .chip{
     font-size:12px; color: var(--ink-mute); padding:5px 10px; border-radius:8px;
     background: var(--surface); border:0; font-family: var(--mono);
   }
+
+  /* Маркдаун ответа (JarvisMarkdown.renderChat) — те же блоки и та же тихая
+     подача, что в чате сессии: окно и вкладка обязаны выглядеть одинаково.
+     У ответа переносы держит вёрстка блоков, а не pre-wrap. */
+  .msg.assistant .bubble{ white-space: normal }
+  .bubble p{ margin:0 0 9px }
+  .bubble p:last-child{ margin-bottom:0 }
+  /* Заголовок — размером и воздухом, а не одной жирностью: два экрана текста
+     иначе читаются серой плитой. Те же значения в index.html */
+  .bubble .md-h{
+    font-weight:600; color: var(--ink);
+    font-size:15.5px; line-height:1.35; margin:16px 0 6px;
+  }
+  .bubble .md-h:first-child{ margin-top:0 }
+  .bubble strong{ font-weight:600; color: var(--ink) }
+  .bubble ul{ margin:0 0 9px; padding-left:18px }
+  .bubble ol{ margin:0 0 9px; padding-left:22px } /* место под двузначный номер */
+  .bubble ul:last-child, .bubble ol:last-child{ margin-bottom:0 }
+  .bubble li{ margin:3px 0 }
+  /* таблица в реплике: прокрутка внутри обёртки — в узком окне вёрстка не едет */
+  .bubble .tablewrap{ max-width:100%; overflow-x:auto; margin:0 0 9px }
+  .bubble table{ border-collapse:collapse; font-size:12.5px }
+  .bubble th, .bubble td{ border:1px solid var(--line); padding:4px 8px; text-align:left; vertical-align:top }
+  .bubble th{ font-weight:600; color: var(--ink); background: var(--surface) }
+  /* вложенный список — продолжение своего пункта, а не новый блок */
+  .bubble li > ul, .bubble li > ol{ margin:3px 0 0 }
+  .bubble code{
+    font-family: var(--mono); font-size:12.5px; color: var(--ink);
+    background: var(--surface); border-radius:4px; padding:1px 5px;
+  }
+  /* Перенос вместо скрытого горизонтального скролла: полосы в проекте погашены,
+     и уехавшая вправо строка пропадала бесследно. Потолка высоты нет — блок
+     выше него был ловушкой скролла. Те же значения в index.html */
+  .bubble pre{
+    font-family: var(--mono); font-size:12.5px; line-height:1.5;
+    background: var(--surface); border:0; border-radius: var(--r-chip);
+    padding:12px 14px; margin:0 0 9px;
+    overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .bubble pre:last-child{ margin-bottom:0 }
+  .md-hr{ height:1px; background: var(--line); margin:12px 0 }
+
+  /* Insight свёрнут в тихую строку, раскрывается кликом */
+  .callout{ margin:2px 0 }
+  .callout-title{
+    display:inline-flex; align-items:center; gap:6px;
+    font-size:13px; color: var(--ink-mute); cursor:default; user-select:none;
+  }
+  .callout-title:hover{ color: var(--ink) }
+  .callout-title .istar{ flex:none; color: var(--accent-text) }
+  .callout-title .ichev{ flex:none; color: var(--ink-faint); transition: transform 100ms ease }
+  .callout.open .callout-title .ichev{ transform: rotate(90deg) }
+  .callout-body{
+    margin-top:8px; padding:12px 14px; border:0;
+    border-radius: var(--r-chip); background: var(--surface);
+  }
+  .callout:not(.open) .callout-body{ display:none }
+  .callout-body p, .callout-body li{ font-size:13.5px; line-height:1.6; color: var(--ink-2) }
+  .callout-body p:last-child, .callout-body ul:last-child, .callout-body ol:last-child{ margin-bottom:0 }
 
   /* карточка подтверждения — та же тональная плашка, что и вопрос в чате */
   .msg.confirm{ align-items:stretch }
@@ -69,7 +299,7 @@
     background: var(--surface); border:0;
   }
   .ctitle{ font-size:15px; font-weight:600; line-height:1.45; margin-bottom:4px; text-wrap:pretty }
-  .cdesc{ color: var(--ink-mute); font-size:13px; margin-bottom:8px; -webkit-user-select:text; user-select:text }
+  .cdesc{ color: var(--ink-mute); font-size:13px; margin-bottom:8px; white-space:pre-line; -webkit-user-select:text; user-select:text }
   .cwarn{ color: var(--warn); font-size:12.5px; margin-bottom:10px }
   .cbtns{ display:flex; gap:8px }
   .cbtn{
@@ -81,7 +311,15 @@
   .cbtn.no{ background: var(--accent-soft); color: var(--ink); box-shadow:none }
   .cbtn:hover{ filter: brightness(1.04) }
   .cresult{ margin-top:8px; font-size:12.5px; color: var(--ink-mute) }
-  .hint{ color: var(--ink-faint); text-align:center; font-size:13px; margin:auto; line-height:1.7; max-width:340px }
+
+  /* Остановленный ход. Пришедшее остаётся в ленте — и помечено, иначе
+     оборванный ответ не отличить от полного; краска беды тут единственная
+     уместная, и она же у кнопки «стоп». Строка «факт · выход» одна на всё:
+     живая дочерняя сессия и остановленная цепочка обе кончаются действием */
+  .stopmark{ font-size:11.5px; color: var(--danger) }
+  .stoprow{ display:flex; align-items:center; gap:8px; margin-top:6px }
+  .stopname{ flex:1; min-width:0; font-size:13px; color: var(--ink-mute); overflow-wrap:anywhere }
+  .hint{ color: var(--ink-mute); text-align:center; font-size:13px; margin:auto; line-height:1.7; max-width:340px }
 
   /* поле ответа — нижняя полоска панели */
   footer{
@@ -104,6 +342,15 @@
   }
   #send:hover{ filter: brightness(1.06) }
   #send:disabled{ opacity:.45 }
+  /* «Стоп» встаёт рядом с отправкой ровно на время хода: клавиша не должна
+     быть единственным способом прервать работу */
+  .agstop{
+    flex:0 0 auto; width:44px; height:40px; border-radius: var(--r-card); border:0;
+    background: var(--danger); color: var(--on-accent); font-size:12px; cursor:default;
+    transition: filter var(--dur) ease;
+  }
+  .agstop[hidden]{ display:none }
+  .agstop:hover{ filter: brightness(1.06) }
 </style>
 </head>
 <body>
@@ -115,15 +362,28 @@
       <option value="claude">Claude</option>
       <option value="codex">Codex</option>
     </select>
+    <span class="tag" id="tag" hidden>продолжение</span>
     <span class="sub" id="sub">готов</span>
+    <button class="ghost" id="newChat" title="Забыть нить разговора">Начать заново</button>
+    <!-- окно без декораций: без этой кнопки закрыть можно только ⌘W -->
+    <button class="ghost" id="winClose" title="Закрыть · ⌘W">✕</button>
   </header>
-  <div id="msgs">
-    <div class="hint">Спроси агента о сессиях, лимитах, метриках.<br/>Действия (ответ в сессию, смена настроек) он подтвердит у тебя карточкой.</div>
+  <!-- Колонка чатов слева, переписка справа. Список полный, как во вкладке, —
+       когда панель закрыта, это окно единственный вход к остальным разговорам.
+       Окно узкое (~460px), поэтому колонка здесь выдвижная: см. SIDE_NARROW. -->
+  <div class="agwrap">
+    <div class="agside" id="chats"></div>
+    <div class="agpane">
+      <div id="msgs">
+        <div class="hint">Спроси Джарвиса о сессиях, лимитах, метриках.<br/>Действия — ответ в сессию, смену настроек — он спросит карточкой, решаешь ты.</div>
+      </div>
+      <footer>
+        <textarea id="input" rows="1" placeholder="Сообщение агенту…  (Enter — отправить)"></textarea>
+        <button id="send">⏎</button>
+      </footer>
+    </div>
   </div>
-  <footer>
-    <textarea id="input" rows="1" placeholder="Сообщение агенту…  (Enter — отправить)"></textarea>
-    <button id="send" disabled>⏎</button>
-  </footer>
+  <script src="./markdown.js"></script>
   <script src="agent-chat.js"></script>
 </body>
 </html>

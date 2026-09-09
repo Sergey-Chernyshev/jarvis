@@ -5,7 +5,7 @@
 # артефакты лежали там же: на путь src-tauri/target завязаны npm-скрипты и
 # релизный workflow.
 [workspace]
-members = ["node"]
+members = ["node", "shared"]
 
 [package]
 name = "jarvis"
@@ -19,10 +19,12 @@ default-run = "jarvis"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "=0.10.9"
 
 [dependencies]
-sha2 = "0.10"
+jarvis-node-shared = { path = "shared" }
+
+sha2 = "=0.10.9"
 # macos-private-api нужен прозрачным окнам на macOS; на Linux фича
 # просто не задействуется — код за ней и так под cfg внутри tauri.
 tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
@@ -64,6 +66,17 @@ arboard = "3"
 # живёт только в macOS-сборке; Linux-сборка их не видит и не требует.
 # ─────────────────────────────────────────────────────────────────────────────
 [target.'cfg(target_os = "macos")'.dependencies]
+# Nonactivating package foundations use macOS descriptor/rename durability APIs.
+jarvis-package = { path = "../crates/jarvis-package" }
+jarvis-plugin-protocol = { path = "../crates/jarvis-plugin-protocol" }
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["fast", "std", "zeroize"] }
+jsonschema = { version = "=0.18.3", default-features = false, features = ["draft202012"] }
+serde_json_canonicalizer = "=0.3.2"
+semver = "1"
+getrandom = "0.2"
+rusqlite = "=0.31.0"
+url = "2"
+
 core-foundation = "0.10"
 core-graphics = { version = "0.24", features = ["elcapitan"] }
 objc2 = "0.6"

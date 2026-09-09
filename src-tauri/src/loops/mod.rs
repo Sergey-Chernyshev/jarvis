@@ -24,7 +24,7 @@ pub mod schedule;
 pub mod store;
 pub mod templates;
 
-use model::*;
+use self::model::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use store::Store;

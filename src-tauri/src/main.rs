@@ -16,7 +16,7 @@ mod instance_ipc;
 mod codex_live;
 mod codex_titles;
 mod rollout_scope;
-mod codex_hooks;
+use jarvis_node_shared::codex_hooks;
 mod analytics; // локальная аналитика качества процесса, Git и результатов задач
 #[allow(dead_code)] // Codex-методы наполняются по инкрементам (codex CLI support)
 mod backend;
@@ -43,6 +43,8 @@ mod loops; // режим «Циклы»: рутина, которую агент
 mod platform; // окна, медиа, звук: платформенное за общим API (macos.rs / linux.rs)
 mod meetings;
 mod plugin; // плагинное ядро: «всё есть плагин» (спека 2026-08-19)
+#[cfg(target_os = "macos")]
+mod plugin_packages; // non-activating package foundations; runtime integration is separate
 mod metrics;
 mod model;
 mod native_smoke;
@@ -69,8 +71,7 @@ mod stt;
 mod tail;
 mod terminal;
 mod session_terminal;
-#[path = "../shared/terminal_stream.rs"]
-mod terminal_stream;
+use jarvis_node_shared::terminal_stream;
 mod launch_task;
 mod projects;
 mod project_icons;

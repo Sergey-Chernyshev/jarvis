@@ -19,9 +19,9 @@
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::*;
+pub use self::macos::*;
 
 #[cfg(not(target_os = "macos"))]
 mod linux;
 #[cfg(not(target_os = "macos"))]
-pub use linux::*;
+pub use self::linux::*;

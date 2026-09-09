@@ -11,12 +11,14 @@ const SOURCES = {
   'src-tauri/node/Cargo.toml': '[package]\nname = "jarvis-node"\nversion = "9.8.7"\n',
   'src-tauri/node/src/main.rs': 'mod worker;\nfn main() {}\n',
   'src-tauri/node/src/nested/worker.rs': 'pub const LABEL: &str = "привет";\n',
-  'src-tauri/src/codex_hooks.rs': 'pub const HOOK: u8 = 1;\n',
-  'src-tauri/shared/terminal_stream.rs': 'pub const STREAM: u8 = 1;\n',
+  'src-tauri/shared/Cargo.toml': '[package]\nname = "jarvis-node-shared"\nversion = "9.8.7"\n',
+  'src-tauri/shared/src/lib.rs': 'pub mod codex_hooks;\npub mod terminal_stream;\n',
+  'src-tauri/shared/src/codex_hooks.rs': 'pub const HOOK: u8 = 1;\n',
+  'src-tauri/shared/src/terminal_stream.rs': 'pub const STREAM: u8 = 1;\n',
 };
 // Independently calculated standard FNV-1a vector: sorted UTF-8 path, NUL,
 // file bytes, NUL for each source, exactly as build_node_bundle.rs consumes it.
-const EXPECTED_STATE = { version: '9.8.7', sourceFingerprint: 'cb7bdd24bc489cb1', files: Object.keys(SOURCES).sort() };
+const EXPECTED_STATE = { version: '9.8.7', sourceFingerprint: 'c71c1356ce2fc0ed', files: Object.keys(SOURCES).sort() };
 const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const fingerprint = bytes => fnv1a64(bytes).toString(16).padStart(16, '0');
 

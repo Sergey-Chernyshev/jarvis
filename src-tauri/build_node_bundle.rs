@@ -12,28 +12,32 @@ const TARGETS: &[&str] = &[
 
 pub fn embed() {
     let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    let output = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    embed_at(&manifest_dir, &output, env!("CARGO_PKG_VERSION"));
+}
+
+pub fn embed_at(manifest_dir: &Path, output: &Path, expected_version: &str) {
     let root = manifest_dir.parent().unwrap();
     let bundle = manifest_dir.join("node-binaries");
     println!("cargo:rerun-if-changed={}", bundle.display());
     println!("cargo:rerun-if-changed=build_node_bundle.rs");
-    let output = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("jarvis_node_bundle.rs");
     let manifest_path = bundle.join("manifest.json");
     if !manifest_path.is_file() {
         // Ordinary cargo check/test remains usable without cross-compilers.
         // Tauri's beforeBuildCommand requires the bundle for distributable apps.
-        fs::write(output, "pub const BINARIES: &[(&str, &[u8])] = &[];\n").unwrap();
+        for target in TARGETS { fs::write(output.join(format!("jarvis-node-{target}.bin")), []).unwrap(); }
         return;
     }
     let manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap())
         .expect("invalid node-binaries/manifest.json; run npm run prepare:node");
-    assert_eq!(manifest["version"].as_str(), Some(env!("CARGO_PKG_VERSION")), "Node bundle version is stale; run npm run prepare:node");
+    assert_eq!(manifest["version"].as_str(), Some(expected_version), "Node bundle version is stale; run npm run prepare:node");
     let mut sources = vec![
         root.join("src-tauri/node/Cargo.toml"),
-        root.join("src-tauri/src/codex_hooks.rs"),
-        root.join("src-tauri/shared/terminal_stream.rs"),
+        root.join("src-tauri/shared/Cargo.toml"),
         root.join("src-tauri/Cargo.lock"),
     ];
     rust_sources(&manifest_dir.join("node/src"), &mut sources);
+    rust_sources(&manifest_dir.join("shared/src"), &mut sources);
     sources.sort();
     let mut fingerprint = 0xcbf29ce484222325u64;
     for source in sources {
@@ -46,7 +50,6 @@ pub fn embed() {
     }
     assert_eq!(manifest["sourceFingerprint"].as_str(), Some(format!("{fingerprint:016x}").as_str()), "Node sources changed; run npm run prepare:node before rebuilding Jarvis");
     let artifacts = manifest["artifacts"].as_array().expect("node bundle artifacts missing");
-    let mut generated = String::from("pub const BINARIES: &[(&str, &[u8])] = &[\n");
     for target in TARGETS {
         let matches: Vec<_> = artifacts.iter().filter(|a| a["target"].as_str() == Some(target)).collect();
         assert_eq!(matches.len(), 1, "Node bundle must contain exactly one {target}");
@@ -58,10 +61,8 @@ pub fn embed() {
         assert_eq!(artifact["sha256"].as_str(), Some(format!("{:x}", Sha256::digest(&bytes)).as_str()), "Node binary checksum mismatch");
         let machine = if target.starts_with("x86_64") { 62 } else { 183 };
         assert!(bytes.len() > 20 && &bytes[..4] == b"\x7fELF" && bytes[4] == 2 && bytes[5] == 1 && u16::from_le_bytes([bytes[18], bytes[19]]) == machine, "Wrong node binary architecture: {target}");
-        generated.push_str(&format!("({target:?}, include_bytes!({:?})),\n", path.to_str().unwrap()));
+        fs::write(output.join(format!("jarvis-node-{target}.bin")), bytes).unwrap();
     }
-    generated.push_str("];\n");
-    fs::write(output, generated).unwrap();
 }
 
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {

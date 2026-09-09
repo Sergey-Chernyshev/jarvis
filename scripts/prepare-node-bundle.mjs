@@ -27,7 +27,7 @@ const hex = value => value.toString(16).padStart(16, '0');
 const sha256 = data => crypto.createHash('sha256').update(data).digest('hex');
 
 export function sourceState(repo = REPO) {
-  const files = ['src-tauri/node/Cargo.toml', 'src-tauri/src/codex_hooks.rs', 'src-tauri/shared/terminal_stream.rs', 'src-tauri/Cargo.lock'];
+  const files = ['src-tauri/node/Cargo.toml', 'src-tauri/shared/Cargo.toml', 'src-tauri/Cargo.lock'];
   function collect(relative) {
     for (const entry of fs.readdirSync(path.join(repo, relative), { withFileTypes: true })) {
       const child = `${relative}/${entry.name}`;
@@ -37,6 +37,7 @@ export function sourceState(repo = REPO) {
     }
   }
   collect('src-tauri/node/src');
+  collect('src-tauri/shared/src');
   files.sort();
   let hash = OFFSET;
   for (const file of files) {

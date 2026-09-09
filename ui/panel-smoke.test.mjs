@@ -707,3 +707,46 @@ test('send shows pending message before IPC resolves and restores draft on failu
   assert.equal(reply.value, 'Проверь файл');
   assert.equal(doc.querySelectorAll('.msg.user.pending').length, 0);
 });
+
+test('Codex progress stays collapsed and later runtime events preserve the Markdown answer', async () => {
+  const items = [
+    { role: 'user', kind: 'text', text: 'Проверь проект', ts: 1 },
+    { role: 'assistant', kind: 'tool', text: 'exec · npm test', ts: 2 },
+    { role: 'assistant', kind: 'tool', text: 'wait', ts: 3 },
+    { role: 'assistant', kind: 'progress', text: 'Проверяю сборку', ts: 4 },
+    { role: 'assistant', kind: 'text', text: '**Готово** [файл](https://example.com/file)', ts: 5 },
+  ];
+  const { doc, subs } = await boot({ startAt: 'list', state: [{ ...SESSION, agent: 'codex' }], openChat: async () => ({ ok: true, items, spans: [], cards: {} }) });
+  doc.querySelector('#list .row').dispatchEvent(click(doc));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const log = doc.getElementById('chatlog');
+  const disclosure = log.querySelector('.tool-disclosure');
+  assert.ok(disclosure);
+  assert.equal(disclosure.hasAttribute('open'), false);
+  assert.match(disclosure.textContent, /Проверяю сборку/);
+  assert.equal(log.querySelectorAll('.msg.assistant').length, 1);
+  assert.match(log.querySelector('.msg.assistant').textContent, /Готово/);
+  assert.equal(log.querySelector('.msg.assistant a').getAttribute('data-href'), 'https://example.com/file');
+  subs.onChatAppend({ sessionId: 's1', items: [{ role: 'assistant', kind: 'new-runtime-event', text: 'raw args' }] });
+  assert.equal(log.querySelectorAll('.msg.assistant').length, 1);
+  assert.doesNotMatch(log.textContent, /raw args/);
+});
+
+test('chat Markdown opens complete HTTP URLs with balanced parentheses and leaves other schemes inert', async () => {
+  const url = 'https://en.wikipedia.org/wiki/Function_(mathematics)';
+  const items = [{ role: 'assistant', kind: 'text', text: `[API](${url}) [local](jarvis://settings)`, ts: 1 }];
+  const { doc, calls } = await boot({ startAt: 'list', state: [SESSION], openChat: async () => ({ ok: true, items, spans: [], cards: {} }) });
+  doc.querySelector('#list .row').dispatchEvent(click(doc));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const link = doc.querySelector('#chatlog .msg.assistant a');
+  assert.equal(link?.getAttribute('data-href'), url);
+  link.dispatchEvent(click(doc));
+  link.dispatchEvent(key(doc, 'Enter'));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(calls.filter(call => call[0] === 'openUrl'), [
+    ['openUrl', url],
+    ['openUrl', url],
+  ]);
+  assert.match(doc.querySelector('#chatlog .msg.assistant').textContent, /local/);
+  assert.equal(doc.querySelectorAll('#chatlog .msg.assistant a').length, 1);
+});

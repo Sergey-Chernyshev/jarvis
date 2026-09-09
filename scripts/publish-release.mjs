@@ -1,12 +1,30 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const repo = 'Sergey-Chernyshev/jarvis';
 const gh = (...args) => execFileSync('gh', [...args, '--repo', repo], { encoding: 'utf8' });
+
+export function normalizeReleaseManifest(release, manifest) {
+  const assetsByApiUrl = new Map(
+    release.assets
+      .filter(asset => typeof asset.apiUrl === 'string' && typeof asset.url === 'string')
+      .map(asset => [asset.apiUrl, asset.url]),
+  );
+  return {
+    ...manifest,
+    platforms: Object.fromEntries(Object.entries(manifest.platforms ?? {}).map(([platform, value]) => [
+      platform,
+      {
+        ...value,
+        url: assetsByApiUrl.get(value.url) ?? value.url,
+      },
+    ])),
+  };
+}
 
 export function validateRelease(tag, release, manifest) {
   assert.match(tag, /^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
@@ -38,11 +56,15 @@ function main() {
     const release = JSON.parse(gh('release', 'view', tag, '--json', 'isDraft,isPrerelease,assets'));
     gh('release', 'download', tag, '--pattern', 'latest.json', '--dir', dir);
     const path = join(dir, 'latest.json');
-    const manifest = JSON.parse(readFileSync(path, 'utf8'));
+    const manifest = normalizeReleaseManifest(release, JSON.parse(readFileSync(path, 'utf8')));
     validateRelease(tag, release, manifest);
     console.log(`${tag}: DMG, signed updater and both Linux nodes are present`);
     if (mode !== '--publish') return;
 
+    // Publish the validated normalized manifest to the version release, then
+    // reuse these exact bytes for the beta channel.
+    writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
+    gh('release', 'upload', tag, path, '--clobber');
     // Publish immutable version assets before exposing their URL in the update feed.
     gh('release', 'edit', tag, '--draft=false', `--prerelease=${tag.includes('-')}`, `--latest=${!tag.includes('-')}`);
     const releases = JSON.parse(gh('release', 'list', '--limit', '100', '--json', 'tagName'));

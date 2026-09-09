@@ -10,7 +10,7 @@
 //! хендлере нельзя — ровно за блокирующее ожидание откатывали `sessions.wait`
 //! (ход агента не завершён → он недоступен человеку). Поэтому `spawn` заводит
 //! СВОЙ идентификатор (талон `spawn-…`) и возвращает его сразу, а связывание с
-//! настоящей сессией доделывает фоновый ожидатель запуска (`ipc::deliver_task`):
+//! настоящей сессией доделывает фоновый ожидатель запуска (`launch_task::LaunchTask`):
 //! он и так сторожит появление сессии, чтобы отдать ей первый промпт.
 
 use std::sync::{Arc, Mutex};
@@ -48,6 +48,9 @@ pub struct Spawn {
     pub at: i64,
     pub session_id: Option<String>,
     pub closed: bool,
+    pub failure: Option<String>,
+    #[serde(skip)]
+    pub control: Arc<crate::launch_task::LaunchControl>,
 }
 
 /// Куда бить `sessions.close`: сессия уже есть или ещё только едет.
@@ -87,6 +90,8 @@ impl Spawns {
             at: now,
             session_id: None,
             closed: false,
+            failure: None,
+            control: Arc::default(),
         });
         ticket
     }
@@ -95,12 +100,20 @@ impl Spawns {
     pub fn bind(&self, ticket: &str, sid: &str) -> bool {
         let mut list = self.list.lock().unwrap();
         match list.iter_mut().find(|s| s.ticket == ticket) {
-            Some(s) => {
+            Some(s) if !s.closed && s.failure.is_none() && !s.control.cancelled() => {
                 s.session_id = Some(sid.to_string());
                 true
             }
-            None => false,
+            _ => false,
         }
+    }
+
+    pub fn fail(&self, ticket: &str, reason: &str) -> bool {
+        let mut list = self.list.lock().unwrap();
+        let Some(s) = list.iter_mut().find(|s| s.ticket == ticket) else { return false };
+        if s.closed || s.control.cancelled() || s.failure.is_some() { return false; }
+        s.failure = Some(reason.into());
+        true
     }
 
     /// Агент так и не встал — талон снимаем: иначе он навсегда останется
@@ -416,11 +429,11 @@ async fn spawn_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
     .await;
 
     if res.get("ok").and_then(Value::as_bool) != Some(true) {
-        // Терминал не открылся — талона не за что держать: сессии не будет.
+        // Терминал не открылся — сохраняем конечный отказ по исходному талону.
         // И бронь возвращаем тут же: расхода, под который её списали, не
         // случится, а невозвращённая бронь врёт вниз ничуть не лучше, чем
         // отсутствие брони врало вверх.
-        d.spawns.give_up(&ticket);
+        d.spawns.fail(&ticket, res.get("error").and_then(Value::as_str).unwrap_or("Терминал запуска не открылся"));
         hold.release();
         return Ok(res);
     }
@@ -446,40 +459,25 @@ async fn spawn_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
 async fn close_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
     let by = consumer_of(&args);
     let id = arg_str(&args, "id")?;
-    let (ticket, target) = d.spawns.child(&id, &by)?;
-    match target {
-        Target::Session(sid) => {
-            let res = crate::ipc::kill_core(&d, &sid).await;
-            if res.get("ok").and_then(Value::as_bool) == Some(true) {
-                d.spawns.mark_closed(&ticket);
-            }
-            crate::log::line(&format!("[spawn] {by} закрыл дочернюю {sid} (талон {ticket})"));
-            Ok(res)
-        }
-        Target::Pending => {
-            // Талон мог оставить за собой живое окно: сессии Jarvis нет, а
-            // процесс CLI есть — так и накопились шесть брошенных. Имя окна
-            // талон знает (`launch::ready::window_of`), и здесь его гасить
-            // УМЕСТНО: это осознанное «закрой», а не таймер за спиной человека.
-            let orphan = crate::launch::ready::window_of(&ticket);
-            let killed = match &orphan {
-                Some(name) => crate::tmux::kill_session(name).await.is_ok(),
-                None => false,
-            };
-            d.spawns.give_up(&ticket);
-            crate::log::line(&format!(
-                "[spawn] {by} снял талон {ticket} — сессия ещё не встала; окно {}",
-                match (&orphan, killed) {
-                    (Some(n), true) => format!("«{n}» погашено"),
-                    (Some(n), false) => format!("«{n}» погасить не вышло"),
-                    (None, _) => "не заводилось".to_string(),
-                }
-            ));
-            Ok(json!({ "ok": true, "state": "cancelled",
-                       "tmuxSession": orphan, "killed": killed,
-                       "note": "сессия ещё не появлялась — снят талон запуска" }))
-        }
+    let (ticket, _) = d.spawns.child(&id, &by)?;
+    let record = d.spawns.find(&ticket).ok_or("Запуск больше не найден")?;
+    // Signal first, including before creation/pane discovery. The control's
+    // per-launch I/O lock waits out an already-started create/send, never a
+    // registry mutex. Success is returned only after owned-terminal cleanup.
+    let killed = match record.control.cancel(&d).await {
+        Ok(killed) => killed,
+        Err(error) => return Ok(json!({ "ok": false, "state": "cancel_failed", "error": error,
+            "note": "Доставка остановлена, но терминал не удалось закрыть. Повтори sessions.close." })),
+    };
+    let bound = d.spawns.find(&ticket).and_then(|s| s.session_id);
+    if let Some(sid) = bound.as_deref() {
+        // Terminal cleanup already used the creation token. Do not resolve the
+        // pane again through a stale hook: IDs can be reused after tmux restarts.
+        d.sessions.lock().unwrap().remove(sid);
+        d.push();
     }
+    d.spawns.mark_closed(&ticket);
+    Ok(json!({ "ok": true, "state": if bound.is_some() { "closed" } else { "cancelled" }, "killed": killed }))
 }
 
 /* ================= связывание талона с сессией ================= */
@@ -503,8 +501,8 @@ pub struct Bind {
 
 /// Сессия нашлась: записать родителя, поставить имя, выставить модель.
 /// Зовётся из ожидателя запуска ДО отправки первого промпта.
-pub async fn on_bound(d: &Arc<Daemon>, b: &Bind, sid: &str) {
-    d.spawns.bind(&b.ticket, sid);
+pub async fn on_bound(d: &Arc<Daemon>, b: &Bind, sid: &str) -> bool {
+    if !d.spawns.bind(&b.ticket, sid) { return false; }
     let origin = crate::model::SpawnOrigin {
         by: b.by.clone(),
         parent: b.parent.clone(),
@@ -526,14 +524,19 @@ pub async fn on_bound(d: &Arc<Daemon>, b: &Bind, sid: &str) {
     }
     d.push();
     crate::log::line(&format!("[spawn] талон {} → сессия {sid} («{}»)", b.ticket, b.name));
+    true
 }
 
 /// Состояние запуска для `sessions.get`, пока настоящей сессии ещё нет.
 pub fn pending_json(s: &Spawn) -> Value {
+    let state = if s.closed { if s.session_id.is_some() { "closed" } else { "cancelled" } }
+        else if s.control.cancelled() { "cancelling" }
+        else if s.failure.is_some() { "failed" } else { "launching" };
     json!({
         "id": s.ticket,
-        "state": "launching",
-        "pending": true,
+        "state": state,
+        "pending": matches!(state, "launching" | "cancelling"),
+        "error": s.failure,
         "name": s.name,
         "agent": s.agent,
         "cwd": s.cwd,
@@ -743,7 +746,7 @@ mod tests {
             .nth(1)
             .and_then(|t| t.split("launch_core").nth(1))
             .expect("хендлер запуска на месте");
-        let fail = tail.split("give_up(&ticket);").nth(1).expect("ветка неудачи на месте");
+        let fail = tail.split("d.spawns.fail(&ticket,").nth(1).expect("ветка неудачи на месте");
         let fail = fail.split("return Ok(res);").next().unwrap_or_default();
         assert!(fail.contains("hold.release()"), "бронь осталась висеть после неудачи: {fail}");
     }

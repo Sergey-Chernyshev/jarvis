@@ -48,6 +48,7 @@ pub fn register(reg: &mut DaemonRegistry) {
             // Талон: `spawn` отдаёт его сразу, до появления сессии, — иначе
             // вернувшийся id было бы нечем спросить первые секунды.
             match d.spawns.find(&sid) {
+                Some(rec) if rec.failure.is_some() || rec.closed || rec.control.cancelled() => Ok(super::spawn::pending_json(&rec)),
                 Some(rec) => match rec.session_id.as_deref().and_then(|s| d.session(s)) {
                     Some(s) => serde_json::to_value(s).map_err(|e| e.to_string()),
                     None => Ok(super::spawn::pending_json(&rec)),

@@ -68,8 +68,157 @@ impl Drop for LocalReservation {
     }
 }
 
+/// Ownership is minted before terminal creation. The async lock serializes
+/// creation, delivery and explicit close; no registry lock is held over I/O.
+#[derive(Debug, Default)]
+pub struct LaunchControl {
+    cancelled: std::sync::atomic::AtomicBool,
+    pub(crate) gate: tokio::sync::Mutex<()>,
+    terminal: Mutex<Option<OwnedTerminal>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnedTerminal {
+    pub machine: String,
+    pub pane: String,
+    pub name: Option<String>,
+}
+
+type IoFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+trait TerminalIo: Sync {
+    fn close<'a>(&'a self, terminal: &'a OwnedTerminal) -> IoFuture<'a, Result<(), String>>;
+}
+trait CreationIo: TerminalIo {
+    fn reservation(&self, name: &str) -> OwnedTerminal;
+    fn create<'a>(&'a self, name: &'a str) -> IoFuture<'a, Result<OwnedTerminal, String>>;
+    fn attach<'a>(&'a self, terminal: &'a OwnedTerminal) -> IoFuture<'a, Result<(), String>>;
+}
+impl LaunchControl {
+    pub fn cancelled(&self) -> bool { self.cancelled.load(std::sync::atomic::Ordering::SeqCst) }
+    pub fn request_cancel(&self) { self.cancelled.store(true, std::sync::atomic::Ordering::SeqCst); }
+    pub(crate) fn record_remote(&self, machine: &str, pane: &str) {
+        *self.terminal.lock().unwrap() = Some(OwnedTerminal { machine: machine.into(), pane: pane.into(), name: None });
+    }
+    pub(crate) async fn cleanup_locked(&self, d: &Arc<Daemon>) -> Result<bool, String> { self.cleanup(&DaemonIo(d.clone())).await }
+    fn owned(&self) -> Option<OwnedTerminal> { self.terminal.lock().unwrap().clone() }
+    async fn cleanup(&self, io: &impl TerminalIo) -> Result<bool, String> {
+        let Some(terminal) = self.owned() else { return Ok(false) };
+        io.close(&terminal).await?;
+        *self.terminal.lock().unwrap() = None;
+        Ok(true)
+    }
+    async fn cancel_with(&self, io: &impl TerminalIo) -> Result<bool, String> {
+        self.request_cancel();
+        let _operation = self.gate.lock().await;
+        self.cleanup(io).await
+    }
+    pub async fn cancel(&self, d: &Arc<Daemon>) -> Result<bool, String> {
+        self.cancel_with(&DaemonIo(d.clone())).await
+    }
+    async fn create_with(&self, io: &impl CreationIo, name: &str) -> Result<String, String> {
+        let _operation = self.gate.lock().await;
+        if self.cancelled() { return Err("Запуск отменён до создания терминала".into()); }
+        // Retain the creation token before awaiting the client: a timeout may
+        // lose its reply after the server has already created the session.
+        *self.terminal.lock().unwrap() = Some(io.reservation(name));
+        let terminal = match io.create(name).await {
+            Ok(terminal) => terminal,
+            Err(error) => return match self.cleanup(io).await {
+                Ok(_) => Err(error),
+                Err(cleanup) => Err(format!("{error}. Не удалось проверить/закрыть терминал запуска: {cleanup}")),
+            },
+        };
+        // Record the authoritative result even when close arrived during create.
+        *self.terminal.lock().unwrap() = Some(terminal.clone());
+        let result = if self.cancelled() { Err("Запуск отменён".into()) }
+            else if !valid_pane(&terminal.pane) { Err("Терминал не вернул корректную пану запуска".into()) }
+            else { io.attach(&terminal).await };
+        if let Err(error) = result {
+            return match self.cleanup(io).await {
+                Ok(_) => Err(error),
+                Err(cleanup) => Err(format!("{error}. Не удалось закрыть терминал этого запуска: {cleanup}")),
+            };
+        }
+        if self.cancelled() {
+            self.cleanup(io).await?;
+            return Err("Запуск отменён".into());
+        }
+        Ok(terminal.pane)
+    }
+}
+fn valid_pane(pane: &str) -> bool {
+    pane.strip_prefix('%').is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) && id.parse::<u32>().is_ok())
+}
+struct DaemonIo(Arc<Daemon>);
+impl TerminalIo for DaemonIo {
+    fn close<'a>(&'a self, terminal: &'a OwnedTerminal) -> IoFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            if terminal.machine.is_empty() {
+                // Only the exact newly-created local session may be cleaned up.
+                if let Some(name) = &terminal.name {
+                    let exact = format!("={name}");
+                    match crate::tmux::tmux_j(&["show-environment", "-t", &exact, "JARVIS_LAUNCH_ID"]).await {
+                        Ok(marker) if marker.trim() == format!("JARVIS_LAUNCH_ID={name}") =>
+                            return crate::tmux::tmux_j(&["kill-session", "-t", &exact]).await.map(|_| ()),
+                        Ok(_) => return Err("Маркер владельца терминала изменился; чужое окно не закрыто".into()),
+                        Err(error) if missing_session(&error) => return Ok(()),
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+            let target = pane_target(&self.0, &terminal.machine)?;
+            if target.pane_state(&terminal.pane).await? { target.kill(&terminal.pane).await?; }
+            Ok(())
+        })
+    }
+}
+fn pane_target(d: &Arc<Daemon>, machine: &str) -> Result<crate::tmux::Target, String> {
+    if machine.is_empty() { Ok(crate::tmux::Target::Local) }
+    else { d.remotes.node(machine).map(crate::tmux::Target::Remote).ok_or_else(|| "Узел пропал из настроек".into()) }
+}
+fn missing_session(error: &str) -> bool {
+    error.contains("can't find session") || error.contains("no server running") || error.contains("no sessions")
+        || (error.contains("error connecting to ") && error.contains("(No such file or directory)"))
+}
+struct LocalCreation<'a> { d: &'a Arc<Daemon>, cwd: &'a str, inner: &'a str, terminal: Option<(&'a str, &'a str)> }
+impl TerminalIo for LocalCreation<'_> {
+    fn close<'a>(&'a self, terminal: &'a OwnedTerminal) -> IoFuture<'a, Result<(), String>> {
+        Box::pin(async move { DaemonIo(self.d.clone()).close(terminal).await })
+    }
+}
+impl CreationIo for LocalCreation<'_> {
+    fn reservation(&self, name: &str) -> OwnedTerminal { OwnedTerminal { machine: String::new(), pane: String::new(), name: Some(name.into()) } }
+    fn create<'a>(&'a self, name: &'a str) -> IoFuture<'a, Result<OwnedTerminal, String>> {
+        Box::pin(async move {
+            let config = crate::util::jarvis_dir().join("tmux.conf");
+            let config = config.to_string_lossy().to_string();
+            let dir = format!("JARVIS_DIR={}", crate::util::jarvis_dir().display());
+            let sock = format!("JARVIS_SOCK={}", crate::util::sock_path().display());
+            let ownership = format!("JARVIS_LAUNCH_ID={name}");
+            let inner = format!("unset JARVIS_IGNORE; {}", self.inner);
+            let mut args = vec![];
+            if std::path::Path::new(&config).is_file() { args.extend(["-f", config.as_str()]); }
+            args.extend(["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name, "-c", self.cwd,
+                "-e", dir.as_str(), "-e", sock.as_str(), "-e", ownership.as_str(), "bash", "-lc", inner.as_str()]);
+            let pane = crate::tmux::tmux_j(&args).await?;
+            Ok(OwnedTerminal { machine: String::new(), pane: pane.trim().into(), name: Some(name.into()) })
+        })
+    }
+    fn attach<'a>(&'a self, owned: &'a OwnedTerminal) -> IoFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            if let Some((terminal, custom)) = self.terminal {
+                let command = format!("tmux -L jarvis attach-session -t {}", crate::util::shell_quote(&format!("={}", owned.name.as_deref().unwrap())));
+                let command = crate::launch::inner_command(self.cwd, "", &command, &crate::launch::launch_path_dirs());
+                crate::launch::spawn(terminal, custom, &command).await?;
+            }
+            Ok(())
+        })
+    }
+}
+
 pub struct LaunchTask {
     pub id: String,
+    pub control: Arc<LaunchControl>,
     machine: String,
     cwd: String,
     agent: String,
@@ -101,14 +250,21 @@ impl LaunchTask {
         static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(Self {
-            id: format!("launch-{since}-{}-{sequence}", std::process::id()), machine, cwd,
+            id: format!("launch-{since}-{}-{sequence}", std::process::id()), control: Arc::default(), machine, cwd,
             agent: agent.to_string(), bind: None, instance_id: None, model: None, resume: resume.map(str::to_string), since,
             task: task.map(|text| text.trim().to_string()).filter(|text| !text.is_empty()),
             _reservation: reservation, _continuation: None,
         })
     }
 
-    pub fn with_bind(mut self, bind: Option<crate::capability::native::spawn::Bind>) -> Self { self.bind = bind; self }
+    pub fn with_bind(mut self, bind: Option<crate::capability::native::spawn::Bind>, spawns: &crate::capability::native::spawn::Spawns) -> Self {
+        if let Some(record) = bind.as_ref().and_then(|b| spawns.find(&b.ticket)) { self.control = record.control; }
+        self.bind = bind; self
+    }
+    pub fn needs_owned_terminal(&self) -> bool { self.task.is_some() || self.bind.is_some() || self._continuation.is_some() }
+    pub async fn create_local(&self, d: &Arc<Daemon>, cwd: &str, inner: &str, terminal: Option<(&str, &str)>) -> Result<String, String> {
+        self.control.create_with(&LocalCreation { d, cwd, inner, terminal }, &self.id).await
+    }
 
     pub fn with_model(mut self, model: Option<String>) -> Self { self.model = model; self }
 
@@ -188,80 +344,131 @@ impl LaunchTask {
         }));
     }
 
-    pub fn deliver(mut self, d: &Arc<Daemon>, mut pane: Option<String>) {
-        let d = d.clone();
+    pub fn deliver(self, d: &Arc<Daemon>, pane: Option<String>) {
+        let io = DaemonIo(d.clone());
         tauri::async_runtime::spawn(async move {
-            let prompt_first = !crate::backend::backend(crate::backend::Agent::from_label(&self.agent)).session_before_prompt();
-            let mut _claim = None;
-            let mut ready = crate::launch::ready::ReadyGate::default();
-            let mut prompt_sent = false;
             let attempts = if self._continuation.is_some() { TERMINAL_TTL.as_secs() * 4 } else { 360 };
-            for attempt in 0..attempts {
-                if attempt == 360 {
-                    self.emit(&d, "failed", None, Some("Агент ещё не подключился. Открой терминал запуска: возможно, он ждёт входа или выбора проекта."));
-                }
-                if prompt_first && self.task.is_some() && !prompt_sent {
-                    if pane.is_none() && self.machine.is_empty() {
-                        _claim = crate::launch::ready::claim_pane(&d, &self.cwd, self.since).await;
-                        pane = _claim.as_ref().map(|p| p.pane.clone());
+            self.run_delivery(&io, pane, attempts).await;
+        });
+    }
+
+    async fn run_delivery(&self, io: &impl DeliveryIo, pane: Option<String>, attempts: u64) {
+        let result = self.delivery_loop(io, pane.as_deref(), attempts).await;
+        if let Err(error) = result {
+            // Cancellation owns its own completion; it must not be overwritten
+            // by a late timeout or transport response.
+            let _operation = self.control.gate.lock().await;
+            if !self.control.cancelled() { io.failed(self, &error); }
+        }
+    }
+
+    async fn delivery_loop(&self, io: &impl DeliveryIo, pane: Option<&str>, attempts: u64) -> Result<(), String> {
+        let prompt_first = !crate::backend::backend(crate::backend::Agent::from_label(&self.agent)).session_before_prompt();
+        let mut ready = crate::launch::ready::ReadyGate::default();
+        let mut prompt_sent = false;
+        let owned = self.control.owned();
+        if self.task.is_some() && (!pane.is_some_and(valid_pane) || !owned.as_ref().is_some_and(|owned| Some(owned.pane.as_str()) == pane && owned.machine == self.machine)) {
+            return Err("Нет подтверждённой паны этого запуска. Задача не отправлена".into());
+        }
+        for _ in 0..attempts {
+            {
+                let _operation = self.control.gate.lock().await;
+                if self.control.cancelled() { return Ok(()); }
+                if let Some(pane) = pane {
+                    if !io.alive(&self.machine, pane).await? {
+                        return Err("Терминал агента завершился до подтверждения подключения. Проверь результат перед повтором задачи".into());
                     }
-                    if let Some(pane) = pane.as_deref() {
-                        let target = if self.machine.is_empty() { Ok(crate::tmux::Target::Local) }
-                            else { d.remotes.node(&self.machine).map(crate::tmux::Target::Remote).ok_or_else(|| "Узел пропал из настроек".to_string()) };
-                        let target = match target { Ok(t) => t, Err(e) => { self.emit(&d, "failed", None, Some(&e)); return; } };
-                        if let Ok(screen) = target.screen(pane).await {
-                            match ready.feed(&screen) {
-                                Some(crate::launch::ready::Screen::Ready) => {
-                                    if let Err(error) = target.reply(pane, self.task.as_deref().unwrap()).await {
-                                        self.emit(&d, "failed", None, Some(&error)); return;
-                                    }
-                                    prompt_sent = true;
-                                    self.emit(&d, "sent", None, None);
-                                }
-                                Some(crate::launch::ready::Screen::Blocked(reason)) => {
-                                    self.emit(&d, "failed", None, Some(&reason)); return;
-                                }
-                                Some(crate::launch::ready::Screen::Modal) => {
-                                    self.emit(&d, "failed", None, Some("CLI ждёт выбора в терминале. Задача не отправлена.")); return;
-                                }
-                                _ => {}
-                            }
+                }
+                if self.control.cancelled() { return Ok(()); }
+                if prompt_first && self.task.is_some() && !prompt_sent {
+                    let pane = pane.unwrap(); // authority was checked above
+                    let screen = io.screen(&self.machine, pane).await?;
+                    if self.control.cancelled() { return Ok(()); }
+                    match ready.feed(&screen) {
+                        Some(crate::launch::ready::Screen::Ready) => {
+                            io.reply(&self.machine, pane, self.task.as_deref().unwrap()).await?;
+                            prompt_sent = true;
+                            io.emit(self, "sent", None);
+                        }
+                        Some(crate::launch::ready::Screen::Blocked(reason)) => return Err(reason),
+                        Some(crate::launch::ready::Screen::Modal) => return Err("CLI ждёт выбора в терминале. Задача не отправлена".into()),
+                        _ => {}
+                    }
+                }
+                if self.control.cancelled() { return Ok(()); }
+                let sessions = io.snapshot();
+                if let Some(session) = self.select(&sessions, pane)? {
+                    if !io.bind(self, session).await? { return Ok(()); }
+                    if self.control.cancelled() { return Ok(()); }
+                    io.emit(self, "connected", Some(&session.id));
+                    if !prompt_sent {
+                        if let Some(text) = &self.task {
+                            io.reply(&self.machine, session.tmux_pane.as_deref().unwrap(), text).await?;
+                            io.emit(self, "sent", Some(&session.id));
                         }
                     }
+                    io.emit(self, "ready", Some(&session.id));
+                    return Ok(());
                 }
-                let sessions = d.snapshot();
-                let selected = match self.select(&sessions, pane.as_deref()) {
-                    Ok(selected) => selected.cloned(),
-                    Err(error) => { self.emit(&d, "failed", None, Some(&error)); return; }
-                };
-                if let Some(session) = selected {
-                    if let Some(mut bind) = self.bind.take() {
-                        // The requested model is already an argv value on launch.
-                        bind.model = None;
-                        crate::capability::native::spawn::on_bound(&d, &bind, &session.id).await;
-                    }
-                    if let Some(model) = &self.model {
-                        d.with_session(&session.id, |session| { session.model = Some(model.clone()); session.model_at = Some(crate::util::now_ms()); });
-                        d.push();
-                    }
-                    self.emit(&d, "connected", Some(&session.id), None);
-                    if let Some(cwd) = &session.cwd { self.cwd = normalize_cwd(cwd); }
-                    if prompt_sent { self.emit(&d, "ready", Some(&session.id), None); return; }
-                    let Some(text) = &self.task else { self.emit(&d, "ready", Some(&session.id), None); return; };
-                    let result = match d.pane_target(&session) {
-                        Ok(target) => target.reply(session.tmux_pane.as_deref().unwrap(), text).await,
-                        Err(error) => Err(error),
-                    };
-                    match result {
-                        Ok(()) => self.emit(&d, "sent", Some(&session.id), None),
-                        Err(error) => self.emit(&d, "failed", Some(&session.id), Some(&error)),
-                    }
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
-            self.emit(&d, "failed", None, Some(if self._continuation.is_some() { "Время подключения истекло. Открой запущенную сессию в списке чатов." } else { "Агент не подключился за 90 секунд. Сообщение не отправлено — проверь терминал и повтори в нужном чате" }));
-        });
+            io.pause().await;
+        }
+        Err(if prompt_sent {
+            "Задача передана в терминал, но агент не подтвердил подключение. Проверь результат в терминале перед повтором задачи"
+        } else {
+            "Агент не подключился за отведённое время. Задача не отправлена; проверь терминал и повтори в нужном чате"
+        }.into())
+    }
+
+}
+
+trait DeliveryIo: Sync {
+    fn snapshot(&self) -> Vec<Session>;
+    fn alive<'a>(&'a self, machine: &'a str, pane: &'a str) -> IoFuture<'a, Result<bool, String>>;
+    fn screen<'a>(&'a self, machine: &'a str, pane: &'a str) -> IoFuture<'a, Result<String, String>>;
+    fn reply<'a>(&'a self, machine: &'a str, pane: &'a str, text: &'a str) -> IoFuture<'a, Result<(), String>>;
+    fn bind<'a>(&'a self, task: &'a LaunchTask, session: &'a Session) -> IoFuture<'a, Result<bool, String>>;
+    fn pause(&self) -> IoFuture<'_, ()>;
+    fn emit(&self, task: &LaunchTask, status: &str, session: Option<&str>);
+    fn spawns(&self) -> &crate::capability::native::spawn::Spawns;
+    fn failure_event(&self, task: &LaunchTask, reason: &str, notify: bool);
+    fn failed(&self, task: &LaunchTask, reason: &str) {
+        let notify = task.bind.as_ref().map_or(true, |bind| self.spawns().fail(&bind.ticket, reason));
+        self.failure_event(task, reason, notify);
+    }
+}
+impl DeliveryIo for DaemonIo {
+    fn snapshot(&self) -> Vec<Session> { self.0.snapshot() }
+    fn alive<'a>(&'a self, machine: &'a str, pane: &'a str) -> IoFuture<'a, Result<bool, String>> {
+        Box::pin(async move { pane_target(&self.0, machine)?.pane_state(pane).await })
+    }
+    fn screen<'a>(&'a self, machine: &'a str, pane: &'a str) -> IoFuture<'a, Result<String, String>> {
+        Box::pin(async move { pane_target(&self.0, machine)?.screen(pane).await })
+    }
+    fn reply<'a>(&'a self, machine: &'a str, pane: &'a str, text: &'a str) -> IoFuture<'a, Result<(), String>> {
+        Box::pin(async move { pane_target(&self.0, machine)?.reply(pane, text).await })
+    }
+    fn bind<'a>(&'a self, task: &'a LaunchTask, session: &'a Session) -> IoFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            if let Some(bind) = &task.bind {
+                let mut bind = bind.clone(); bind.model = None;
+                if !crate::capability::native::spawn::on_bound(&self.0, &bind, &session.id).await { return Ok(false); }
+            }
+            if let Some(model) = &task.model {
+                self.0.with_session(&session.id, |session| { session.model = Some(model.clone()); session.model_at = Some(crate::util::now_ms()); });
+                self.0.push();
+            }
+            Ok(true)
+        })
+    }
+    fn pause(&self) -> IoFuture<'_, ()> { Box::pin(tokio::time::sleep(Duration::from_millis(250))) }
+    fn emit(&self, task: &LaunchTask, status: &str, session: Option<&str>) { task.emit(&self.0, status, session, None); }
+    fn spawns(&self) -> &crate::capability::native::spawn::Spawns { &self.0.spawns }
+    fn failure_event(&self, task: &LaunchTask, reason: &str, notify: bool) {
+        task.emit(&self.0, "failed", None, Some(reason));
+        if notify {
+            self.0.notify("Не удалось подтвердить запуск агента", &format!("{}: {reason}", task.agent), task.bind.as_ref().and_then(|b| b.parent.as_deref()), "error");
+        }
     }
 }
 
@@ -275,7 +482,7 @@ mod tests {
     use super::*;
 
     fn request(machine: &str) -> LaunchTask {
-        LaunchTask { id: "request".into(), machine: machine.into(), cwd: "/repo".into(), agent: "codex".into(),
+        LaunchTask { id: "request".into(), control: Arc::default(), machine: machine.into(), cwd: "/repo".into(), agent: "codex".into(),
             instance_id: None, model: None, bind: None, resume: None, since: 10, task: Some("task".into()), _reservation: None, _continuation: None }
     }
     fn session(id: &str, machine: &str, pane: &str, created: i64) -> Session {
@@ -410,5 +617,255 @@ mod tests {
         assert_eq!(registry.get("launch-1", now).unwrap().remote.as_deref(), Some("vps"));
         assert!(registry.get("launch-1", now + TERMINAL_TTL + Duration::from_secs(1)).is_none());
         assert!(registry.get("launch-64", now + TERMINAL_TTL + Duration::from_secs(64)).is_none());
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::capability::native::spawn::{Bind, Plan, Spawns, pending_json};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct Hold { entered: tokio::sync::Notify, release: tokio::sync::Semaphore }
+    impl Default for Hold { fn default() -> Self { Self { entered: tokio::sync::Notify::new(), release: tokio::sync::Semaphore::new(0) } } }
+    impl Hold {
+        async fn wait(&self) { self.entered.notify_one(); self.release.acquire().await.unwrap().forget(); }
+        fn open(&self) { self.release.add_permits(1); }
+    }
+    struct FakeIo {
+        spawns: Spawns,
+        machine: String,
+        next: AtomicUsize,
+        sessions: Mutex<Vec<Session>>,
+        after_reply: Mutex<Option<Session>>,
+        writes: Mutex<Vec<(String, String, String)>>,
+        closed: Mutex<Vec<OwnedTerminal>>,
+        attached: AtomicUsize,
+        notices: AtomicUsize,
+        phase_error: Option<&'static str>,
+        screen_text: String,
+        alive: bool,
+        close_fails: AtomicBool,
+        hold_create: Option<Arc<Hold>>,
+        hold_alive: Option<Arc<Hold>>,
+        hold_screen: Option<Arc<Hold>>,
+        hold_bind: Option<Arc<Hold>>,
+    }
+    impl Default for FakeIo {
+        fn default() -> Self { Self { spawns: Spawns::new(), machine: String::new(), next: AtomicUsize::new(0), sessions: Mutex::default(),
+            after_reply: Mutex::default(), writes: Mutex::default(), closed: Mutex::default(), attached: AtomicUsize::new(0), notices: AtomicUsize::new(0),
+            phase_error: None, screen_text: "❯".into(), alive: true, close_fails: AtomicBool::new(false),
+            hold_create: None, hold_alive: None, hold_screen: None, hold_bind: None } }
+    }
+    impl TerminalIo for FakeIo {
+        fn close<'a>(&'a self, terminal: &'a OwnedTerminal) -> IoFuture<'a, Result<(), String>> {
+            Box::pin(async move {
+                if self.close_fails.load(Ordering::SeqCst) { return Err("close transport failed".into()); }
+                self.closed.lock().unwrap().push(terminal.clone()); Ok(())
+            })
+        }
+    }
+    impl CreationIo for FakeIo {
+        fn reservation(&self, name: &str) -> OwnedTerminal { OwnedTerminal { machine: self.machine.clone(), pane: String::new(), name: Some(name.into()) } }
+        fn create<'a>(&'a self, name: &'a str) -> IoFuture<'a, Result<OwnedTerminal, String>> {
+            Box::pin(async move {
+                let n = self.next.fetch_add(1, Ordering::SeqCst) + 1;
+                if let Some(hold) = &self.hold_create { hold.wait().await; }
+                if self.phase_error == Some("create") { return Err("create failed".into()); }
+                Ok(OwnedTerminal { machine: self.machine.clone(), pane: format!("%{n}"), name: Some(name.into()) })
+            })
+        }
+        fn attach<'a>(&'a self, _: &'a OwnedTerminal) -> IoFuture<'a, Result<(), String>> {
+            Box::pin(async move {
+                self.attached.fetch_add(1, Ordering::SeqCst);
+                if self.phase_error == Some("attach") { Err("attach failed".into()) } else { Ok(()) }
+            })
+        }
+    }
+    impl DeliveryIo for FakeIo {
+        fn snapshot(&self) -> Vec<Session> { self.sessions.lock().unwrap().clone() }
+        fn alive<'a>(&'a self, _: &'a str, _: &'a str) -> IoFuture<'a, Result<bool, String>> {
+            Box::pin(async move {
+                if let Some(hold) = &self.hold_alive { hold.wait().await; }
+                if self.phase_error == Some("alive") { Err("alive transport failed".into()) } else { Ok(self.alive) }
+            })
+        }
+        fn screen<'a>(&'a self, _: &'a str, _: &'a str) -> IoFuture<'a, Result<String, String>> {
+            Box::pin(async move {
+                if let Some(hold) = &self.hold_screen { hold.wait().await; }
+                if self.phase_error == Some("screen") { Err("screen failed".into()) } else { Ok(self.screen_text.clone()) }
+            })
+        }
+        fn reply<'a>(&'a self, machine: &'a str, pane: &'a str, text: &'a str) -> IoFuture<'a, Result<(), String>> {
+            Box::pin(async move {
+                if self.phase_error == Some("reply") { return Err("reply failed".into()); }
+                self.writes.lock().unwrap().push((machine.into(), pane.into(), text.into()));
+                if let Some(session) = self.after_reply.lock().unwrap().take() { self.sessions.lock().unwrap().push(session); }
+                Ok(())
+            })
+        }
+        fn bind<'a>(&'a self, task: &'a LaunchTask, session: &'a Session) -> IoFuture<'a, Result<bool, String>> {
+            Box::pin(async move {
+                if let Some(hold) = &self.hold_bind { hold.wait().await; }
+                Ok(task.bind.as_ref().map_or(true, |b| self.spawns.bind(&b.ticket, &session.id)))
+            })
+        }
+        fn pause(&self) -> IoFuture<'_, ()> { Box::pin(tokio::task::yield_now()) }
+        fn emit(&self, _: &LaunchTask, _: &str, _: Option<&str>) {}
+        fn spawns(&self) -> &Spawns { &self.spawns }
+        fn failure_event(&self, _: &LaunchTask, _: &str, notify: bool) {
+            if notify { self.notices.fetch_add(1, Ordering::SeqCst); }
+        }
+    }
+    fn make_task(io: &FakeIo, agent: &str) -> LaunchTask {
+        let plan = Plan { agent: crate::backend::Agent::from_label(agent), name: "owned".into(), task: "first task".into(), cwd: "/same-project".into(), model: None };
+        let ticket = io.spawns.open("agent", Some("requester".into()), &plan, 10);
+        let bind = Bind { ticket: ticket.clone(), name: plan.name, model: None, by: "agent".into(), parent: Some("requester".into()), task: plan.task.clone(), at: 10 };
+        LaunchTask { id: format!("owned-{ticket}"), control: Arc::default(), machine: io.machine.clone(), cwd: plan.cwd, agent: agent.into(), instance_id: None,
+            model: None, bind: None, resume: None, since: 10, task: Some(plan.task), _reservation: None, _continuation: None }.with_bind(Some(bind), &io.spawns)
+    }
+    fn hook(task: &LaunchTask, pane: &str) -> Session {
+        let mut session = Session::new(format!("hook-{}", task.id), 11);
+        session.agent = Some(task.agent.clone()); session.cwd = Some(task.cwd.clone()); session.tmux_pane = Some(pane.into());
+        session.remote = (!task.machine.is_empty()).then(|| task.machine.clone()); session
+    }
+    fn assert_unbound(io: &FakeIo, task: &LaunchTask) {
+        assert!(io.spawns.find(&task.bind.as_ref().unwrap().ticket).unwrap().session_id.is_none());
+        assert!(io.writes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn close_before_creation_fences_both_startup_orders() {
+        for agent in ["claude", "kimi"] {
+            let io = FakeIo::default(); let task = make_task(&io, agent);
+            assert!(!task.control.cancel_with(&io).await.unwrap());
+            io.spawns.mark_closed(&task.bind.as_ref().unwrap().ticket);
+            assert!(task.control.create_with(&io, &task.id).await.is_err());
+            io.sessions.lock().unwrap().push(hook(&task, "%1"));
+            task.run_delivery(&io, Some("%1".into()), 2).await;
+            assert_eq!(io.next.load(Ordering::SeqCst), 0); assert_unbound(&io, &task);
+            assert_eq!(pending_json(&io.spawns.find(&task.bind.as_ref().unwrap().ticket).unwrap())["state"], "cancelled");
+        }
+    }
+
+    #[tokio::test]
+    async fn close_during_creation_waits_for_exact_owned_cleanup_before_completing() {
+        for agent in ["claude", "kimi"] {
+            let hold = Arc::new(Hold::default());
+            let io = Arc::new(FakeIo { hold_create: Some(hold.clone()), ..Default::default() });
+            let task = Arc::new(make_task(&io, agent));
+            let creating = { let task = task.clone(); let io = io.clone(); tokio::spawn(async move { task.control.create_with(io.as_ref(), &task.id).await }) };
+            hold.entered.notified().await;
+            task.control.request_cancel();
+            let closing = { let task = task.clone(); let io = io.clone(); tokio::spawn(async move { task.control.cancel_with(io.as_ref()).await }) };
+            tokio::task::yield_now().await; assert!(!closing.is_finished());
+            hold.open(); assert!(creating.await.unwrap().is_err()); closing.await.unwrap().unwrap();
+            assert_eq!(io.attached.load(Ordering::SeqCst), 0);
+            assert_eq!(io.closed.lock().unwrap().as_slice(), &[OwnedTerminal { machine: "".into(), pane: "%1".into(), name: Some(task.id.clone()) }]);
+            io.sessions.lock().unwrap().push(hook(&task, "%1")); task.run_delivery(io.as_ref(), Some("%1".into()), 2).await;
+            assert_unbound(&io, &task);
+        }
+    }
+
+    #[tokio::test]
+    async fn close_during_pre_hook_or_pre_prompt_read_blocks_late_delivery_and_binding() {
+        for agent in ["claude", "kimi"] {
+            let hold = Arc::new(Hold::default());
+            let io = Arc::new(FakeIo { hold_alive: (agent == "claude").then(|| hold.clone()), hold_screen: (agent == "kimi").then(|| hold.clone()), ..Default::default() });
+            let task = Arc::new(make_task(&io, agent)); let pane = task.control.create_with(io.as_ref(), &task.id).await.unwrap();
+            let running = { let task = task.clone(); let io = io.clone(); let pane = pane.clone(); tokio::spawn(async move { task.run_delivery(io.as_ref(), Some(pane), 3).await }) };
+            hold.entered.notified().await; task.control.request_cancel();
+            io.sessions.lock().unwrap().push(hook(&task, &pane));
+            let closing = { let task = task.clone(); let io = io.clone(); tokio::spawn(async move { task.control.cancel_with(io.as_ref()).await }) };
+            hold.open(); running.await.unwrap(); closing.await.unwrap().unwrap();
+            assert_unbound(&io, &task); assert_eq!(io.closed.lock().unwrap().len(), 1);
+            assert_eq!(io.notices.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn close_racing_the_hook_cannot_rebind_a_cancelled_ticket() {
+        let hold = Arc::new(Hold::default());
+        let io = Arc::new(FakeIo { hold_bind: Some(hold.clone()), ..Default::default() });
+        let task = Arc::new(make_task(&io, "claude")); let pane = task.control.create_with(io.as_ref(), &task.id).await.unwrap();
+        io.sessions.lock().unwrap().push(hook(&task, &pane));
+        let running = { let task = task.clone(); let io = io.clone(); tokio::spawn(async move { task.run_delivery(io.as_ref(), Some(pane), 2).await }) };
+        hold.entered.notified().await; task.control.request_cancel(); hold.open(); running.await.unwrap();
+        task.control.cancel_with(io.as_ref()).await.unwrap(); assert_unbound(&io, &task);
+    }
+
+    #[tokio::test]
+    async fn mixed_provider_startup_never_claims_the_earlier_unregistered_pane() {
+        let io = FakeIo::default(); let claude = make_task(&io, "claude"); let kimi = make_task(&io, "kimi");
+        let first = claude.control.create_with(&io, &claude.id).await.unwrap();
+        let mine = kimi.control.create_with(&io, &kimi.id).await.unwrap();
+        assert_eq!(first, "%1"); assert_eq!(mine, "%2");
+        // Both panes display a ready prompt, and Claude has no hook yet.
+        *io.after_reply.lock().unwrap() = Some(hook(&kimi, &mine));
+        kimi.run_delivery(&io, Some(mine.clone()), 3).await;
+        assert_eq!(io.writes.lock().unwrap().as_slice(), &[("".into(), mine, "first task".into())]);
+        assert!(io.spawns.find(&kimi.bind.as_ref().unwrap().ticket).unwrap().session_id.is_some());
+        let unowned = make_task(&io, "kimi"); unowned.run_delivery(&io, None, 3).await;
+        assert_eq!(io.writes.lock().unwrap().len(), 1, "no pane ownership must fail closed");
+    }
+
+    #[tokio::test]
+    async fn all_delivery_failures_complete_the_original_ticket_and_notify_once() {
+        for (agent, error, alive, screen, hook_first) in [
+            ("claude", Some("alive"), true, "❯", false),
+            ("claude", None, false, "❯", false),
+            ("kimi", Some("screen"), true, "❯", false),
+            ("kimi", None, true, "Trust this folder?", false),
+            ("kimi", Some("reply"), true, "❯", false),
+            ("claude", Some("reply"), true, "❯", true),
+            ("claude", None, true, "starting", false),
+            ("kimi", None, true, "starting", false),
+            ("claude", Some("ambiguous"), true, "❯", true),
+        ] {
+            let io = FakeIo { phase_error: error, alive, screen_text: screen.into(), ..Default::default() };
+            let task = make_task(&io, agent); let pane = task.control.create_with(&io, &task.id).await.unwrap();
+            if hook_first {
+                io.sessions.lock().unwrap().push(hook(&task, &pane));
+                if error == Some("ambiguous") { let mut other = hook(&task, &pane); other.id.push_str("-other"); io.sessions.lock().unwrap().push(other); }
+            }
+            task.run_delivery(&io, Some(pane), 3).await;
+            let record = io.spawns.find(&task.bind.as_ref().unwrap().ticket).unwrap(); let status = pending_json(&record);
+            assert_eq!(status["state"], "failed", "{agent} {error:?} {screen}: {status}");
+            assert_eq!(status["pending"], false); assert!(!status["error"].as_str().unwrap().is_empty());
+            assert_eq!(io.notices.load(Ordering::SeqCst), 1);
+            assert!(io.spawns.child(&record.ticket, "agent").is_ok(), "failed terminal stays explicitly closeable");
+        }
+    }
+
+    #[test]
+    fn absent_tmux_server_is_distinct_from_an_uncertain_cleanup_failure() {
+        assert!(missing_session("error connecting to /tmp/tmux-user/jarvis (No such file or directory)"));
+        assert!(missing_session("can't find session: =owned-token"));
+        for error in ["tmux: таймаут", "Permission denied", "error connecting to /tmp/server (Connection refused)"] {
+            assert!(!missing_session(error));
+        }
+    }
+
+    #[tokio::test]
+    async fn lost_creation_reply_retains_the_creation_token_for_cleanup() {
+        let io = FakeIo { phase_error: Some("create"), ..Default::default() };
+        let task = make_task(&io, "kimi");
+        assert!(task.control.create_with(&io, &task.id).await.unwrap_err().contains("create failed"));
+        assert_eq!(io.closed.lock().unwrap().as_slice(), &[OwnedTerminal { machine: "".into(), pane: "".into(), name: Some(task.id.clone()) }]);
+        assert!(task.control.owned().is_none());
+        assert_unbound(&io, &task);
+    }
+
+    #[tokio::test]
+    async fn attach_failure_cleans_only_its_created_terminal_and_failed_close_is_retryable() {
+        let io = FakeIo { phase_error: Some("attach"), ..Default::default() }; let task = make_task(&io, "kimi");
+        assert!(task.control.create_with(&io, &task.id).await.unwrap_err().contains("attach"));
+        assert_eq!(io.closed.lock().unwrap()[0].name.as_deref(), Some(task.id.as_str()));
+        let io = FakeIo { machine: "vps".into(), ..Default::default() }; let task = make_task(&io, "kimi");
+        task.control.create_with(&io, &task.id).await.unwrap(); io.close_fails.store(true, Ordering::SeqCst);
+        assert!(task.control.cancel_with(&io).await.is_err()); assert!(task.control.owned().is_some());
+        assert_unbound(&io, &task); io.close_fails.store(false, Ordering::SeqCst);
+        assert!(task.control.cancel_with(&io).await.unwrap());
+        assert_eq!(io.closed.lock().unwrap()[0].machine, "vps", "same-number local pane is never targeted");
     }
 }

@@ -1010,9 +1010,12 @@ mod tests {
         status.whisper_native_built = true;
         status.wakeword_ort_built = true;
         let built = build_readiness(health, status, InstallJobSnapshot::default(), false);
-        for id in ["whisper-turbo", "hey_jarvis"] {
-            assert!(cap(&built, id).available && cap(&built, id).ready);
-        }
+        // A synthetic Status cannot enable an engine excluded from this
+        // executable. On Linux CI wakeword-ort is deliberately not compiled.
+        assert!(cap(&built, "whisper-turbo").available && cap(&built, "whisper-turbo").ready);
+        let wake_built = cfg!(feature = "wakeword-ort");
+        assert_eq!(cap(&built, "hey_jarvis").available, wake_built);
+        assert_eq!(cap(&built, "hey_jarvis").ready, wake_built);
     }
 
     #[test]

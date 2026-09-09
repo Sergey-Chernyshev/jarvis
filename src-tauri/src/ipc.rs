@@ -2684,13 +2684,23 @@ pub(crate) async fn launch_core(d: &Arc<Daemon>, req: LaunchReq) -> Value {
             Ok(delivery) => delivery,
             Err(error) => return err(error),
         };
-        let delivery = delivery.for_instance(instance_id.clone()).with_model(model.clone()).with_bind(bind.clone());
+        let delivery = delivery.for_instance(instance_id.clone()).with_model(model.clone()).with_bind(bind.clone(), &d.spawns);
         let delivery = if fork { match delivery.continuing(&existing.as_ref().unwrap().id) { Ok(d) => d, Err(e) => return err(e) } } else { delivery };
+        let control = delivery.control.clone();
+        let opening = control.gate.lock().await;
+        if control.cancelled() { return err("Запуск отменён до создания терминала"); }
         let mut res = launch_on_node(&d, &machine, &cwd, &agent, session_id.as_deref(), instance_id.as_deref(), mode, model.as_deref(), fork).await;
         if res.get("ok").and_then(Value::as_bool).unwrap_or(false) {
             res["launchId"] = json!(delivery.id);
             if fork { res["continuedFrom"] = json!(existing.as_ref().unwrap().id); }
             let pane = res.get("pane").and_then(Value::as_str).filter(|pane| !pane.is_empty()).map(str::to_string);
+            if let Some(pane) = pane.as_deref() { control.record_remote(&machine, pane); }
+            if control.cancelled() {
+                return match control.cleanup_locked(d).await {
+                    Ok(_) => err("Запуск отменён"),
+                    Err(error) => err(format!("Запуск отменён, но терминал не удалось закрыть: {error}")),
+                };
+            }
             if fork {
                 if let Some(pane) = pane.as_deref() {
                     match delivery.register_terminal(pane, existing.as_ref().and_then(|s| s.provider_home.clone())) {
@@ -2699,6 +2709,7 @@ pub(crate) async fn launch_core(d: &Arc<Daemon>, req: LaunchReq) -> Value {
                     }
                 }
             }
+            drop(opening);
             delivery.deliver(&d, pane);
         }
         return res;
@@ -2784,32 +2795,27 @@ pub(crate) async fn launch_core(d: &Arc<Daemon>, req: LaunchReq) -> Value {
     crate::launch::prepare_workspace(&agent, &cwd);
     let inner = crate::launch::inner_command(&cwd, &proxy, &agent_cmd, &path_dirs);
     let delivery = match crate::launch_task::LaunchTask::prepare("local", &cwd, &agent, if fork { None } else { session_id.as_deref() }, task) {
-        Ok(delivery) => delivery.for_instance(resolved_instance_id).with_model(model.clone()).with_bind(bind.clone()),
+        Ok(delivery) => delivery.for_instance(resolved_instance_id).with_model(model.clone()).with_bind(bind.clone(), &d.spawns),
         Err(error) => return err(error),
     };
-    if fork {
-        let delivery = match delivery.continuing(&existing.as_ref().unwrap().id) { Ok(d) => d, Err(e) => return err(e) };
-        let config = crate::util::jarvis_dir().join("tmux.conf");
-        let config = config.to_string_lossy().to_string();
-        let name = delivery.id.clone();
-        let runtime_dir = format!("JARVIS_DIR={}", crate::util::jarvis_dir().display());
-        let runtime_sock = format!("JARVIS_SOCK={}", crate::util::sock_path().display());
-        let mut args = vec![];
-        if std::path::Path::new(&config).is_file() { args.extend(["-f", config.as_str()]); }
-        let inner = format!("unset JARVIS_IGNORE; {inner}");
-        args.extend(["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name.as_str(), "-c", cwd.as_str(), "-e", runtime_dir.as_str(), "-e", runtime_sock.as_str(), "bash", "-lc", inner.as_str()]);
-        return match crate::tmux::tmux_j(&args).await {
-            Ok(pane) if pane.trim().starts_with('%') => {
-                let terminal_id = match delivery.register_terminal(pane.trim(), existing.as_ref().and_then(|s| s.provider_home.clone())) {
-                    Ok(id) => id, Err(error) => return err(error),
-                };
-                let result = json!({"ok":true,"launchId":delivery.id,"terminalId":terminal_id,"cwd":cwd,"machine":"local","pane":pane.trim(),"continuedFrom":existing.as_ref().unwrap().id});
-                delivery.deliver(&d, Some(pane.trim().to_string()));
-                result
-            }
-            Ok(_) => err("Терминал не вернул идентификатор новой сессии"),
-            Err(error) => err(error),
+    let delivery = if fork { match delivery.continuing(&existing.as_ref().unwrap().id) { Ok(d) => d, Err(e) => return err(e) } } else { delivery };
+    if delivery.needs_owned_terminal() {
+        // Mint terminal ownership at creation. Never discover a prompt target
+        // by cwd/time: another provider can be starting in the same project.
+        let pane = match delivery.create_local(d, &cwd, &inner, if fork { None } else { Some((&terminal, &custom)) }).await {
+            Ok(pane) => pane,
+            Err(error) => return err(error),
         };
+        let mut result = json!({ "ok": true, "launchId": delivery.id, "cwd": cwd, "machine": "local", "pane": pane });
+        if fork {
+            match delivery.register_terminal(&pane, existing.as_ref().and_then(|s| s.provider_home.clone())) {
+                Ok(id) => result["terminalId"] = json!(id),
+                Err(error) => { let _ = delivery.control.cancel(d).await; return err(error); },
+            }
+            result["continuedFrom"] = json!(existing.as_ref().unwrap().id);
+        }
+        delivery.deliver(d, Some(pane));
+        return result;
     }
     match crate::launch::spawn(&terminal, &custom, &inner).await {
         Ok(()) => {

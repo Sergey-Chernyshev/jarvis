@@ -21,7 +21,7 @@ use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 
-use rubato::{FftFixedIn, Resampler};
+use rubato::{audioadapter_buffers::direct::InterleavedSlice, Fft, FixedSync, Resampler, WindowFunction};
 
 use super::audio::downmix_to_mono;
 
@@ -94,7 +94,7 @@ impl AudioState {
 /// резамплер и аккумуляторы), но БЕЗ потоков/cpal — поэтому полностью тестируем.
 pub struct Pipeline {
     channels: u16,
-    resampler: Option<FftFixedIn<f32>>, // None при src==16к (passthrough)
+    resampler: Option<Fft<f32>>, // None при src==16к (passthrough)
     in_buf: Vec<f32>,                   // аккумулятор native-моно под чанк ресемплера
     out_buf: Vec<f32>,                  // аккумулятор 16к-моно под нарезку на кадры
     preroll: VecDeque<f32>,             // кольцо последних PREROLL_SAMPLES @16к
@@ -106,8 +106,8 @@ impl Pipeline {
             None
         } else {
             Some(
-                FftFixedIn::<f32>::new(src_rate as usize, DST_RATE as usize, RESAMPLE_CHUNK_IN, 2, 1)
-                    .map_err(|e| format!("FftFixedIn::new: {e:?}"))?,
+                Fft::<f32>::new_custom(src_rate as usize, DST_RATE as usize, RESAMPLE_CHUNK_IN, 2, 1, WindowFunction::BlackmanHarris2, FixedSync::Input)
+                    .map_err(|e| format!("Fft::new_custom: {e:?}"))?,
             )
         };
         Ok(Pipeline {
@@ -126,10 +126,12 @@ impl Pipeline {
             None => self.out_buf.extend_from_slice(&mono),
             Some(rs) => {
                 self.in_buf.extend_from_slice(&mono);
-                while self.in_buf.len() >= RESAMPLE_CHUNK_IN {
-                    let chunk: Vec<f32> = self.in_buf.drain(..RESAMPLE_CHUNK_IN).collect();
-                    if let Ok(out) = rs.process(&[chunk], None) {
-                        self.out_buf.extend_from_slice(&out[0]);
+                while self.in_buf.len() >= rs.input_frames_next() {
+                    let frames = rs.input_frames_next();
+                    let chunk: Vec<f32> = self.in_buf.drain(..frames).collect();
+                    let input = InterleavedSlice::new(&chunk, 1, frames).expect("complete mono chunk");
+                    if let Ok(out) = rs.process(&input, None) {
+                        self.out_buf.extend(out.take_data());
                     }
                 }
             }
@@ -957,6 +959,24 @@ mod tests {
             total >= expected - tol - FRAME_LEN && total <= expected + tol,
             "48к→16к: {total} сэмплов, ждали ~{expected}"
         );
+    }
+
+    #[test]
+    fn resampling_preserves_stream_across_callback_boundaries() {
+        for rate in [44_100, 48_000, 96_000] {
+            let input = sine(rate as usize * 2, 0.005);
+            let mut whole = Pipeline::new(rate, 1).unwrap();
+            let expected: Vec<f32> = whole.push_native(&input).iter().flat_map(|frame| frame.iter().copied()).collect();
+            for size in [127, 512, 1024, 4093] {
+                let mut stream = Pipeline::new(rate, 1).unwrap();
+                let actual: Vec<f32> = input.chunks(size).flat_map(|chunk| stream.push_native(chunk))
+                    .flat_map(|frame| frame.to_vec()).collect();
+                assert_eq!(actual, expected, "rate={rate}, callback={size}");
+                assert!(actual.iter().all(|sample| sample.is_finite()));
+                assert!(actual.len().abs_diff(32_000) < 2 * FRAME_LEN, "rate={rate}: {} samples", actual.len());
+                assert!(actual.iter().any(|sample| sample.abs() > 0.1), "resampler returned silence");
+            }
+        }
     }
 
     #[test]

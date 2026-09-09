@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 2,
+  "id": "dev.example.native",
+  "name": "Example Native",
+  "version": "1.2.3",
+  "publisher": "example",
+  "compatibility": {
+    "jarvis": ">=0.4.0, <0.5.0",
+    "pluginApi": 2
+  },
+  "runtime": {
+    "kind": "verified-native",
+    "lifecycle": "service-bridge",
+    "bridgeEntry": "bin/${target}/example-bridge",
+    "service": {
+      "id": "example-controller",
+      "manager": "launchd-user",
+      "entry": "bin/${target}/example-controller",
+      "survivesCoreExit": true
+    },
+    "protocol": 2,
+    "activationEvents": [
+      "onPage:manager",
+      "onCommand:dev.example.native.open",
+      "onDataContract:dev.example.native/runtime@1.0.0"
+    ]
+  },
+  "permissions": [
+    {
+      "id": "projects.read",
+      "scope": "selected"
+    },
+    {
+      "id": "process.vm-provider"
+    }
+  ],
+  "state": {
+    "schemaVersion": 1,
+    "migrations": [],
+    "rollbackCompatibleThrough": 1
+  },
+  "contributes": {
+    "pages": [
+      {
+        "id": "manager",
+        "title": "Native Manager",
+        "entry": "ui/pages/manager/index.html",
+        "placements": ["sidebar"],
+        "instancePolicy": "singleton"
+      }
+    ],
+    "commands": [
+      {
+        "id": "dev.example.native.open",
+        "title": "Open Native Manager",
+        "risk": "read",
+        "placements": ["globalPalette"],
+        "handler": {
+          "type": "openPage",
+          "page": "manager"
+        }
+      }
+    ],
+    "actions": [
+      {
+        "id": "dev.example.native.open-action",
+        "title": "Open Native Manager",
+        "icon": "server-play",
+        "locations": ["project.actions"],
+        "command": "dev.example.native.open",
+        "when": "plugin.enabled",
+        "context": ["project.id"]
+      }
+    ],
+    "hotkeys": [
+      {
+        "command": "dev.example.native.open",
+        "default": "Cmd+Shift+N",
+        "scope": "global"
+      }
+    ],
+    "settings": [
+      {
+        "id": "dev.example.native.max-workers",
+        "title": "Maximum workers",
+        "type": "integer",
+        "default": 2,
+        "minimum": 1,
+        "maximum": 8
+      }
+    ],
+    "projectRuntimes": [],
+    "dataContracts": [
+      {
+        "id": "dev.example.native/runtime@1.0.0",
+        "kind": "entity",
+        "schema": "schemas/runtime.schema.json",
+        "visibility": "granted",
+        "sensitivity": "internal"
+      }
+    ]
+  }
+}

@@ -17,10 +17,7 @@
 //!   CODEX_HOME          корень транскриптов Codex (по умолчанию ~/.codex)
 
 mod node;
-#[path = "../../src/codex_hooks.rs"]
-mod codex_hooks;
-#[path = "../../shared/terminal_stream.rs"]
-mod terminal_stream;
+use jarvis_node_shared::{codex_hooks, terminal_stream};
 
 const USAGE: &str = "\
 jarvis-node — узел Jarvis для удалённых агентов.

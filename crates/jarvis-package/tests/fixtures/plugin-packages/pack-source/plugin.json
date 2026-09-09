@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 2,
+  "id": "dev.example.package-fixture",
+  "name": "Package Fixture",
+  "version": "1.2.3",
+  "publisher": "example",
+  "compatibility": {
+    "jarvis": ">=0.4.0, <0.5.0",
+    "pluginApi": 2
+  },
+  "runtime": {
+    "kind": "ui-only",
+    "protocol": 2,
+    "activationEvents": ["onPage:home"]
+  },
+  "permissions": [],
+  "state": {
+    "schemaVersion": 1,
+    "migrations": [],
+    "rollbackCompatibleThrough": 1
+  },
+  "contributes": {
+    "pages": [{
+      "id": "home",
+      "title": "Home",
+      "entry": "ui/index.html",
+      "placements": ["sidebar"],
+      "instancePolicy": "singleton",
+      "paramsSchema": "schemas/message.schema.json"
+    }],
+    "commands": [],
+    "actions": [],
+    "hotkeys": [],
+    "settings": [],
+    "projectRuntimes": [],
+    "dataContracts": []
+  }
+}

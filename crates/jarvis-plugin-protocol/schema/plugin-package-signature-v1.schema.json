@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jarvis.local/schemas/plugin-package-signature-v1.schema.json",
+  "title": "Jarvis Plugin Package Detached Signature v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["algorithm", "keyId", "value"],
+  "properties": {
+    "algorithm": { "const": "ed25519" },
+    "keyId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "value": {
+      "type": "string",
+      "minLength": 88,
+      "maxLength": 88,
+      "pattern": "^[A-Za-z0-9+/]{85}[AQgw]==$"
+    }
+  }
+}

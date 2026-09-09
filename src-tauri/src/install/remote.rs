@@ -35,7 +35,11 @@ pub mod connection;
 pub use connection::Connection;
 
 mod bundled_nodes {
-    include!(concat!(env!("OUT_DIR"), "/jarvis_node_bundle.rs"));
+    const X86: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/jarvis-node-x86_64-unknown-linux-musl.bin"));
+    const ARM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/jarvis-node-aarch64-unknown-linux-musl.bin"));
+    pub const BINARIES: &[(&str, &[u8])] = if X86.is_empty() || ARM.is_empty() { &[] } else {
+        &[("x86_64-unknown-linux-musl", X86), ("aarch64-unknown-linux-musl", ARM)]
+    };
 }
 
 /// Каталог Jarvis на той стороне по умолчанию — тот же, что в настройках ноута
@@ -899,7 +903,7 @@ fn build_hint(remote: &Remote, triples: &[String], tried: &[PathBuf]) -> String 
 ///
 /// `include_str!` — по той же причине, что и у остальных шимов: установщик не
 /// должен зависеть от того, лежит ли рядом дерево исходников.
-const NODE_SRC: [(&str, &str); 13] = [
+const NODE_SRC: [(&str, &str); 16] = [
     ("Cargo.toml", include_str!("../../node/Cargo.toml")),
     ("src/main.rs", include_str!("../../node/src/main.rs")),
     ("src/node/mod.rs", include_str!("../../node/src/node/mod.rs")),
@@ -912,14 +916,17 @@ const NODE_SRC: [(&str, &str); 13] = [
     ("src/node/live.rs", include_str!("../../node/src/node/live.rs")),
     ("src/node/sources.rs", include_str!("../../node/src/node/sources.rs")),
     ("src/node/hooks.rs", include_str!("../../node/src/node/hooks.rs")),
-    ("src/codex_hooks.rs", include_str!("../codex_hooks.rs")),
+    ("shared/Cargo.toml", include_str!("../../shared/Cargo.toml")),
+    ("shared/src/lib.rs", include_str!("../../shared/src/lib.rs")),
+    ("shared/src/codex_hooks.rs", include_str!("../../shared/src/codex_hooks.rs")),
+    ("shared/src/terminal_stream.rs", include_str!("../../shared/src/terminal_stream.rs")),
 ];
 
-/// The workspace shares the provider RPC implementation. A portable source
-/// package keeps the exact same file inside its own src/ directory.
+/// The portable root embeds the private shared crate alongside the node sources.
 fn portable_node_source(path: &str, body: &str) -> String {
-    if path == "src/main.rs" { body.replace("#[path = \"../../src/codex_hooks.rs\"]", "#[path = \"codex_hooks.rs\"]") }
-    else { body.to_string() }
+    if path == "Cargo.toml" {
+        body.replace("jarvis-node-shared = { path = \"../shared\" }", "jarvis-node-shared = { path = \"shared\" }")
+    } else { body.to_string() }
 }
 
 /// Положить `jarvis-node` в `<dir>/bin` тем способом, который выбрал
@@ -2185,6 +2192,28 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "compiles a temporary offline package; run explicitly"]
+    fn embedded_node_sources_build_offline() {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("jarvis-portable-node-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        for (relative, body) in NODE_SRC {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, portable_node_source(relative, body)).unwrap();
+        }
+        let output = std::process::Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .args(["check", "--offline", "--manifest-path"])
+            .arg(root.join("Cargo.toml"))
+            .env("CARGO_TARGET_DIR", std::env::temp_dir().join("jarvis-portable-node-check-target"))
+            .env("CARGO_INCREMENTAL", "0")
+            .env("CARGO_PROFILE_DEV_DEBUG", "0")
+            .output().unwrap();
+        fs::remove_dir_all(root).unwrap();
+        assert!(output.status.success(), "portable package did not build offline: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[test]
     fn expand_resolves_tilde_and_trims_slash() {
         let r = remote("/home/bob");
         assert_eq!(r.expand("~/.jarvis"), "/home/bob/.jarvis");
@@ -2429,9 +2458,13 @@ mod tests {
         }
         let main = NODE_SRC.iter().find(|(name,_)| *name == "src/main.rs").unwrap().1;
         let portable = portable_node_source("src/main.rs", main);
-        assert!(portable.contains("#[path = \"codex_hooks.rs\"]"));
-        assert!(!portable.contains("../../src/codex_hooks.rs"));
-        assert!(NODE_SRC.iter().any(|(name,_)| *name == "src/codex_hooks.rs"));
+        assert!(portable.contains("use jarvis_node_shared::{codex_hooks, terminal_stream};"));
+        for name in ["shared/Cargo.toml", "shared/src/lib.rs", "shared/src/codex_hooks.rs", "shared/src/terminal_stream.rs"] {
+            assert!(NODE_SRC.iter().any(|(path,_)| *path == name), "missing {name}");
+        }
+        let manifest = portable_node_source("Cargo.toml", NODE_SRC[0].1);
+        assert!(manifest.contains("path = \"shared\""));
+        assert!(!manifest.contains("../shared"));
     }
 
     #[test]

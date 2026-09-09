@@ -19,12 +19,19 @@
     "bundle:linux": "tauri build --features whisper-native --bundles deb,appimage,rpm",
     "icons:sync": "node scripts/sync-icons.mjs",
     "vendor:terminal": "node scripts/vendor-terminal.mjs",
-    "check:terminal": "node scripts/vendor-terminal.mjs --check"
+    "check:terminal": "node scripts/vendor-terminal.mjs --check",
+    "check:plugin-contracts": "bash scripts/check-plugin-contract-generation.sh",
+    "test:plugin-ui-sdk": "node --test packages/jarvis-plugin-ui/test/*.test.mjs",
+    "test:plugin-boundaries": "bash scripts/check-plugin-boundaries.test.sh",
+    "check:plugin-boundaries": "bash scripts/check-plugin-boundaries.sh",
+    "check:package-lock": "bash scripts/check-package-lock-contract.sh"
   },
   "devDependencies": {
     "@phosphor-icons/web": "^2.1.2",
     "@tauri-apps/cli": "^2.11.2",
-    "linkedom": "^0.18.13"
+    "json-schema-to-typescript": "15.0.4",
+    "linkedom": "^0.18.13",
+    "typescript": "5.9.3"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",

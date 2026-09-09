@@ -15,8 +15,7 @@
 mod install;
 #[path = "../agent_instances.rs"]
 mod agent_instances;
-#[path = "../codex_hooks.rs"]
-mod codex_hooks;
+use jarvis_node_shared::codex_hooks;
 
 use install::{Step, StepState};
 

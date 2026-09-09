@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn outcome_covers_every_exit() {
-        use Outcome::*;
+        use super::Outcome::*;
         assert_eq!(Outcome::decide(None, false), Expired, "отправителя не стало — решения не было");
         assert_eq!(Outcome::decide(None, true), Expired, "цель цела, но решения всё равно нет");
         assert_eq!(Outcome::decide(Some(false), true), Rejected);

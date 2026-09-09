@@ -33,12 +33,15 @@ def wait(fn,seconds=15):
 try:
  archive=io.BytesIO()
  with tarfile.open(fileobj=archive,mode='w:gz') as tar:
-  files=[('portable/Cargo.toml',repo/'src-tauri/node/Cargo.toml'),('portable/src/codex_hooks.rs',repo/'src-tauri/src/codex_hooks.rs')]
+  files=[('portable/shared/Cargo.toml',repo/'src-tauri/shared/Cargo.toml')]
+  files += [('portable/shared/src/'+path.name,path) for path in (repo/'src-tauri/shared/src').glob('*.rs')]
   files += [('portable/src/node/'+path.name,path) for path in (repo/'src-tauri/node/src/node').glob('*.rs')]
   files += [('bin/'+name,repo/'bin'/name) for name in ['jarvis-hook','agent-shim','jarvis-tmux.conf']]
   files += [('node-parity-fixture.py',repo/'scripts/qa/node-parity-fixture.py')]
   for name,path in files:tar.add(path,arcname=name)
-  main=(repo/'src-tauri/node/src/main.rs').read_text().replace('#[path = "../../src/codex_hooks.rs"]','#[path = "codex_hooks.rs"]')
+  manifest=(repo/'src-tauri/node/Cargo.toml').read_text().replace('jarvis-node-shared = { path = "../shared" }','jarvis-node-shared = { path = "shared" }')
+  data=manifest.encode();info=tarfile.TarInfo('portable/Cargo.toml');info.size=len(data);tar.addfile(info,io.BytesIO(data))
+  main=(repo/'src-tauri/node/src/main.rs').read_text()
   data=main.encode();info=tarfile.TarInfo('portable/src/main.rs');info.size=len(data);tar.addfile(info,io.BytesIO(data))
  remote('tar -xzf - -C '+shlex.quote(root),data=archive.getvalue())
  bootstrap=f'''set -eu

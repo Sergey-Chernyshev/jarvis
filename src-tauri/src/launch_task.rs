@@ -149,21 +149,80 @@ impl LaunchControl {
 fn valid_pane(pane: &str) -> bool {
     pane.strip_prefix('%').is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) && id.parse::<u32>().is_ok())
 }
+// Keep the authority check and its side effect in one server command queue.
+// Every pane operation uses the exact session, never an unqualified numeric ID.
+trait TmuxRunner: Sync {
+    fn run<'a>(&'a self, args: &'a [String]) -> IoFuture<'a, Result<String, String>>;
+}
+struct LocalTmux;
+impl TmuxRunner for LocalTmux {
+    fn run<'a>(&'a self, args: &'a [String]) -> IoFuture<'a, Result<String, String>> {
+        Box::pin(async move { crate::tmux::tmux_j(&args.iter().map(String::as_str).collect::<Vec<_>>()).await })
+    }
+}
+fn owned_target(terminal: &OwnedTerminal) -> Result<(String, String), String> {
+    let name = terminal.name.as_deref().filter(|name| !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'));
+    if !terminal.machine.is_empty() || name.is_none() {
+        return Err("Нет локального маркера владельца терминала; задача не отправлена".into());
+    }
+    let name = name.unwrap();
+    let mut condition = format!("#{{&&:#{{==:#{{session_name}},{name}}},#{{==:#{{JARVIS_LAUNCH_ID}},{name}}}}}");
+    if !terminal.pane.is_empty() {
+        if !valid_pane(&terminal.pane) { return Err("Некорректная пана владельца".into()); }
+        condition = format!("#{{&&:{condition},#{{==:#{{pane_id}},{}}}}}", terminal.pane);
+    }
+    let target = if terminal.pane.is_empty() { format!("={name}:") } else { format!("={name}:.{}", terminal.pane) };
+    Ok((target, condition))
+}
+async fn owned_command(io: &impl TmuxRunner, terminal: &OwnedTerminal, command: &str) -> Result<(), String> {
+    let (target, condition) = owned_target(terminal)?;
+    let args = vec!["if-shell".into(), "-F".into(), "-t".into(), target, condition,
+        format!("{command} ; display-message -p jarvis-owned-ok"), "display-message -p jarvis-owned-replaced".into()];
+    let output = io.run(&args).await.map_err(|error| format!("Терминал этого запуска пропал или заменён; ввод остановлен: {error}"))?;
+    if output.trim() != "jarvis-owned-ok" {
+        return Err("Маркер владельца терминала изменился; ввод в чужое окно остановлен".into());
+    }
+    Ok(())
+}
+async fn owned_reply(io: &impl TmuxRunner, terminal: &OwnedTerminal, text: &str) -> Result<(), String> {
+    let (target, _) = owned_target(terminal)?;
+    let target = crate::util::shell_quote(&target);
+    // Buffer data remains an argv value, never tmux command source. An orphaned
+    // buffer after a transport failure contains no authority to paste anywhere.
+    static BUFFER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let buffer = format!("jarvis-launch-{}-{}", std::process::id(), BUFFER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    io.run(&["set-buffer".into(), "-b".into(), buffer.clone(), "--".into(), text.into()]).await?;
+    let result = async {
+        owned_command(io, terminal, &format!("send-keys -t {target} C-u")).await?;
+        owned_command(io, terminal, &format!("paste-buffer -p -d -b {buffer} -t {target}")).await?;
+        // Preserve bracketed-paste settling; Enter gets a fresh server-side guard.
+        tokio::time::sleep(Duration::from_millis(90)).await;
+        owned_command(io, terminal, &format!("send-keys -t {target} Enter")).await
+    }.await;
+    if result.is_err() {
+        let _ = io.run(&["delete-buffer".into(), "-b".into(), buffer]).await;
+    }
+    result
+}
+async fn owned_close(io: &impl TmuxRunner, terminal: &OwnedTerminal) -> Result<(), String> {
+    let name = terminal.name.as_deref().ok_or("Нет маркера владельца терминала")?;
+    let command = format!("kill-session -t {}", crate::util::shell_quote(&format!("={name}")));
+    // Creation may have succeeded without returning a pane. Session token is
+    // sufficient for cleanup; no active-pane or recycled numeric-ID fallback.
+    let terminal = OwnedTerminal { pane: String::new(), ..terminal.clone() };
+    match owned_command(io, &terminal, &command).await {
+        Err(error) if missing_session(&error) => Ok(()),
+        result => result,
+    }
+}
 struct DaemonIo(Arc<Daemon>);
 impl TerminalIo for DaemonIo {
     fn close<'a>(&'a self, terminal: &'a OwnedTerminal) -> IoFuture<'a, Result<(), String>> {
         Box::pin(async move {
             if terminal.machine.is_empty() {
                 // Only the exact newly-created local session may be cleaned up.
-                if let Some(name) = &terminal.name {
-                    let exact = format!("={name}");
-                    match crate::tmux::tmux_j(&["show-environment", "-t", &exact, "JARVIS_LAUNCH_ID"]).await {
-                        Ok(marker) if marker.trim() == format!("JARVIS_LAUNCH_ID={name}") =>
-                            return crate::tmux::tmux_j(&["kill-session", "-t", &exact]).await.map(|_| ()),
-                        Ok(_) => return Err("Маркер владельца терминала изменился; чужое окно не закрыто".into()),
-                        Err(error) if missing_session(&error) => return Ok(()),
-                        Err(error) => return Err(error),
-                    }
+                if terminal.name.is_some() {
+                    return owned_close(&LocalTmux, terminal).await;
                 }
             }
             let target = pane_target(&self.0, &terminal.machine)?;
@@ -386,7 +445,7 @@ impl LaunchTask {
                     if self.control.cancelled() { return Ok(()); }
                     match ready.feed(&screen) {
                         Some(crate::launch::ready::Screen::Ready) => {
-                            io.reply(&self.machine, pane, self.task.as_deref().unwrap()).await?;
+                            io.reply(owned.as_ref().unwrap(), self.task.as_deref().unwrap()).await?;
                             prompt_sent = true;
                             io.emit(self, "sent", None);
                         }
@@ -403,7 +462,7 @@ impl LaunchTask {
                     io.emit(self, "connected", Some(&session.id));
                     if !prompt_sent {
                         if let Some(text) = &self.task {
-                            io.reply(&self.machine, session.tmux_pane.as_deref().unwrap(), text).await?;
+                            io.reply(owned.as_ref().unwrap(), text).await?;
                             io.emit(self, "sent", Some(&session.id));
                         }
                     }
@@ -426,7 +485,7 @@ trait DeliveryIo: Sync {
     fn snapshot(&self) -> Vec<Session>;
     fn alive<'a>(&'a self, machine: &'a str, pane: &'a str) -> IoFuture<'a, Result<bool, String>>;
     fn screen<'a>(&'a self, machine: &'a str, pane: &'a str) -> IoFuture<'a, Result<String, String>>;
-    fn reply<'a>(&'a self, machine: &'a str, pane: &'a str, text: &'a str) -> IoFuture<'a, Result<(), String>>;
+    fn reply<'a>(&'a self, terminal: &'a OwnedTerminal, text: &'a str) -> IoFuture<'a, Result<(), String>>;
     fn bind<'a>(&'a self, task: &'a LaunchTask, session: &'a Session) -> IoFuture<'a, Result<bool, String>>;
     fn pause(&self) -> IoFuture<'_, ()>;
     fn emit(&self, task: &LaunchTask, status: &str, session: Option<&str>);
@@ -445,8 +504,11 @@ impl DeliveryIo for DaemonIo {
     fn screen<'a>(&'a self, machine: &'a str, pane: &'a str) -> IoFuture<'a, Result<String, String>> {
         Box::pin(async move { pane_target(&self.0, machine)?.screen(pane).await })
     }
-    fn reply<'a>(&'a self, machine: &'a str, pane: &'a str, text: &'a str) -> IoFuture<'a, Result<(), String>> {
-        Box::pin(async move { pane_target(&self.0, machine)?.reply(pane, text).await })
+    fn reply<'a>(&'a self, terminal: &'a OwnedTerminal, text: &'a str) -> IoFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            if terminal.machine.is_empty() { owned_reply(&LocalTmux, terminal, text).await }
+            else { pane_target(&self.0, &terminal.machine)?.reply(&terminal.pane, text).await }
+        })
     }
     fn bind<'a>(&'a self, task: &'a LaunchTask, session: &'a Session) -> IoFuture<'a, Result<bool, String>> {
         Box::pin(async move {
@@ -632,8 +694,114 @@ mod lifecycle_tests {
         async fn wait(&self) { self.entered.notify_one(); self.release.acquire().await.unwrap().forget(); }
         fn open(&self) { self.release.add_permits(1); }
     }
+    // This injectable runner executes the production command builder on a
+    // private socket. It cannot address the Jarvis/default/user tmux server.
+    struct PrivateTmux { socket: std::path::PathBuf, replace_after_paste: AtomicBool }
+    impl TmuxRunner for PrivateTmux {
+        fn run<'a>(&'a self, args: &'a [String]) -> IoFuture<'a, Result<String, String>> {
+            Box::pin(async move {
+                let output = tokio::process::Command::new("tmux").args(["-S"]).arg(&self.socket)
+                    .args(["-f", "/dev/null"]).args(args).output().await.map_err(|e| e.to_string())?;
+                if output.status.success() {
+                    if args.first().is_some_and(|arg| arg == "if-shell") && args.get(5).is_some_and(|arg| arg.starts_with("paste-buffer"))
+                        && self.replace_after_paste.swap(false, Ordering::SeqCst) {
+                        self.restart().await;
+                        self.create("owned", "replacement").await;
+                    }
+                    Ok(String::from_utf8_lossy(&output.stdout).trim().into())
+                } else { Err(String::from_utf8_lossy(&output.stderr).into()) }
+            })
+        }
+    }
+    impl Drop for PrivateTmux {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("tmux").arg("-S").arg(&self.socket).args(["-f", "/dev/null", "kill-server"]).output();
+            let _ = std::fs::remove_file(&self.socket);
+            let _ = std::fs::remove_file(self.socket.with_file_name("input"));
+            let _ = std::fs::remove_dir(self.socket.parent().unwrap());
+        }
+    }
+    impl PrivateTmux {
+        async fn command(&self, args: &[&str]) -> Result<String, String> {
+            self.run(&args.iter().map(|s| (*s).into()).collect::<Vec<_>>()).await
+        }
+        async fn create(&self, name: &str, marker: &str) -> OwnedTerminal {
+            let pane = self.command(&["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name,
+                "-e", &format!("JARVIS_LAUNCH_ID={marker}"), "sh", "-c",
+                &format!("exec cat > {}", crate::util::shell_quote(self.socket.with_file_name("input").to_str().unwrap()))]).await.unwrap();
+            OwnedTerminal { machine: String::new(), pane, name: Some(name.into()) }
+        }
+        async fn restart(&self) {
+            self.command(&["kill-server"]).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    #[test]
+    fn local_guard_requires_exact_local_creation_authority() {
+        for (machine, name, pane) in [("remote", Some("owned"), "%0"), ("", None, "%0"),
+            ("", Some("owned:other"), "%0"), ("", Some("owned"), "%0;send-keys")] {
+            assert!(owned_target(&OwnedTerminal { machine: machine.into(), name: name.map(str::to_string), pane: pane.into() }).is_err());
+        }
+        let (target, condition) = owned_target(&OwnedTerminal { machine: String::new(), name: Some("owned".into()), pane: "%0".into() }).unwrap();
+        assert_eq!(target, "=owned:.%0");
+        assert!(condition.contains("#{JARVIS_LAUNCH_ID}"));
+        assert!(condition.contains("#{session_name}"));
+        assert!(condition.contains("#{pane_id}"));
+    }
+    #[tokio::test]
+    #[ignore = "requires tmux; uses only a private temporary socket and benign cat"]
+    async fn production_guard_rejects_reused_panes_and_preserves_replacement() {
+        let dir = std::path::PathBuf::from(format!("/tmp/jarvis-owned-{}-{}", std::process::id(), crate::util::now_ms()));
+        std::fs::create_dir(&dir).unwrap();
+        let runner = Arc::new(PrivateTmux { socket: dir.join("tmux.sock"), replace_after_paste: AtomicBool::new(false) });
+        // First prove the exact production syntax accepts its own token, keeps
+        // text out of command parsing, and actually pastes and presses Enter.
+        let owned = runner.create("owned", "owned").await;
+        let text = "literal '$HOME; #{pane_id} \" quoted\nsecond line";
+        owned_reply(runner.as_ref(), &owned, text).await.unwrap();
+        let screen = runner.command(&["capture-pane", "-p", "-t", "=owned:"]).await.unwrap();
+        assert!(screen.contains("literal '$HOME; #{pane_id}"), "{screen}");
+        assert!(screen.contains("second line"), "{screen}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(std::fs::read_to_string(runner.socket.with_file_name("input")).unwrap(), format!("{text}\n"));
+        owned_close(runner.as_ref(), &owned).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        for same_name in [false, true] {
+            let io = FakeIo { runner: Some(runner.clone()), ..Default::default() };
+            let task = make_task(&io, "kimi");
+            let owned = runner.create(&task.id, &task.id).await;
+            *task.control.terminal.lock().unwrap() = Some(owned.clone());
+            runner.restart().await;
+            let replacement = runner.create(if same_name { &task.id } else { "unrelated" }, "replacement").await;
+            assert_eq!(owned.pane, replacement.pane, "the regression requires ID reuse");
+            task.run_delivery(&io, Some(owned.pane.clone()), 5).await;
+            let record = io.spawns.find(&task.bind.as_ref().unwrap().ticket).unwrap();
+            assert!(record.failure.as_deref().is_some_and(|error| error.contains("терминал") || error.contains("Терминал")), "{:?}", record.failure);
+            assert!(!crate::capability::native::spawn::pending_json(&record)["pending"].as_bool().unwrap());
+            assert_eq!(io.notices.load(Ordering::SeqCst), 1);
+            let _ = task.control.cancel_with(&io).await;
+            let target = format!("={}:", replacement.name.as_deref().unwrap());
+            let screen = runner.command(&["capture-pane", "-p", "-t", &target]).await.unwrap();
+            assert!(!screen.contains("first task"), "replacement received task: {screen}");
+            assert!(std::fs::read(runner.socket.with_file_name("input")).unwrap().is_empty());
+            assert_eq!(runner.command(&["display-message", "-p", "-t", &target, "#{JARVIS_LAUNCH_ID}"]).await.unwrap(), "replacement");
+            runner.restart().await;
+        }
+        // Restart between paste and Enter: the second side-effect boundary
+        // must independently reject ownership, even when the first succeeded.
+        let owned = runner.create("owned", "owned").await;
+        runner.replace_after_paste.store(true, Ordering::SeqCst);
+        assert!(owned_reply(runner.as_ref(), &owned, "must not reach replacement").await.is_err());
+        assert!(owned_close(runner.as_ref(), &owned).await.is_err());
+        let screen = runner.command(&["capture-pane", "-p", "-t", "=owned:"]).await.unwrap();
+        assert!(screen.is_empty(), "replacement received Enter: {screen:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(std::fs::read(runner.socket.with_file_name("input")).unwrap().is_empty());
+    }
     struct FakeIo {
         spawns: Spawns,
+        runner: Option<Arc<PrivateTmux>>,
         machine: String,
         next: AtomicUsize,
         sessions: Mutex<Vec<Session>>,
@@ -652,7 +820,7 @@ mod lifecycle_tests {
         hold_bind: Option<Arc<Hold>>,
     }
     impl Default for FakeIo {
-        fn default() -> Self { Self { spawns: Spawns::new(), machine: String::new(), next: AtomicUsize::new(0), sessions: Mutex::default(),
+        fn default() -> Self { Self { spawns: Spawns::new(), runner: None, machine: String::new(), next: AtomicUsize::new(0), sessions: Mutex::default(),
             after_reply: Mutex::default(), writes: Mutex::default(), closed: Mutex::default(), attached: AtomicUsize::new(0), notices: AtomicUsize::new(0),
             phase_error: None, screen_text: "❯".into(), alive: true, close_fails: AtomicBool::new(false),
             hold_create: None, hold_alive: None, hold_screen: None, hold_bind: None } }
@@ -660,6 +828,7 @@ mod lifecycle_tests {
     impl TerminalIo for FakeIo {
         fn close<'a>(&'a self, terminal: &'a OwnedTerminal) -> IoFuture<'a, Result<(), String>> {
             Box::pin(async move {
+                if let Some(runner) = &self.runner { return owned_close(runner.as_ref(), terminal).await; }
                 if self.close_fails.load(Ordering::SeqCst) { return Err("close transport failed".into()); }
                 self.closed.lock().unwrap().push(terminal.clone()); Ok(())
             })
@@ -696,10 +865,11 @@ mod lifecycle_tests {
                 if self.phase_error == Some("screen") { Err("screen failed".into()) } else { Ok(self.screen_text.clone()) }
             })
         }
-        fn reply<'a>(&'a self, machine: &'a str, pane: &'a str, text: &'a str) -> IoFuture<'a, Result<(), String>> {
+        fn reply<'a>(&'a self, terminal: &'a OwnedTerminal, text: &'a str) -> IoFuture<'a, Result<(), String>> {
             Box::pin(async move {
+                if let Some(runner) = &self.runner { return owned_reply(runner.as_ref(), terminal, text).await; }
                 if self.phase_error == Some("reply") { return Err("reply failed".into()); }
-                self.writes.lock().unwrap().push((machine.into(), pane.into(), text.into()));
+                self.writes.lock().unwrap().push((terminal.machine.clone(), terminal.pane.clone(), text.into()));
                 if let Some(session) = self.after_reply.lock().unwrap().take() { self.sessions.lock().unwrap().push(session); }
                 Ok(())
             })

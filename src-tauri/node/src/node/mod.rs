@@ -226,24 +226,43 @@ fn is_loopback(addr: &str) -> bool {
     }
 }
 
+/// Release ownership explicitly: a descriptor inherited between fork and exec
+/// shares the lock's open file description even when close-on-exec is set.
+/// Closing just this File could otherwise leave ownership with that child.
+#[derive(Debug)]
+struct SocketClaim {
+    file: std::fs::File,
+}
+
+impl Drop for SocketClaim {
+    fn drop(&mut self) {
+        // Unlock only this owned description; never unlink the shared lock file.
+        if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) } != 0 {
+            eprintln!("[jarvis-node] не удалось освободить socket claim: {}", io::Error::last_os_error());
+        }
+    }
+}
+
 /// Keep an OS-owned lock beside the socket. Unlinking first lets a second node
 /// silently steal the address; the first node's shutdown then removes its socket.
-fn claim_socket(sock: &Path) -> io::Result<std::fs::File> {
+fn claim_socket(sock: &Path) -> io::Result<SocketClaim> {
     let path = sock.with_extension("sock.lock");
-    let mut file = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)?;
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    file.set_len(0)?;
-    writeln!(file, "{}", std::process::id())?;
-    Ok(file)
+    // Construct the owner before fallible writes so error paths also unlock.
+    let mut claim = SocketClaim { file };
+    claim.file.set_len(0)?;
+    writeln!(claim.file, "{}", std::process::id())?;
+    Ok(claim)
 }
 
 /// Поднять сокет и слушать до сигнала завершения.
@@ -366,6 +385,33 @@ mod tests {
         let next = claim_socket(&sock).unwrap();
         drop(next);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn socket_owner_drop_unlocks_while_an_inherited_description_survives() {
+        let dir = std::env::temp_dir().join(format!(
+            "jarvis-node-lock-inherited-{}", std::process::id()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let sock = dir.join("node.sock");
+        let first = claim_socket(&sock).unwrap();
+        // dup shares the open file description, like a child between fork/exec.
+        let inherited = first.file.try_clone().unwrap();
+        let flags = unsafe { libc::fcntl(first.file.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+        std::fs::write(&sock, b"live socket sentinel").unwrap();
+        assert_eq!(claim_socket(&sock).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(std::fs::read(&sock).unwrap(), b"live socket sentinel");
+        drop(first);
+        let next = claim_socket(&sock).unwrap();
+        // Closing the old description must not release the new owner's claim.
+        drop(inherited);
+        assert_eq!(claim_socket(&sock).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(std::fs::read(&sock).unwrap(), b"live socket sentinel");
+        assert_eq!(std::fs::metadata(sock.with_extension("sock.lock")).unwrap()
+            .permissions().mode() & 0o777, 0o600);
+        drop(next);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn node() -> Node {

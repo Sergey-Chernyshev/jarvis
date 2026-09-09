@@ -19,7 +19,7 @@ env:
 
 jobs:
   rust:
-    name: fmt · clippy · test (macOS)
+    name: fmt · clippy · test
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -46,7 +46,9 @@ jobs:
         run: cmake --version || brew install cmake
 
       - name: Webview contract tests
-        run: npm run test:ui
+        run: |
+          npm run test:ui
+          node --test scripts/prepare-node-bundle.test.mjs scripts/publish-release.test.mjs
 
       # Информационно: проект использует компактный авторский стиль, не совпадающий
       # с дефолтным rustfmt. Показываем расхождения, но не блокируем мерж.

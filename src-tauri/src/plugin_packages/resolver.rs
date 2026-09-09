@@ -514,15 +514,9 @@ impl PluginResolver {
                     .ok_or_else(|| {
                         ResolverError::receipt_blocked("verified_bridge_not_in_package")
                     })?;
-                let (descriptor, _) = open_verified_package_file(&root, expected)
-                    .map_err(ResolverError::receipt_blocked)?;
                 Some(
-                    VerifiedExecutable::from_descriptor(
-                        descriptor,
-                        root.clone(),
-                        PathBuf::from(bridge_path.as_str()),
-                    )
-                    .map_err(ResolverError::receipt_blocked)?,
+                    acquire_verified_executable(&root, expected, || {})
+                        .map_err(ResolverError::receipt_blocked)?,
                 )
             }
         };
@@ -1210,6 +1204,23 @@ fn collect_tree(
     Ok(())
 }
 
+// The callback supplies a deterministic handoff seam for race regressions.
+fn acquire_verified_executable(
+    root: &Path,
+    expected: &PackageFile,
+    after_signed_verification: impl FnOnce(),
+) -> Result<VerifiedExecutable, String> {
+    let (descriptor, _) = open_verified_package_file(root, expected)?;
+    after_signed_verification();
+    VerifiedExecutable::from_descriptor(
+        descriptor,
+        root.to_path_buf(),
+        PathBuf::from(expected.path.as_str()),
+        expected.size,
+        &expected.digest,
+    )
+}
+
 fn verify_package_file(root: &Path, expected: &PackageFile) -> Result<Vec<u8>, String> {
     let (_, captured) = open_verified_package_file(root, expected)?;
     Ok(captured)
@@ -1371,6 +1382,37 @@ mod tests {
             make_writable(&self.0);
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn signed_descriptor_handoff_rejects_same_inode_mutation() {
+        use std::os::unix::fs::MetadataExt;
+        let fixture = TestRoot::new("signed-handoff");
+        let root = fixture.0.join("package");
+        fs::create_dir(&root).unwrap();
+        let path = root.join("bridge");
+        let signed = b"#!/bin/sh\nprintf signed";
+        fs::write(&path, signed).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o555)).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
+        let expected = PackageFile {
+            path: PackagePath::new("bridge").unwrap(),
+            kind: PackageFileKind::Regular,
+            mode: PackageFileMode::Executable,
+            size: signed.len() as u64,
+            digest: file_digest(signed),
+        };
+        let inode = fs::metadata(&path).unwrap().ino();
+        let error = super::acquire_verified_executable(&root, &expected, || {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::write(&path, b"#!/bin/sh\nprintf forged").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o555)).unwrap();
+            assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+            assert_eq!(fs::metadata(&path).unwrap().len(), expected.size);
+        })
+        .unwrap_err();
+        assert!(error.contains("signed digest mismatch"), "{error}");
+        assert!(!fixture.profile().join("plugin-exec-leases").exists());
     }
 
     #[derive(Default)]

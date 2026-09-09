@@ -100,3 +100,17 @@ No native entry point, health check, service, or migration may run before the
 package has passed structural inspection, current catalog trust and revocation
 checks, exact package matching, signature verification, and the required
 consent.
+
+## Durable receipt envelope
+
+The macOS package store accepts canonical receipts up to 1 MiB and rejects
+larger reads and writes with `plugin_receipt_size`. This storage envelope is
+four times the 256 KiB manifest input budget, allowing current and previous
+package metadata and grants together with receipt bookkeeping. In particular,
+valid large version metadata must not be truncated by a 64 KiB receipt limit.
+The protocol's independently constructed receipt values do not themselves have
+a finite aggregate size maximum; the store applies this explicit envelope.
+Reads check opened file size and consume at most the limit plus one byte, so
+concurrent growth cannot trigger an unbounded allocation. Nonblocking,
+no-follow opens and opened-file type/ownership/link checks reject substituted
+special files. Existing macOS no-replace rename and durability rules remain.

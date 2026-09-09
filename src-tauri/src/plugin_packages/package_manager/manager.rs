@@ -1087,7 +1087,7 @@ impl PackageManagerApi for PluginManager {
             if enabled {
                 self.fresh_release_for_receipt(&current)?;
             }
-            current.previous = Some(current.summary());
+            // Enablement is not a package selection; preserve its rollback target.
             current.generation = current.generation.saturating_add(1);
             current.installed_at_ms = self.clock.now_ms();
             current.enabled = enabled;

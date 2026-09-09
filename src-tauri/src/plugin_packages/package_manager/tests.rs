@@ -271,6 +271,14 @@ impl Clock for FixedClock {
 }
 
 fn ui_manager(paths: &PluginPaths, lifecycle: Arc<dyn LifecycleHost>) -> (PluginManager, PluginId) {
+    ui_manager_version(paths, lifecycle, "1.0.0")
+}
+
+fn ui_manager_version(
+    paths: &PluginPaths,
+    lifecycle: Arc<dyn LifecycleHost>,
+    version: &str,
+) -> (PluginManager, PluginId) {
     let plugin_id = PluginId::new("dev.example.ui").unwrap();
     let package_digest =
         Digest::new("sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
@@ -278,7 +286,7 @@ fn ui_manager(paths: &PluginPaths, lifecycle: Arc<dyn LifecycleHost>) -> (Plugin
     let release = SelectedRelease::new(
         7,
         plugin_id.clone(),
-        Version::parse("1.0.0").unwrap(),
+        Version::parse(version).unwrap(),
         PackageTarget::DarwinArm64,
         "https://plugins.example.test/ui.jarvis-plugin".into(),
         package_digest.clone(),
@@ -325,6 +333,71 @@ fn approve_ui(plan: &InstallPlan) -> Approval {
         granted_permissions: plan.requested_permissions.clone(),
         native_trust_digest: None,
         approve_irreversible_migration: true,
+    }
+}
+
+#[test]
+fn enablement_preserves_previous_package_for_explicit_and_implicit_rollback() {
+    for explicit in [false, true] {
+        let paths = temp_paths("toggle-rollback");
+        let lifecycle = Arc::new(RecordingLifecycle::new(paths.paths.clone()));
+        for version in ["1.0.0", "2.0.0"] {
+            let (manager, id) = ui_manager_version(&paths, lifecycle.clone(), version);
+            let plan = manager
+                .prepare_install(InstallSourceRef::Catalog {
+                    id: id.as_str().into(),
+                    version: Some(version.into()),
+                })
+                .unwrap();
+            manager.commit_install(approve_ui(&plan)).unwrap();
+            if version == "2.0.0" {
+                manager.set_enabled(&id, true).unwrap();
+                let receipt = ReceiptStore::new(paths.paths.clone())
+                    .current(&id)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(receipt.version, Version::parse("2.0.0").unwrap());
+                assert_eq!(
+                    receipt.previous.unwrap().version,
+                    Version::parse("1.0.0").unwrap()
+                );
+            }
+        }
+        // This catalog fixture supplies the selected rollback release.
+        let (manager, id) = ui_manager(&paths, lifecycle.clone());
+        let previous = Version::parse("1.0.0").unwrap();
+        let rolled_back = manager
+            .rollback(&id, explicit.then_some(&previous))
+            .unwrap();
+        assert_eq!(rolled_back.version, previous);
+        assert_eq!(rolled_back.generation, 4);
+    }
+}
+
+#[test]
+fn first_install_toggles_do_not_manufacture_a_rollback_selection() {
+    let paths = temp_paths("toggle-first");
+    let lifecycle = Arc::new(RecordingLifecycle::new(paths.paths.clone()));
+    let (manager, id) = ui_manager(&paths, lifecycle);
+    let plan = manager
+        .prepare_install(InstallSourceRef::Catalog {
+            id: id.as_str().into(),
+            version: Some("1.0.0".into()),
+        })
+        .unwrap();
+    manager.commit_install(approve_ui(&plan)).unwrap();
+    for enabled in [true, false, true] {
+        manager.set_enabled(&id, enabled).unwrap();
+        let receipt = ReceiptStore::new(paths.paths.clone())
+            .current(&id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.enabled, enabled);
+        assert!(receipt.previous.is_none());
+        assert_eq!(
+            manager.rollback(&id, None).unwrap_err().code(),
+            "rollback_unavailable"
+        );
     }
 }
 

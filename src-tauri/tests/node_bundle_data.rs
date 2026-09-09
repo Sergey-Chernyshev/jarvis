@@ -3,7 +3,10 @@
 mod node_bundle;
 
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{fs, path::PathBuf};
+
+static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
 const TARGETS: [&str; 2] = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"];
 
@@ -16,12 +19,26 @@ impl Fixture {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("jarvis-node-data-{}-{stamp}", std::process::id()));
-        fs::create_dir_all(root.join("src-tauri/node-binaries")).unwrap();
-        fs::create_dir(root.join("out")).unwrap();
-        Self { root }
+        for _ in 0..128 {
+            let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "jarvis-node-data-{}-{stamp}-{sequence}",
+                std::process::id()
+            ));
+            match fs::create_dir(&root) {
+                Ok(()) => {
+                    let fixture = Self { root };
+                    fs::create_dir_all(fixture.root.join("src-tauri/node-binaries")).unwrap();
+                    fs::create_dir(fixture.root.join("out")).unwrap();
+                    return fixture;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("cannot create node bundle fixture: {error}"),
+            }
+        }
+        panic!("could not reserve a unique node bundle fixture after 128 attempts");
     }
+
     fn emit(&self) {
         node_bundle::embed_at(
             &self.root.join("src-tauri"),

@@ -43,6 +43,7 @@ mod loops; // режим «Циклы»: рутина, которую агент
 mod platform; // окна, медиа, звук: платформенное за общим API (macos.rs / linux.rs)
 mod meetings;
 mod plugin; // плагинное ядро: «всё есть плагин» (спека 2026-08-19)
+#[cfg(target_os = "macos")]
 mod plugin_packages; // non-activating package foundations; runtime integration is separate
 mod metrics;
 mod model;

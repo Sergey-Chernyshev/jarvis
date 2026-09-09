@@ -14,6 +14,33 @@ use jarvis_plugin_protocol::manifest::{Digest, PluginId};
 use jarvis_plugin_protocol::receipt::InstallReceipt;
 use semver::Version;
 
+// Closed receipt fields plus granted permissions must fit this durable envelope.
+// Keep reads and writes symmetric; one extra byte detects concurrent growth.
+// Four manifest byte budgets leave room for current/previous grants and version
+// metadata plus receipt bookkeeping. This is a storage envelope, not a claim
+// that independently constructed protocol receipts have a finite schema maximum.
+const MAX_RECEIPT_BYTES: u64 = 4 * jarvis_plugin_protocol::manifest::MAX_MANIFEST_BYTES as u64;
+
+fn read_receipt_bytes(input: impl Read) -> Result<Vec<u8>, StorageError> {
+    let mut bytes = Vec::new();
+    input
+        .take(MAX_RECEIPT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            StorageError::new(
+                "plugin_receipt_read",
+                format!("cannot read receipt: {error}"),
+            )
+        })?;
+    if bytes.len() as u64 > MAX_RECEIPT_BYTES {
+        return Err(StorageError::new(
+            "plugin_receipt_size",
+            "receipt exceeds size limit",
+        ));
+    }
+    Ok(bytes)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum StorageFailpoint {
     AfterVersionRename,
@@ -894,7 +921,7 @@ impl ReceiptStore {
             libc::openat(
                 plugin_directory.as_raw_fd(),
                 current_name.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
             )
         };
         if descriptor < 0 {
@@ -972,13 +999,13 @@ impl ReceiptStore {
                 format!("{} is not an owned single-link receipt", path.display()),
             ));
         }
-        let mut bytes = Vec::new();
-        input.read_to_end(&mut bytes).map_err(|error| {
-            StorageError::new(
-                "plugin_receipt_read",
-                format!("cannot read {}: {error}", path.display()),
-            )
-        })?;
+        if opened.st_size < 0 || opened.st_size as u64 > MAX_RECEIPT_BYTES {
+            return Err(StorageError::new(
+                "plugin_receipt_size",
+                "receipt exceeds size limit",
+            ));
+        }
+        let bytes = read_receipt_bytes(&mut input)?;
         let receipt: InstallReceipt = serde_json::from_slice(&bytes).map_err(|error| {
             StorageError::new(
                 "plugin_receipt_json",
@@ -1059,6 +1086,12 @@ impl ReceiptStore {
                 format!("cannot serialize install receipt: {error}"),
             )
         })?;
+        if bytes.len() as u64 > MAX_RECEIPT_BYTES {
+            return Err(StorageError::new(
+                "plugin_receipt_size",
+                "receipt exceeds size limit",
+            ));
+        }
 
         let result = (|| {
             let descriptor = unsafe {
@@ -1662,7 +1695,10 @@ mod tests {
         InstallReceipt, InstallSource, ReceiptSummary, INSTALL_RECEIPT_SCHEMA_VERSION,
     };
     use semver::Version;
-    use std::fs;
+    use std::ffi::CString;
+    use std::fs::{self, File};
+    use std::io::Read;
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::symlink;
     use std::os::unix::fs::PermissionsExt;
     use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -2469,6 +2505,125 @@ mod tests {
             store.current(&requested).unwrap_err().code(),
             "plugin_receipt_id"
         );
+    }
+
+    #[test]
+    fn current_rejects_sparse_oversize_without_reading_the_payload() {
+        let paths = fixture_paths("receipt-sparse");
+        let id = PluginId::new("dev.example.echo").unwrap();
+        paths.prepare_plugin(&id).unwrap();
+        File::create(paths.current(&id))
+            .unwrap()
+            .set_len(8 * 1024 * 1024 * 1024)
+            .unwrap();
+        assert_eq!(
+            ReceiptStore::new(paths).current(&id).unwrap_err().code(),
+            "plugin_receipt_size"
+        );
+    }
+
+    #[test]
+    fn receipt_growth_during_read_is_bounded_by_limit_plus_one() {
+        struct GrowingReader {
+            input: File,
+            writer: File,
+            grew: bool,
+        }
+        impl Read for GrowingReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let count = self.input.read(buffer)?;
+                if !self.grew {
+                    self.writer.set_len(super::MAX_RECEIPT_BYTES + 1)?;
+                    self.grew = true;
+                }
+                Ok(count)
+            }
+        }
+        let paths = fixture_paths("receipt-growth");
+        let id = PluginId::new("dev.example.echo").unwrap();
+        paths.prepare_plugin(&id).unwrap();
+        let current = paths.current(&id);
+        fs::write(&current, b"{").unwrap();
+        let input = File::open(&current).unwrap();
+        assert_eq!(input.metadata().unwrap().len(), 1);
+        let writer = fs::OpenOptions::new().write(true).open(current).unwrap();
+        assert_eq!(
+            super::read_receipt_bytes(GrowingReader {
+                input,
+                writer,
+                grew: false
+            })
+            .unwrap_err()
+            .code(),
+            "plugin_receipt_size"
+        );
+    }
+
+    #[test]
+    fn current_regular_to_fifo_race_returns_a_typed_error_without_a_writer() {
+        let paths = fixture_paths("receipt-fifo");
+        let id = PluginId::new("dev.example.echo").unwrap();
+        paths.prepare_plugin(&id).unwrap();
+        fs::write(paths.current(&id), b"{}").unwrap();
+        let store = ReceiptStore::new(paths);
+        let started = std::time::Instant::now();
+        let error = store
+            .current_after_inspect(&id, |path| {
+                fs::remove_file(path).unwrap();
+                let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            })
+            .unwrap_err();
+        assert_eq!(error.code(), "plugin_receipt_type");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn receipt_storage_envelope_accepts_its_boundary_and_rejects_the_next_byte() {
+        let store = fixture_store();
+        let mut expected = receipt("dev.example.echo", "1.0.0+a", 1, None);
+        let base = serde_json_canonicalizer::to_vec(&expected).unwrap().len();
+        let padding = super::MAX_RECEIPT_BYTES as usize - base + 1;
+        expected.version = Version::parse(&format!("1.0.0+{}", "a".repeat(padding))).unwrap();
+        assert_eq!(
+            serde_json_canonicalizer::to_vec(&expected).unwrap().len(),
+            super::MAX_RECEIPT_BYTES as usize
+        );
+        store.commit(&expected).unwrap();
+        assert_eq!(
+            store.current(&expected.plugin_id).unwrap(),
+            Some(expected.clone())
+        );
+        let mut oversize = expected.clone();
+        oversize.version = Version::parse(&format!("{}a", expected.version)).unwrap();
+        assert_eq!(
+            store.commit(&oversize).unwrap_err().code(),
+            "plugin_receipt_size"
+        );
+        assert_eq!(store.current(&expected.plugin_id).unwrap(), Some(expected));
+    }
+
+    #[test]
+    fn large_valid_version_metadata_and_grants_round_trip_with_previous() {
+        use jarvis_plugin_protocol::manifest::{PermissionId, PermissionScope};
+        use jarvis_plugin_protocol::receipt::GrantedPermission;
+        let store = fixture_store();
+        let mut first = receipt("dev.example.echo", "1.0.0", 1, None);
+        first.version = Version::parse(&format!("1.0.0+{}", "a".repeat(60 * 1024))).unwrap();
+        first.publisher_key_id = "k".repeat(256);
+        first.publisher_lineage = "l".repeat(256);
+        first.granted_permissions = vec![GrantedPermission {
+            id: PermissionId::ProjectsRead,
+            scope: Some(PermissionScope::One("selected".into())),
+            modes: None,
+        }];
+        let mut second = first.clone();
+        second.generation = 2;
+        second.previous = Some(first.summary());
+        let size = serde_json_canonicalizer::to_vec(&second).unwrap().len();
+        assert!(size > 64 * 1024 && size < super::MAX_RECEIPT_BYTES as usize);
+        store.commit(&second).unwrap();
+        assert_eq!(store.current(&second.plugin_id).unwrap(), Some(second));
     }
 
     #[test]

@@ -20,7 +20,8 @@ pub struct VerifiedExecutable {
 }
 
 impl VerifiedExecutable {
-    pub fn open(path: impl Into<PathBuf>) -> Result<Self, String> {
+    #[cfg(test)]
+    fn open(path: impl Into<PathBuf>) -> Result<Self, String> {
         let display_path = path.into();
         let activation_root = display_path
             .parent()
@@ -40,13 +41,31 @@ impl VerifiedExecutable {
                     display_path.display()
                 )
             })?;
-        Self::from_descriptor(verified_descriptor, activation_root, relative_path)
+        let len = verified_descriptor
+            .metadata()
+            .map_err(|e| e.to_string())?
+            .len();
+        let hash = descriptor_digest(&verified_descriptor, len)?;
+        let digest = jarvis_plugin_protocol::manifest::Digest::new(format!(
+            "sha256:{}",
+            hash.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        ))
+        .map_err(|e| e.to_string())?;
+        Self::from_descriptor(
+            verified_descriptor,
+            activation_root,
+            relative_path,
+            len,
+            &digest,
+        )
     }
 
     pub(crate) fn from_descriptor(
         verified_descriptor: File,
         activation_root: PathBuf,
         relative_path: PathBuf,
+        expected_len: u64,
+        expected_digest: &jarvis_plugin_protocol::manifest::Digest,
     ) -> Result<Self, String> {
         validate_relative_executable_path(&relative_path)?;
         let display_path = activation_root.join(&relative_path);
@@ -96,8 +115,29 @@ impl VerifiedExecutable {
                 display_path.display()
             ));
         }
-        let verified_len = verified_metadata.len();
-        let verified_digest = descriptor_digest(&verified_descriptor, verified_len)?;
+        // The authenticated package expectation must survive descriptor handoff.
+        // A fresh hash may confirm that expectation, never replace it.
+        let verified_len = expected_len;
+        if verified_metadata.len() != expected_len {
+            return Err("verified plugin executable signed size mismatch".into());
+        }
+        let verified_digest = descriptor_digest(&verified_descriptor, expected_len)?;
+        let encoded = format!(
+            "sha256:{}",
+            verified_digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        if encoded != expected_digest.as_str()
+            || verified_descriptor
+                .metadata()
+                .map_err(|e| e.to_string())?
+                .len()
+                != expected_len
+        {
+            return Err("verified plugin executable signed digest mismatch".into());
+        }
         Ok(Self {
             verified_descriptor: Arc::new(verified_descriptor),
             root_descriptor: Arc::new(root_descriptor),
@@ -177,6 +217,9 @@ impl ExactExecLease {
         expected_len: u64,
         expected_digest: [u8; 32],
     ) -> Result<Self, String> {
+        if source.metadata().map_err(|e| e.to_string())?.len() != expected_len {
+            return Err("held plugin executable signed size changed before spawn".into());
+        }
         let parent = prepare_exec_lease_parent(profile_root)?;
         let directory = create_unique_exec_lease_dir(&parent)?;
         let executable = directory.join("bridge");
@@ -206,7 +249,9 @@ impl ExactExecLease {
                 hasher.update(&buffer[..read]);
                 offset += read as u64;
             }
-            if <[u8; 32]>::from(hasher.finalize()) != expected_digest {
+            if <[u8; 32]>::from(hasher.finalize()) != expected_digest
+                || source.metadata().map_err(|e| e.to_string())?.len() != expected_len
+            {
                 return Err("held plugin executable digest изменился перед spawn".into());
             }
             output

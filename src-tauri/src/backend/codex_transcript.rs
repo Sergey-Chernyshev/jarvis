@@ -212,6 +212,22 @@ pub fn file_is_technical(path: &Path) -> bool {
     false
 }
 
+/// Provider message phases are normalized before they enter the shared renderer.
+/// Old transcripts without a phase remain ordinary messages; new/unknown phases
+/// stay in the raw transcript and cannot replace a known answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MessagePhase { Answer, Progress, Diagnostic }
+
+impl MessagePhase {
+    fn from_payload(payload: &Value) -> Self {
+        match payload.get("phase").or_else(|| payload.get("channel")).and_then(Value::as_str) {
+            None | Some("final" | "final_answer") => Self::Answer,
+            Some("commentary" | "progress" | "insight") => Self::Progress,
+            Some(_) => Self::Diagnostic,
+        }
+    }
+}
+
 /// Одна строка rollout → элементы чата (обычно 0–1). Пропускаем developer/system
 /// (системный промпт), reasoning, function_call_output, session_meta, turn_context,
 /// event_msg (дубль).
@@ -238,6 +254,13 @@ pub fn to_chat_items(entry: &Value) -> Vec<ChatItem> {
                 "assistant" => "assistant",
                 _ => return vec![],
             };
+            let kind = if role == "assistant" {
+                match MessagePhase::from_payload(payload) {
+                    MessagePhase::Answer => "text",
+                    MessagePhase::Progress => "progress",
+                    MessagePhase::Diagnostic => return vec![],
+                }
+            } else { "text" };
             let Some(blocks) = payload.get("content").and_then(Value::as_array) else {
                 return vec![];
             };
@@ -258,7 +281,7 @@ pub fn to_chat_items(entry: &Value) -> Vec<ChatItem> {
                 }
                 out.push(ChatItem {
                     role,
-                    kind: "text",
+                    kind,
                     text,
                     ts,
                 });
@@ -528,10 +551,7 @@ pub fn full_final_reply(entries: &[Value]) -> Option<String> {
         }
         // Новые rollout'ы маркируют commentary/final_answer. Промежуточный
         // прогресс не должен озвучиваться как итог, особенно после Stop.
-        if p.get("phase")
-            .and_then(Value::as_str)
-            .is_some_and(|phase| phase != "final_answer")
-        {
+        if MessagePhase::from_payload(p) != MessagePhase::Answer {
             continue;
         }
         let text = items
@@ -731,6 +751,23 @@ mod tests {
             None,
             "новый ход ещё не дал финал"
         );
+    }
+
+    #[test]
+    fn mixed_runtime_events_keep_progress_and_tools_out_of_final_answer() {
+        let entries = vec![
+            json!({"type":"response_item","payload":{"type":"function_call","name":"exec","arguments":"{}"}}),
+            json!({"type":"response_item","payload":{"type":"function_call","name":"wait","arguments":"{}"}}),
+            json!({"type":"response_item","payload":{"type":"function_call_output","output":"raw tool result"}}),
+            json!({"type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Проверяю сборку"}]}}),
+            json!({"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"**Готово** [файл](https://example.com/file)"}]}}),
+            json!({"type":"response_item","payload":{"type":"message","role":"assistant","phase":"unknown_future_event","content":[{"type":"output_text","text":"internal state"}]}}),
+            json!({"type":"unknown_event","payload":{"text":"unknown runtime data"}}),
+        ];
+        let items: Vec<_> = entries.iter().flat_map(to_chat_items).collect();
+        assert_eq!(items.iter().map(|item| item.kind).collect::<Vec<_>>(), vec!["tool", "tool", "progress", "text"]);
+        assert_eq!(items.last().unwrap().text, "**Готово** [файл](https://example.com/file)");
+        assert_eq!(full_final_reply(&entries).as_deref(), Some("**Готово** [файл](https://example.com/file)"));
     }
 
     #[test]

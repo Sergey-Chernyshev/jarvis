@@ -529,7 +529,7 @@ function render() {
 /* --- мини-маркдаун для реплик ассистента: абзацы, списки, код. Без innerHTML. --- */
 
 function renderInline(el, text) {
-  for (const t of text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g)) {
+  for (const t of text.split(/(`[^`]+`|\*\*[^*]+\*\*|\[[^\]\n]+\]\([^\s)]+\))/g)) {
     if (!t) continue;
     if (t.length > 2 && t.startsWith('`') && t.endsWith('`')) {
       const code = document.createElement('code');
@@ -540,7 +540,21 @@ function renderInline(el, text) {
       b.textContent = t.slice(2, -2);
       el.appendChild(b);
     } else {
-      el.appendChild(document.createTextNode(t));
+      const link = t.match(/^\[([^\]]+)\]\((https?:\/\/[^\s<>]+)\)$/i);
+      if (link) {
+        const a = document.createElement('a');
+        a.className = 'md-link'; a.dataset.href = link[2];
+        a.setAttribute('role', 'link'); a.tabIndex = 0;
+        a.textContent = link[1];
+        const open = async (event) => {
+          event.preventDefault();
+          try { await window.jarvis.openUrl(link[2]); }
+          catch (error) { showToast(String(error?.message || error)); }
+        };
+        a.addEventListener('click', open);
+        a.addEventListener('keydown', event => { if (event.key === 'Enter') open(event); });
+        el.appendChild(a);
+      } else el.appendChild(document.createTextNode(t));
     }
   }
 }
@@ -1118,10 +1132,12 @@ function appendChatItems(items) {
     chatlogEl.scrollHeight - chatlogEl.scrollTop - chatlogEl.clientHeight < 60;
   chatlogEl.querySelector('.chatempty')?.remove();
   for (const it of items) {
-    if (it.kind === 'tool') {
-      addToolChip(it.text);
+    if (it.kind === 'tool' || it.kind === 'progress') {
+      addToolChip(it.kind === 'progress' ? 'Ход работы · ' + it.text : it.text);
       continue;
     }
+    // Ignore future runtime events instead of interpreting them as assistant text.
+    if ((it.kind && it.kind !== 'text') || !['user', 'assistant'].includes(it.role)) continue;
     toolsGroup = null;
     if (it.role === 'user') {
       // реальная реплика из транскрипта пришла — снимаем оптимистичный дубль

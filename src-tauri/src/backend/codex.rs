@@ -51,7 +51,7 @@ fn find_rollout_in_registry(registry: &crate::agent_instances::Registry, sid: &s
 
 /// Чистое ядро поиска (тестируется на temp-каталоге без env): рекурсивный обход
 /// `root` в поисках файла с хвостом `-<sid>.jsonl`, самый свежий по mtime.
-fn find_rollout_in(root: &Path, sid: &str) -> Option<PathBuf> {
+pub(crate) fn find_rollout_in(root: &Path, sid: &str) -> Option<PathBuf> {
     if sid.is_empty() {
         return None;
     }
@@ -119,6 +119,29 @@ impl Backend for CodexBackend {
     fn transcript_dir_for(&self, _cwd: &str) -> Option<PathBuf> {
         None // Codex не кодирует cwd в путь; индекс — инкремент 6 (history)
     }
+    fn find_transcript_by_sid(&self, sid: &str) -> Option<PathBuf> {
+        find_rollout_by_sid(sid)
+    }
+    fn final_reply(&self, entries: &[Value]) -> Option<String> {
+        super::codex_transcript::full_final_reply(entries)
+    }
+    fn final_reply_from_stop(&self, payload: &serde_json::Map<String, Value>) -> Option<String> {
+        payload
+            .get("last_assistant_message")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|reply| !reply.is_empty())
+            .map(String::from)
+    }
+    fn supports_custom_answer(&self) -> bool {
+        false // в codex-пикере строки «Other» нет — свой текст доставить некуда
+    }
+    fn validate_model(&self, model: &str) -> Result<(), String> {
+        // Аллоулистом НЕ ограничиваем: набор моделей OpenAI дрейфует от релиза к
+        // релизу, и `models()` здесь — подсказка для пикера, а не полный список.
+        // Проверку на «чистоту» оставляем: строка уходит в tmux-пану.
+        crate::convo::skills::ensure_clean(model, "модель")
+    }
     fn resume_cmd(&self, sid: &str) -> String {
         format!("codex resume {sid}")
     }
@@ -143,6 +166,12 @@ impl Backend for CodexBackend {
     fn price(&self, _model: &str) -> (f64, f64) {
         // ОЦЕНКА (OpenAI прайс дрейфует) — gpt-5-класс, $/1M (in, out).
         (1.25, 10.0)
+    }
+    /// ОЦЕНКА: у gpt-5-класса окно 400k. Незнакомая модель — `None`: набор
+    /// моделей Codex дрейфует между релизами, и подставлять чужое число нельзя.
+    fn context_window(&self, model: &str) -> Option<u64> {
+        let m = model.to_lowercase();
+        (m.contains("gpt-5") || m.contains("gpt5") || m.contains("codex")).then_some(400_000)
     }
 }
 

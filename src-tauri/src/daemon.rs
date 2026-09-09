@@ -38,21 +38,16 @@ fn claude_notification_requires_attention(payload: &serde_json::Map<String, Valu
     }
 }
 
-/// Codex Stop carries the final assistant reply directly. Keep it in the
-/// in-memory effect path instead of persisting it in Session/state.json.
+/// Финал из Stop-хука, если агент его туда кладёт (умеет только Codex).
+/// Держим в in-memory эффекте, а не в Session/state.json.
+///
+/// Сам разбор payload — за бэкендом: имя поля принадлежит формату агента,
+/// а редьюсеру незачем его знать.
 fn stop_hook_reply(
     agent: crate::backend::Agent,
     payload: &serde_json::Map<String, Value>,
 ) -> Option<String> {
-    if agent != crate::backend::Agent::Codex {
-        return None;
-    }
-    payload
-        .get("last_assistant_message")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|reply| !reply.is_empty())
-        .map(String::from)
+    crate::backend::backend(agent).final_reply_from_stop(payload)
 }
 
 /// Асинхронна из-за удалённых сессий: их транскрипт лежит на другой машине.
@@ -135,9 +130,75 @@ struct LastToast {
     question: Option<Value>,
 }
 
+/* ================= имена чатов, данные человеком ================= */
+
+/// Ключ настроек с именами чатов: `{ "<sid>": "имя" }`.
+const CHAT_NAMES_KEY: &str = "chatNames";
+/// Потолок длины имени — как у автозаголовка (`ellipsize(…, 60)`): длиннее в
+/// строку списка всё равно не влезет.
+pub const MAX_CHAT_NAME: usize = 60;
+
+/// Имена из настроек. Ключа нет (старый файл) или он не объект — пусто, без шума.
+fn chat_names_of(root: &Value) -> HashMap<String, String> {
+    root.get(CHAT_NAMES_KEY)
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Что делать с именем: `Ok(Some)` — поставить, `Ok(None)` — снять, `Err` —
+/// отказ с причиной. Чистая: решение принимается без демона, потому и проверяемо.
+///
+/// `known` — сессия в реестре, `named` — имя у этого id уже записано. Снять или
+/// поменять имя можно и у ушедшей сессии (запись-то осталась), а вот дать имя
+/// тому, чего мы никогда не видели, значит молча копить мусор в настройках.
+///
+/// Слишком длинное имя — отказ, а не молчаливая обрезка: автор должен узнать,
+/// что до списка доехало не то, что он написал. Управляющие символы вычищаем:
+/// этот же текст уезжает именем tmux-окна.
+pub fn rename_decision(raw: &str, known: bool, named: bool) -> Result<Option<String>, String> {
+    if !known && !named {
+        return Err("сессия не найдена — переименовывать нечего".into());
+    }
+    // управляющие меняем на пробел, а не выбрасываем: иначе перенос строки
+    // склеил бы соседние слова
+    let name = one_line(
+        &raw.chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect::<String>(),
+    );
+    if name.is_empty() {
+        return Ok(None);
+    }
+    let len = name.chars().count();
+    if len > MAX_CHAT_NAME {
+        return Err(format!(
+            "имя длиннее {MAX_CHAT_NAME} символов ({len}) — сократи"
+        ));
+    }
+    Ok(Some(name))
+}
+
+/// Восстановление заголовка записи из state.json: усыновить легаси-заголовок,
+/// подставить имя из настроек, пересобрать видимый. Чистая — чтобы «имя пережило
+/// перезапуск» проверялось без живого демона.
+fn restore_title(s: &mut Session, names: &HashMap<String, String>) {
+    s.adopt_legacy_title();
+    s.name = names.get(&s.id).cloned();
+    s.retitle();
+}
+
 pub struct Daemon {
     pub app: AppHandle,
     pub sessions: Mutex<HashMap<String, Session>>,
+    /// Имена чатов, данные человеком: sid → имя. Зеркало `chatNames` из настроек;
+    /// реестр сессий для этого не годится — из него сессия исчезает по session-end.
+    names: Mutex<HashMap<String, String>>,
     pub settings: settings::Store,
     pub translator: ru::Translator,
     pub usage: std::sync::Arc<crate::usage::Usage>,
@@ -177,10 +238,17 @@ pub struct Daemon {
     pub caps: crate::capability::DaemonRegistry,
     /// Реестр сущностей плагинов (спека plugin-system §6.4): vm.*, agent.* …
     pub entities: crate::entities::EntityStore,
+    /// Хост плагинов (спека «всё есть плагин» §3): жизненный цикл, тумблеры,
+    /// статусы, вклады в трей и настройки — и встроенных, и внешних.
+    pub plugins: crate::plugin::Host,
     /// Токены потребителей сокета (R2): резолв token → Consumer (panel недостижим).
     pub tokens: crate::capability::tokens::TokenStore,
     /// Реестр ожидающих подтверждений агента (R4) — вне локов Daemon.
     pub pending: std::sync::Arc<crate::capability::confirm_panel::PendingConfirms>,
+    /// Учёт сессий, поднятых через `sessions.spawn`: кто поднял, зачем, когда.
+    /// Отдельно от реестра сессий: сессия уходит по session-end, а родитель и
+    /// «чья она» должны это пережить.
+    pub spawns: std::sync::Arc<crate::capability::native::spawn::Spawns>,
     /// STT-сервис (инкремент 9): распознавание речи. Fail-safe.
     pub stt: std::sync::Arc<crate::stt::SttService>,
     /// PTT-диктовка (инкремент 9): потребитель SttService + хоткей.
@@ -269,6 +337,12 @@ enum Effect {
         sid: String,
         payload: Value,
     },
+    /// Ход сессии закончен — событие для авто-цепочки. `at` = `done_at`: ключ,
+    /// по которому один и тот же «закончил» не пинает цепочку дважды.
+    ChainDone {
+        sid: String,
+        at: i64,
+    },
 }
 
 impl Daemon {
@@ -325,6 +399,7 @@ impl Daemon {
         Self {
             app,
             sessions: Mutex::new(HashMap::new()),
+            names: Mutex::new(chat_names_of(&root)),
             settings,
             translator: ru::Translator::load(),
             usage: std::sync::Arc::new(crate::usage::Usage::load()),
@@ -353,8 +428,10 @@ impl Daemon {
             voice,
             caps: crate::capability::build_registry(),
             entities: crate::entities::EntityStore::new(),
+            plugins: crate::plugin::build_host(),
             tokens: crate::capability::tokens::TokenStore::new(),
             pending: std::sync::Arc::new(crate::capability::confirm_panel::PendingConfirms::new()),
+            spawns: std::sync::Arc::new(crate::capability::native::spawn::Spawns::new()),
             stt,
             dictation,
             audio,
@@ -406,7 +483,7 @@ impl Daemon {
         crate::ipc::set_select_hotkeys(self, list.iter().any(|s| s.question.is_some()));
         self.power.on_sessions(self, &list); // плагины первыми — бейджи к трею уже свежие
         windows::emit_to_panel(&self.app, "state", &list);
-        windows::emit_to_panel(&self.app, "plugins", &self.power.statuses(self));
+        windows::emit_to_panel(&self.app, "plugins", &self.plugins.status_json(self));
         crate::tray::update(self, &list);
         self.persist();
     }
@@ -449,20 +526,76 @@ impl Daemon {
             return;
         };
         let cutoff = now_ms() - 24 * 3600 * 1000; // суточный мусор не тащим
+        let names = self.names.lock().unwrap().clone();
         let mut sessions = self.sessions.lock().unwrap();
         for mut s in arr {
             if s.id.is_empty() || s.updated_at <= cutoff {
                 continue;
             }
-            // англ. заголовки доезжают переводом из кэша
-            if let Some(t) = &s.title {
-                s.title = Some(self.translator.ru(t).0);
+            restore_title(&mut s, &names);
+            // англ. заголовки доезжают переводом из кэша; имя человека не трогаем
+            if let Some(t) = &s.auto_title {
+                s.auto_title = Some(self.translator.ru(t).0);
+                s.retitle();
             }
             if let Some(t) = &s.task {
                 s.task = Some(self.translator.ru(t).0);
             }
             sessions.insert(s.id.clone(), s);
         }
+    }
+
+    /* ================= имена чатов ================= */
+    /* Имя переживает и сессию, и демона, поэтому лежит в настройках, а не в
+       реестре: из реестра сессия исчезает по session-end, а имя должно
+       подхватиться, если ту же сессию поднимут через --resume. */
+
+    pub fn chat_name(&self, sid: &str) -> Option<String> {
+        self.names.lock().unwrap().get(sid).cloned()
+    }
+
+    /// Дать чату имя или снять его пустой строкой; возвращает (имя, что видно).
+    ///
+    /// Записываем сперва на диск, и только потом в память: если настройки не
+    /// сохранились, имя не должно жить до перезапуска призраком.
+    pub fn rename_chat(
+        self: &std::sync::Arc<Self>,
+        sid: &str,
+        raw: &str,
+    ) -> Result<(Option<String>, Option<String>), String> {
+        let known = self.sessions.lock().unwrap().contains_key(sid);
+        let named = self.names.lock().unwrap().contains_key(sid);
+        let name = rename_decision(raw, known, named)?;
+
+        let next: HashMap<String, String> = {
+            let mut m = self.names.lock().unwrap().clone();
+            match &name {
+                Some(n) => m.insert(sid.to_string(), n.clone()),
+                None => m.remove(sid),
+            };
+            m
+        };
+        let saved = self
+            .settings
+            .save(serde_json::Map::from_iter([(
+                CHAT_NAMES_KEY.to_string(),
+                serde_json::to_value(&next).map_err(|e| e.to_string())?,
+            )]));
+        // settings.save при отказе записи возвращает ПРЕЖНИЕ настройки — молча
+        // разойтись с диском тут значит потерять имя на следующем старте.
+        if chat_names_of(&saved).get(sid) != name.as_ref() {
+            return Err("имя не сохранилось в настройках — подробности в логе".into());
+        }
+        *self.names.lock().unwrap() = next;
+
+        let mut shown = name.clone();
+        self.with_session(sid, |s| {
+            s.name = name.clone();
+            s.retitle(); // снятие имени тут же возвращает автозаголовок
+            shown = s.title.clone();
+        });
+        self.push();
+        Ok((name, shown))
     }
 
     /* ================= русификация ================= */
@@ -498,19 +631,25 @@ impl Daemon {
         }
     }
 
-    /// Долить готовые переводы в реестр (title/task хранят оригинал до перевода).
+    /// Долить готовые переводы в реестр (autoTitle/task хранят оригинал до
+    /// перевода). Имя человека переводу не подлежит — как он назвал, так и есть.
     fn apply_translations(self: &std::sync::Arc<Self>) {
         let mut changed = false;
         {
             let mut sessions = self.sessions.lock().unwrap();
             for s in sessions.values_mut() {
-                for field in [&mut s.title, &mut s.task] {
+                let mut hit = false;
+                for field in [&mut s.auto_title, &mut s.task] {
                     if let Some(v) = field {
                         if let Some(tr) = self.translator.lookup(v) {
                             *v = tr;
-                            changed = true;
+                            hit = true;
                         }
                     }
+                }
+                if hit {
+                    s.retitle();
+                    changed = true;
                 }
             }
         }
@@ -1053,6 +1192,9 @@ impl Daemon {
         }
 
         let mut effects: Vec<Effect> = Vec::new();
+        // до лока реестра: сессию могли переименовать в прошлой жизни и поднять
+        // через --resume — имя ждёт её в настройках
+        let known_name = self.chat_name(&sid);
         {
             let mut sessions = self.sessions.lock().unwrap();
             if sessions.get(&sid).and_then(|s| s.provider_event_at).is_some_and(|at| now < at) { return; }
@@ -1061,8 +1203,12 @@ impl Daemon {
             }
 
             if event == "session-end" {
-                sessions.remove(&sid);
+                let existed = sessions.remove(&sid).is_some();
                 drop(sessions);
+                // Цепочка ждала хода, которого уже не будет, — говорим словами.
+                if existed {
+                    crate::agent::chain::on_session_gone(self, &sid, "закрыта");
+                }
                 self.push();
                 return;
             }
@@ -1090,7 +1236,7 @@ impl Daemon {
 
             let s = sessions
                 .entry(sid.clone())
-                .or_insert_with(|| Session::new(sid.clone(), now));
+                .or_insert_with(|| { let mut s = Session::new(sid.clone(), now); s.name = known_name; s.retitle(); s });
             s.provider_event_at = Some(now);
             for (field, slot) in [
                 ("instanceId", &mut s.instance_id), ("instanceLabel", &mut s.instance_label),
@@ -1135,11 +1281,12 @@ impl Daemon {
             {
                 s.remote = Some(remote.to_string());
             }
-            // Codex кладёт модель в КАЖДЫЙ хук-payload — ставим напрямую (у Claude
-            // модель майнится из транскрипта в refresh_meta). Не перетираем свежий
-            // ручной выбор: тот же 30с-guard по model_at, что и в refresh_meta.
+            // Codex кладёт модель в КАЖДЫЙ хук-payload, Kimi — в SessionStart.
+            // Ставим напрямую (у Claude модель майнится из транскрипта в
+            // refresh_meta). Не перетираем свежий ручной выбор: тот же 30с-guard
+            // по model_at, что и в refresh_meta.
             let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
-            if agent == crate::backend::Agent::Codex {
+            if matches!(agent, crate::backend::Agent::Codex | crate::backend::Agent::Kimi) {
                 if let Some(m) = p
                     .get("model")
                     .and_then(Value::as_str)
@@ -1203,6 +1350,12 @@ impl Daemon {
 
             /* ---- сам переход ---- */
             match event {
+                // Пульс живой сессии (только Kimi: SessionHeartbeat раз в 60 с).
+                // Статус НЕ трогаем — сессия может законно молчать часами, будучи
+                // живой. Ценность в `updated_at`, который обновлён выше: он и
+                // спасает working-сессию от «связь потеряна» в reconcile.
+                "heartbeat" => {}
+
                 "session-start" => {
                     s.status = Status::Idle;
                     s.detail = String::new();
@@ -1284,7 +1437,7 @@ impl Daemon {
                     } else {
                         s.status = Status::Working;
                         track_activity(s, tool, p.get("tool_input"));
-                        if s.branch.is_none() && s.title.is_none() {
+                        if s.branch.is_none() && s.auto_title.is_none() {
                             effects.push(Effect::RefreshMeta { sid: sid.clone() });
                             // ожила после рестарта демона
                         }
@@ -1364,6 +1517,20 @@ impl Daemon {
                         revision: s.lifecycle_revision,
                     });
                     effects.push(Effect::TurnSummary { sid: sid.clone() });
+                    // Единственная точка, где ход сессии объявляется законченным:
+                    // сюда и подписана авто-цепочка. `now` = `done_at` — по нему
+                    // же она отличает повторный «закончил» от следующего.
+                    effects.push(Effect::ChainDone { sid: sid.clone(), at: now });
+                }
+
+                // Ход прерван человеком (у Kimi Stop при этом НЕ приходит).
+                // Ход закончился — значит статус меняем; но цепочку НЕ будим:
+                // человек оборвал работу руками, и авто-продолжение затеяло бы
+                // ровно то, что он только что остановил.
+                "interrupt" => {
+                    s.status = Status::Idle;
+                    s.detail = "Прервано".into();
+                    effects.push(Effect::RefreshMeta { sid: sid.clone() });
                 }
 
                 "stop-failure" => {
@@ -1373,14 +1540,15 @@ impl Daemon {
                     });
                 }
 
-                // Codex: PermissionRequest — агент ждёт подтверждения инструмента
-                // (аналог Claude notification, но без поля message). → Waiting.
+                // PermissionRequest — агент ждёт подтверждения инструмента (аналог
+                // Claude notification, но без поля message). → Waiting.
+                // Шлют Codex и Kimi; имя берём у агента, а не пишем литералом.
                 "permission" => {
                     let tool = p.get("tool_name").and_then(Value::as_str).unwrap_or("");
                     let msg = if tool.is_empty() {
-                        "Codex ждёт подтверждения".to_string()
+                        format!("{} ждёт подтверждения", agent.title())
                     } else {
-                        format!("Codex: подтвердить {tool}")
+                        format!("{}: подтвердить {tool}", agent.title())
                     };
                     let is_new = !(s.status == Status::Waiting && s.detail == msg);
                     s.status = Status::Waiting;
@@ -1482,8 +1650,11 @@ impl Daemon {
                     // подтверждённый лимит, не на транзиентные сбои
                     tauri::async_runtime::spawn(async move {
                         crate::limits::on_stop_failure(&d, &sid, &payload);
+                        // Сорванный ход — тоже итог: цепочка обязана узнать причину.
+                        crate::agent::chain::on_session_failed(&d, &sid, &payload);
                     });
                 }
+                Effect::ChainDone { sid, at } => crate::agent::chain::on_session_done(&d, &sid, at),
             }
         }
     }
@@ -1513,14 +1684,36 @@ impl Daemon {
     /// одноимённый файл этой машины. Поэтому ВСЁ, что разбирает транскрипт
     /// (мета, сводки, финальный ответ, карточки ходов), ходит сюда.
     pub(crate) async fn transcript_text(&self, s: &Session, max_bytes: u64) -> Option<String> {
+        self.transcript_text_skipped(s, max_bytes).await.map(|(t, _)| t)
+    }
+
+    /// То же + сколько байт ГОЛОВЫ осталось за окном чтения.
+    ///
+    /// Нужно `chats.read`: недочитанное начало обязано быть названо вслух, иначе
+    /// хвост выглядит целым разговором. Число приблизительное (обрезка по целым
+    /// строкам, lossy-UTF8) — это индикатор «есть что дочитать», не адрес.
+    pub(crate) async fn transcript_text_skipped(
+        &self,
+        s: &Session,
+        max_bytes: u64,
+    ) -> Option<(String, u64)> {
         let tr = s.transcript.as_deref()?;
         match &s.remote {
-            None => crate::transcript::read_recent_text(std::path::Path::new(tr), max_bytes),
+            None => {
+                let text = crate::transcript::read_recent_text(std::path::Path::new(tr), max_bytes)?;
+                let size = std::fs::metadata(tr).map(|m| m.len()).unwrap_or(0);
+                let skipped = size.saturating_sub(text.len() as u64);
+                Some((text, skipped))
+            }
             Some(name) => {
                 let node = self.remotes.node(name)?;
                 let client = node.client().ok()?;
                 match client.tail_text(tr, max_bytes).await {
-                    Ok(chunk) => chunk.map(|(text, _)| text),
+                    // `next` — байт за концом отданного куска: голова = next − длина
+                    Ok(chunk) => chunk.map(|(text, next)| {
+                        let skipped = next.saturating_sub(text.len() as u64);
+                        (text, skipped)
+                    }),
                     Err(e) => {
                         crate::log::line(&format!("[remote] {name}: транскрипт не прочитан — {e}"));
                         None
@@ -1531,12 +1724,39 @@ impl Daemon {
     }
 
     /// Транскрипт сессии → (бэкенд, записи). None — сессии/файла нет.
+    ///
+    /// Гонка, из-за которой цепочка теряла итог предыдущего шага. На `"stop"`
+    /// разом пускаются независимые эффекты: `RefreshMeta` резолвит путь к
+    /// транскрипту (у kimi это ЕДИНСТВЕННЫЙ способ — хук пути не приносит) и
+    /// делает это в своей таске после дебаунса в 1500 мс, а `ChainDone` читает
+    /// транскрипт немедленно. На первом ходе свежей сессии `s.transcript` ещё
+    /// пуст, и чтение сдавалось до того, как дело доходило до файла: цепочка
+    /// получала «итог не собрался» и вставала.
+    ///
+    /// Поэтому пустой путь резолвим ЗДЕСЬ И СРАЗУ, тем же вызовом, что и
+    /// `refresh_meta`. Ждать чужую таску, чтобы прочитать файл, который лежит на
+    /// диске, — это ждать не файла, а расписания.
     pub(crate) async fn turn_entries(
         &self,
         sid: &str,
     ) -> Option<(&'static dyn crate::backend::Backend, Vec<Value>)> {
         let s = self.session(sid)?;
         let be = crate::backend::backend(crate::backend::Agent::from_opt(s.agent.as_deref()));
+        // У сессии с узла путь местным поиском не найти — там своя файловая
+        // система, и подстановка местного файла была бы хуже отсутствия.
+        if s.transcript.is_none() && s.remote.is_none() {
+            let path = be.find_transcript_by_sid(sid)?;
+            let text = crate::transcript::read_recent_text(&path, 512 * 1024)?;
+            let p = path.to_string_lossy().into_owned();
+            self.with_session(sid, |s| {
+                // Не затираем: пока мы читали, `refresh_meta` мог дорезолвить
+                // своё, и его значение ничем не хуже нашего.
+                if s.transcript.is_none() {
+                    s.transcript = Some(p);
+                }
+            });
+            return Some((be, be.entries_from_text(&text)));
+        }
         let text = self.transcript_text(&s, 512 * 1024).await?;
         Some((be, be.entries_from_text(&text)))
     }
@@ -1714,18 +1934,9 @@ impl Daemon {
             // Хук финал не принёс — достаём из транскрипта ТОЙ машины, где
             // живёт сессия (для удалённой это круг по ssh к её узлу).
             let reply = prefer_final_reply(hook_reply, || async {
-                let is_claude = agent == crate::backend::Agent::Claude;
-                let max = if is_claude { 256 * 1024 } else { 512 * 1024 };
-                let text = self.transcript_text(&s, max).await?;
-                if is_claude {
-                    transcript::final_reply_from(transcript::chain_from_entries(
-                        transcript::entries_from_text(&text),
-                    ))
-                } else {
-                    crate::backend::codex_transcript::full_final_reply(
-                        &crate::backend::backend(agent).entries_from_text(&text),
-                    )
-                }
+                let be = crate::backend::backend(agent);
+                let text = self.transcript_text(&s, be.transcript_tail_bytes()).await?;
+                be.final_reply(&be.entries_from_text(&text))
             })
             .await?;
             // длинный ответ режем — haiku отвечает быстрее, а сути хватает
@@ -1779,8 +1990,9 @@ impl Daemon {
             d.busy_release("meta", &sid);
             let Some(snap) = d.session(&sid) else { return };
 
-            let is_codex = crate::backend::Agent::from_opt(snap.agent.as_deref())
-                == crate::backend::Agent::Codex;
+            let be = crate::backend::backend(crate::backend::Agent::from_opt(
+                snap.agent.as_deref(),
+            ));
 
             // Транскрипт: обычно из hook-payload (transcript_path). Codex на машине
             // с невыданным hook-trust мог пропустить SessionStart → payload без пути.
@@ -1791,8 +2003,8 @@ impl Daemon {
             // чужой одноимённый лог. Удалённой сессии путь приносит её хук.
             match snap.transcript.as_ref() {
                 Some(_) => {}
-                None if is_codex && snap.remote.is_none() => {
-                    let Some(path) = crate::backend::codex::find_rollout_by_sid(&sid) else {
+                None if snap.remote.is_none() => {
+                    let Some(path) = be.find_transcript_by_sid(&sid) else {
                         return;
                     };
                     let p = path.to_string_lossy().into_owned();
@@ -1814,19 +2026,9 @@ impl Daemon {
                 None => return,
             };
 
-            // ветка: Claude — gitBranch в каждой записи; в rollout Codex её нет —
-            // фоллбэк для обоих: .git/HEAD по cwd сессии (#24).
-            let branch = if is_codex {
-                None
-            } else {
-                entries.iter().rev().find_map(|e| {
-                    e.get("gitBranch")
-                        .and_then(Value::as_str)
-                        .filter(|b| !b.is_empty() && *b != "HEAD")
-                        .map(String::from)
-                })
-            }
-            .or_else(|| {
+            // ветка: Claude — gitBranch в каждой записи; Codex и Kimi её в лог не
+            // пишут — общий фолбэк: .git/HEAD по cwd сессии (#24).
+            let branch = be.extract_branch(&entries).or_else(|| {
                 // .git читаем на ЭТОЙ машине: у сессии с узла тот же путь может
                 // случайно существовать и здесь — и тогда мы показали бы ветку
                 // чужого рабочего дерева. Лучше без ветки, чем неправильная.
@@ -1835,23 +2037,11 @@ impl Daemon {
                     .filter(|_| snap.remote.is_none())
                     .and_then(|cwd| crate::git::branch_of(std::path::Path::new(cwd)))
             });
-            // заголовок: Claude — type:ai-title/summary; Codex — первая user-реплика.
-            let raw_title = if is_codex {
-                crate::backend::codex_transcript::extract_title(&entries)
-            } else {
-                entries.iter().rev().find_map(|e| {
-                    let t = match e.get("type").and_then(Value::as_str) {
-                        Some("ai-title") => e.get("aiTitle"),
-                        Some("summary") => e.get("summary"),
-                        _ => None,
-                    };
-                    t.and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|t| !t.is_empty())
-                        .map(String::from)
-                })
-            };
-            let title = raw_title.map(|t| d.ru(&ellipsize(&one_line(&t), 60)));
+            // заголовок: Claude — type:ai-title/summary; Codex и Kimi — первая
+            // user-реплика (свой заголовок они не генерируют).
+            let title = be
+                .extract_title(&entries)
+                .map(|t| d.ru(&ellipsize(&one_line(&t), 60)));
 
             // модель: свежий ручной выбор (/model) не трогаем. Codex — из последнего
             // turn_context.model в rollout (раньше полагались только на hook-payload;
@@ -1860,20 +2050,18 @@ impl Daemon {
             let model_fresh = snap.model_at.is_some_and(|at| now_ms() - at <= 30_000);
             let model = if model_fresh {
                 None
-            } else if is_codex {
-                crate::backend::codex_transcript::extract_model(&entries).map(|m| {
-                    crate::backend::backend(crate::backend::Agent::Codex).friendly_model(&m)
-                })
             } else {
-                transcript::extract_claude_model(&entries)
+                be.extract_model(&entries)
+                    .map(|m| be.friendly_model(&m))
                     .or_else(|| {
-                        // Фолбэк роется в ~/.claude/projects ЭТОЙ машины: для
+                        // Фолбэк роется в каталоге проектов ЭТОЙ машины: для
                         // сессии с узла это в лучшем случае мимо, в худшем —
-                        // модель чужого проекта с тем же путём.
+                        // модель чужого проекта с тем же путём. Есть только у
+                        // агентов, раскладывающих логи по проектам (Claude).
                         snap.cwd
                             .as_deref()
                             .filter(|_| snap.remote.is_none())
-                            .and_then(transcript::read_model_from_project)
+                            .and_then(|cwd| be.fallback_model_for_cwd(cwd))
                     })
             };
 
@@ -1886,17 +2074,21 @@ impl Daemon {
                         changed = true;
                     }
                 }
+                // автозаголовок кладём всегда, а видимый собирает retitle():
+                // имя человека сильнее генерации, иначе разбор транскрипта
+                // затирал бы его при каждом ходе
                 if let Some(t) = title {
-                    if s.title.as_deref() != Some(&t) {
-                        s.title = Some(t.clone());
+                    if s.auto_title.as_deref() != Some(&t) {
+                        s.auto_title = Some(t);
+                        s.retitle();
                         changed = true;
-                        // обратный канал: терминал подписывает сам себя
-                        if let Some(pane) = &s.tmux_pane {
-                            let name = ellipsize(&t, 24);
-                            if s.renamed_to.as_deref() != Some(&name) {
-                                rename = Some((pane.clone(), name));
-                            }
-                        }
+                    }
+                }
+                // обратный канал: терминал подписывает сам себя — тем, что видно
+                if let (Some(pane), Some(t)) = (&s.tmux_pane, s.title.as_deref()) {
+                    let name = ellipsize(t, 24);
+                    if s.renamed_to.as_deref() != Some(&name) {
+                        rename = Some((pane.clone(), name));
                     }
                 }
                 if let Some(m) = model {
@@ -2137,29 +2329,43 @@ impl Daemon {
      * working-сессии без событий 15 минут считаем потерянными. */
 
     pub async fn reconcile_sessions(self: &std::sync::Arc<Self>) {
+        // Утренняя сводка ждёт ВРЕМЕНИ, а не события: если ночью что-то
+        // накопилось, а утром человек не написал и ни одна сессия не закончила
+        // ход, по событиям она не выйдет никогда. Тик демона — тот будильник,
+        // которого ей не хватало; проверка дешёвая (пустой журнал отваливается
+        // первой же строкой), поэтому отдельного расписания не заводим.
+        crate::agent::chain::morning_check(&self.app);
+
         // Сверка с живым tmux: удаляем сессии, чья пана умерла (жёстко убитый
         // терминал не шлёт SessionEnd); working без событий 15 минут — потеряна.
-        // Сессии заводятся ТОЛЬКО из хуков — здесь ничего не подхватываем.
         let alive: Option<std::collections::HashSet<String>> = match tmux::list_panes_meta().await {
             Ok(Some(panes)) => Some(panes.iter().map(|p| p.pane_id.clone()).collect()),
             Ok(None) => None, // tmux не установлен — реестр не трогаем
             Err(()) => Some(std::collections::HashSet::new()), // ошибка = сервер пуст
         };
-        let remote_alive = self.remote_panes().await;
+        let remote_alive = self.remote_live().await;
 
         let mut changed = false;
+        // Убитый терминал (в том числе снятый за изоляцию) не шлёт session-end:
+        // для цепочки это такой же «сессии больше нет», и молчать о нём нельзя.
+        let mut vanished: Vec<String> = Vec::new();
         {
             let mut sessions = self.sessions.lock().unwrap();
             let now = now_ms();
-            sessions.retain(|_, s| {
+            sessions.retain(|id, s| {
                 let dead = match &s.remote {
-                    // Сессия с узла: её pid — из таблицы процессов ТОЙ машины.
-                    // Локально он не значит ничего (а совпасть с чужим живым
-                    // процессом — вполне может), поэтому судим только по панам
-                    // узла. Узла нет в ответе — связи нет, судить не по чему.
+                    // Сессия с узла. Судим по процессу агента на ТОЙ машине —
+                    // ровно как локально, только живость pid спрашиваем у узла.
+                    //
+                    // Раньше здесь смотрели только на паны `-L jarvis`, и это
+                    // выселяло живые сессии: `$TMUX_PANE` хук берёт из ЛЮБОГО
+                    // tmux-сервера, а человек поднимает агента в своём обычном.
+                    // Пана `%3`, которой в `-L jarvis` нет, читалась как смерть
+                    // — раз в полминуты, круг за кругом.
+                    //
+                    // Узла нет в ответе — связи нет, судить не по чему.
                     Some(name) => match remote_alive.get(name) {
-                        Some(set) => (s.tmux_pane.as_ref())
-                            .is_some_and(|pane| !set.contains(pane)),
+                        Some(live) => remote_is_dead(s, live),
                         None => false,
                     },
                     // Жив ли claude? Главный критерий — его процесс (pid = $PPID
@@ -2181,8 +2387,10 @@ impl Daemon {
                         freeze_board(s);
                         s.status = Status::Done;
                         s.detail = "сессия остановлена".into();
+                        vanished.push(id.clone()); // строка в списке остаётся, работа — нет
                         return true;
                     }
+                    vanished.push(id.clone());
                     return false; // claude мёртв — сессии нет
                 }
                 true
@@ -2196,44 +2404,113 @@ impl Daemon {
                 }
             }
         }
+        for sid in vanished {
+            crate::agent::chain::on_session_gone(self, &sid, "оборвалась (терминал не отвечает)");
+        }
+        // Подбор — ПОСЛЕ уборки: сессия, которую мы только что выселили как
+        // мёртвую, не должна тут же вернуться подобранной.
+        let adopted = self.adopt_remote_agents(&remote_alive);
+        changed |= !adopted.is_empty();
+        for sid in adopted {
+            self.refresh_meta(sid); // заголовок, модель, статус — из транскрипта
+        }
         if changed {
             self.push();
         }
     }
 
-    /// Живые паны на каждом узле. Узлы, до которых нет связи, в карту НЕ
-    /// попадают: «не смог спросить» и «пан нет» — разные вещи, и путать их
-    /// значит выселять живые сессии на каждом моргании сети.
+    /// Что живо на каждом узле: паны `-L jarvis`, живые pid и найденные там
+    /// агенты. Узлы, до которых нет связи, в карту НЕ попадают: «не смог
+    /// спросить» и «никого нет» — разные вещи, и путать их значит выселять
+    /// живые сессии на каждом моргании сети.
     ///
     /// Узлы опрашиваем параллельно: один зависший VPS не должен задерживать
     /// сверку остальных дольше её же периода.
-    async fn remote_panes(&self) -> HashMap<String, HashSet<String>> {
+    async fn remote_live(&self) -> HashMap<String, RemoteLive> {
         let nodes = self.remotes.all();
         if nodes.is_empty() {
             return HashMap::new();
         }
+        // Про какие pid спрашивать — знаем только мы: это pid'ы сессий этого
+        // узла в нашем реестре.
+        let mut pids: HashMap<String, Vec<i64>> = HashMap::new();
+        for s in self.sessions.lock().unwrap().values() {
+            if let (Some(name), Some(pid)) = (s.remote.as_deref(), s.pid) {
+                if pid > 0 {
+                    pids.entry(name.to_string()).or_default().push(pid);
+                }
+            }
+        }
         let mut tasks = Vec::with_capacity(nodes.len());
         for node in nodes {
+            let want = pids.remove(&node.cfg.name).unwrap_or_default();
             tasks.push(tokio::spawn(async move {
-                let panes = node.client()?.panes().await?;
-                if !panes.error.is_empty() {
+                let client = node.client()?;
+                let name = node.cfg.name.clone();
+                match client.agents(&want).await {
+                    Ok(r) if r.error.is_empty() => Ok::<_, String>((
+                        name,
+                        RemoteLive {
+                            panes: r.panes.into_iter().collect(),
+                            alive: r.alive.into_iter().collect(),
+                            agents: r.agents,
+                            knows_pids: true,
+                        },
+                    )),
                     // tmux на той машине не установлен или сервер не поднят —
                     // это не пустой список пан, а отсутствие ответа
-                    return Err(panes.error);
+                    Ok(r) => Err(r.error),
+                    // Узел старее приложения: `/agents` он не знает. Живём как
+                    // раньше — по панам, без подбора.
+                    Err(_) => {
+                        let panes = client.panes().await?;
+                        if !panes.error.is_empty() {
+                            return Err(panes.error);
+                        }
+                        Ok((
+                            name,
+                            RemoteLive {
+                                panes: panes.panes.into_iter().map(|p| p.pane).collect(),
+                                alive: HashSet::new(),
+                                agents: Vec::new(),
+                                knows_pids: false,
+                            },
+                        ))
+                    }
                 }
-                Ok::<_, String>((
-                    node.cfg.name.clone(),
-                    panes.panes.into_iter().map(|p| p.pane).collect::<HashSet<_>>(),
-                ))
             }));
         }
         let mut out = HashMap::new();
         for t in tasks {
-            if let Ok(Ok((name, panes))) = t.await {
-                out.insert(name, panes);
+            if let Ok(Ok((name, live))) = t.await {
+                out.insert(name, live);
             }
         }
         out
+    }
+
+    /// Подобрать сессии, о которых хуков не приходило. Возвращает их ключи —
+    /// по ним потом дочитывается мета из транскрипта.
+    fn adopt_remote_agents(
+        self: &std::sync::Arc<Self>,
+        live: &HashMap<String, RemoteLive>,
+    ) -> Vec<String> {
+        let mut adopted = Vec::new();
+        let mut sessions = self.sessions.lock().unwrap();
+        let now = now_ms();
+        for (name, l) in live {
+            for s in adoption_plan(&sessions, name, &l.agents, now) {
+                crate::log::line(&format!(
+                    "[remote] {name}: подобрал сессию {} (pid {}, пана {})",
+                    ellipsize(&s.id, name.len() + 9),
+                    s.pid.unwrap_or(0),
+                    s.tmux_pane.as_deref().unwrap_or("—"),
+                ));
+                adopted.push(s.id.clone());
+                sessions.insert(s.id.clone(), s);
+            }
+        }
+        adopted
     }
 
     /* ================= диагностика / метрики ================= */
@@ -2698,8 +2975,36 @@ fn freeze_board(s: &mut Session) {
     }
 }
 
+/// Пришло ли событие из терминального клиента агента.
+///
+/// Kimi обслуживает одним конфигом несколько поверхностей: CLI, `kimi web` и
+/// ACP-режим для IDE — и хуки шлют все. У не-CLI сессий нет ни терминала, ни
+/// tmux-паны: в панели они были бы неуправляемыми призраками, которым нельзя ни
+/// ответить, ни сменить модель. Поэтому пускаем только `kimi_code_cli`.
+///
+/// Claude и Codex поля `client_type` не шлют вовсе — для них проверка прозрачна.
+fn from_terminal_client(p: &serde_json::Map<String, Value>) -> bool {
+    match p.get("client_type").and_then(Value::as_str) {
+        Some(ct) => ct == "kimi_code_cli",
+        None => true,
+    }
+}
+
 /// Жив ли процесс с таким pid. `kill(pid, 0)`: 0 — жив; EPERM — жив, но чужой
 /// (всё равно существует); ESRCH — мёртв. Дёшево, без spawn. Используется в
+/// Снимок «что живо» на одном узле — ответ его `/agents`.
+struct RemoteLive {
+    /// Паны `-L jarvis` на той машине.
+    panes: HashSet<String>,
+    /// Живые pid из тех, про которые мы спрашивали.
+    alive: HashSet<i64>,
+    /// Агенты, найденные в таблице процессов той машины.
+    agents: Vec<crate::remote::RemoteAgent>,
+    /// Узел ответил на `/agents`, то есть про pid ему верить можно. У старого
+    /// узла этой ручки нет, и судить приходится по панам, как раньше.
+    knows_pids: bool,
+}
+
 /// reconcile для уборки сессий, чей claude завершился.
 fn pid_alive(pid: i64) -> bool {
     if pid <= 0 {
@@ -2716,6 +3021,81 @@ fn pid_alive(pid: i64) -> bool {
 /// `session-end` и был заменён новым в той же пане. Снимаем призраков, иначе
 /// ответ, адресованный призраку, уйдёт в живую сессию той же паны (мисроутинг).
 /// Возвращает id выселенных сессий — для лога и обновления UI.
+/// Мертва ли удалённая сессия по снимку узла.
+///
+/// Судим по ПРОЦЕССУ агента — ровно как локально, где главный критерий это pid
+/// (`$PPID` хука), а пана лишь запасной. Раньше у удалённой смотрели только на
+/// паны `-L jarvis`, и это выселяло живые сессии: `$TMUX_PANE` хук берёт из
+/// ЛЮБОГО tmux-сервера, а человек поднимает агента в своём обычном. Пана `%3`,
+/// которой в `-L jarvis` нет, читалась как смерть — раз в полминуты, круг за
+/// кругом.
+fn remote_is_dead(s: &Session, live: &RemoteLive) -> bool {
+    match s.pid {
+        Some(pid) if pid > 0 && live.knows_pids => !live.alive.contains(&pid),
+        // pid не знаем (или узел старый и про живость не отвечает) — остаётся
+        // пана, прежний критерий
+        _ => (s.tmux_pane.as_ref()).is_some_and(|pane| !live.panes.contains(pane)),
+    }
+}
+
+/// Каких агентов узла стоит завести в реестр.
+///
+/// Хуки берутся снапшотом на старте сессии: агент, поднятый на узле до
+/// установки узла (или просто руками, до перезапуска), не пришлёт ни одного
+/// события и в списке не появится никогда — хотя работает. Узел видит его в
+/// таблице процессов и умеет назвать транскрипт; всё остальное — статус,
+/// заголовок, модель — доберёт `refresh_meta` из этого транскрипта, тем же
+/// кодом, что и для сессии, заведённой хуком.
+///
+/// Ошибка подбора самолечится: первый же настоящий хук из этой паны выселит
+/// подобранную сессию (инвариант «одна пана — одна сессия», `evict_pane`).
+fn adoption_plan(
+    sessions: &HashMap<String, Session>,
+    remote: &str,
+    agents: &[crate::remote::RemoteAgent],
+    now: i64,
+) -> Vec<Session> {
+    let mut out: Vec<Session> = Vec::new();
+    for a in agents {
+        if a.session_id.is_empty() {
+            continue; // узел не связал процесс с транскриптом — гадать не будем
+        }
+        let key = format!("{remote}:{}", a.session_id);
+        if sessions.contains_key(&key) || out.iter().any(|s| s.id == key) {
+            continue;
+        }
+        // Этого агента мы уже знаем под другим id — по его процессу или по его
+        // пане. Вторая строка была бы двойником одной и той же работы.
+        let known = |s: &Session| {
+            s.remote.as_deref() == Some(remote)
+                && (s.pid == Some(a.pid)
+                    || (!a.pane.is_empty() && s.tmux_pane.as_deref() == Some(a.pane.as_str())))
+        };
+        if sessions.values().any(known) || out.iter().any(known) {
+            continue;
+        }
+        let mut s = Session::new(key, now);
+        s.remote = Some(remote.to_string());
+        s.agent = Some(a.agent.clone());
+        s.pid = Some(a.pid);
+        s.status = Status::Idle;
+        s.detail = "подобрана на узле — хуков не было".into();
+        if !a.cwd.is_empty() {
+            s.project = Some(basename(&a.cwd));
+            s.cwd = Some(a.cwd.clone());
+        }
+        if !a.pane.is_empty() {
+            s.tmux_pane = Some(a.pane.clone());
+            s.tmux_name = Some(a.session.clone());
+        }
+        if !a.transcript.is_empty() {
+            s.transcript = Some(a.transcript.clone());
+        }
+        out.push(s);
+    }
+    out
+}
+
 fn evict_pane(
     sessions: &mut HashMap<String, Session>,
     keep_sid: &str,
@@ -2738,6 +3118,73 @@ fn evict_pane(
         sessions.remove(g);
     }
     ghosts
+}
+
+#[cfg(test)]
+mod chat_name_tests {
+    use super::*;
+
+    #[test]
+    fn empty_value_means_drop_the_name() {
+        assert_eq!(rename_decision("", true, false), Ok(None));
+        assert_eq!(rename_decision("   \n ", true, true), Ok(None));
+    }
+
+    #[test]
+    fn name_is_collapsed_to_one_clean_line() {
+        // тот же текст уезжает именем tmux-окна — управляющим символам там не место
+        assert_eq!(
+            rename_decision("  БД\u{7}  и\nмиграции ", true, false),
+            Ok(Some("БД и миграции".into()))
+        );
+    }
+
+    // Ни один отказ не молчит: у каждого названа причина.
+    #[test]
+    fn refusals_name_their_reason() {
+        let long = "я".repeat(MAX_CHAT_NAME + 1);
+        let e = rename_decision(&long, true, false).unwrap_err();
+        assert!(e.contains(&MAX_CHAT_NAME.to_string()) && e.contains("сократи"), "{e}");
+        // ровно на границе — ещё имя, а не отказ
+        assert!(rename_decision(&"я".repeat(MAX_CHAT_NAME), true, false).is_ok());
+
+        let e = rename_decision("БД", false, false).unwrap_err();
+        assert!(e.contains("не найдена"), "{e}");
+        // …а вот снять имя у ушедшей сессии можно: запись-то осталась
+        assert_eq!(rename_decision("", false, true), Ok(None));
+        assert_eq!(rename_decision("Иначе", false, true), Ok(Some("Иначе".into())));
+    }
+
+    #[test]
+    fn names_are_read_from_settings_and_missing_key_is_not_an_error() {
+        // старый settings.json ключа не знает — читается без потерь
+        assert!(chat_names_of(&serde_json::json!({ "theme": "dark" })).is_empty());
+        assert!(chat_names_of(&serde_json::json!({ "chatNames": "мусор" })).is_empty());
+        let m = chat_names_of(&serde_json::json!({
+            "chatNames": { "abc": "БД", "": "ничьё", "def": "", "ghi": 7 }
+        }));
+        assert_eq!(m.get("abc").map(String::as_str), Some("БД"));
+        assert_eq!(m.len(), 1, "пустые и не-строки не имена");
+    }
+
+    /// Главное обещание: имя переживает перезапуск демона. state.json его не
+    /// хранит как истину — истина в настройках, и она подхватывается при разборе.
+    #[test]
+    fn name_survives_a_restart_and_reset_gives_the_auto_title_back() {
+        let names = HashMap::from([("abc".to_string(), "БД".to_string())]);
+        // ...даже если запись писала прошлая версия и знает только title
+        let raw = r#"{"id":"abc","status":"done","detail":"","createdAt":1,"updatedAt":2,
+            "title":"Fix the migration parser"}"#;
+        let mut s: Session = serde_json::from_str(raw).unwrap();
+        restore_title(&mut s, &names);
+        assert_eq!(s.title.as_deref(), Some("БД"), "имя не пережило перезапуск");
+        assert_eq!(s.auto_title.as_deref(), Some("Fix the migration parser"));
+
+        // сняли имя (в настройках его больше нет) — вернулся автозаголовок
+        let mut again: Session = serde_json::from_str(raw).unwrap();
+        restore_title(&mut again, &HashMap::new());
+        assert_eq!(again.title.as_deref(), Some("Fix the migration parser"));
+    }
 }
 
 #[cfg(test)]
@@ -2788,6 +3235,91 @@ mod tests {
         let mut s = sess(id, Some(pane));
         s.remote = Some(node.to_string());
         s
+    }
+
+    fn agent_on(pid: i64, pane: &str, sid: &str) -> crate::remote::RemoteAgent {
+        crate::remote::RemoteAgent {
+            pid,
+            agent: "claude".into(),
+            cwd: "/srv/app".into(),
+            pane: pane.to_string(),
+            session: "work".into(),
+            session_id: sid.to_string(),
+            transcript: format!("/home/u/.claude/projects/-srv-app/{sid}.jsonl"),
+        }
+    }
+
+    fn live(panes: &[&str], alive: &[i64], agents: Vec<crate::remote::RemoteAgent>) -> RemoteLive {
+        RemoteLive {
+            panes: panes.iter().map(|p| (*p).to_string()).collect(),
+            alive: alive.iter().copied().collect(),
+            agents,
+            knows_pids: true,
+        }
+    }
+
+    /// Ровно та жалоба из жизни: агент на сервере поднят в ОБЫЧНОМ tmux, его
+    /// пана в `-L jarvis` не значится — и сверка выселяла живую сессию.
+    #[test]
+    fn a_live_agent_outside_the_jarvis_tmux_is_not_buried() {
+        let mut s = remote_sess("vps:abc", "%3", "vps");
+        s.pid = Some(4242);
+        // паны `%3` у `-L jarvis` нет, но процесс жив
+        assert!(!remote_is_dead(&s, &live(&["%1"], &[4242], vec![])));
+        // процесса нет — вот теперь мертва
+        assert!(remote_is_dead(&s, &live(&["%1"], &[], vec![])));
+        // pid неизвестен — судим по пане, как раньше
+        s.pid = None;
+        assert!(remote_is_dead(&s, &live(&["%1"], &[], vec![])));
+        assert!(!remote_is_dead(&s, &live(&["%3"], &[], vec![])));
+    }
+
+    #[test]
+    fn an_old_node_is_judged_by_panes_only() {
+        let mut s = remote_sess("vps:abc", "%3", "vps");
+        s.pid = Some(4242);
+        let mut old = live(&["%1"], &[], vec![]);
+        old.knows_pids = false; // узел без `/agents`: про pid он молчит
+        assert!(remote_is_dead(&s, &old), "прежний критерий обязан работать");
+    }
+
+    #[test]
+    fn adoption_picks_up_an_agent_nobody_hooked() {
+        let sessions = HashMap::new();
+        let plan = adoption_plan(&sessions, "vps", &[agent_on(4242, "%3", "abc")], 100);
+        assert_eq!(plan.len(), 1);
+        let s = &plan[0];
+        assert_eq!(s.id, "vps:abc", "ключ реестра — с префиксом узла");
+        assert_eq!(s.remote.as_deref(), Some("vps"));
+        assert_eq!(s.pid, Some(4242));
+        assert_eq!(s.tmux_pane.as_deref(), Some("%3"));
+        assert_eq!(s.project.as_deref(), Some("app"));
+        assert!(s.transcript.is_some(), "без транскрипта мету добирать не из чего");
+    }
+
+    #[test]
+    fn adoption_never_doubles_a_session_we_already_know() {
+        let mut sessions = HashMap::new();
+        let mut known = remote_sess("vps:abc", "%3", "vps");
+        known.pid = Some(4242);
+        sessions.insert(known.id.clone(), known);
+
+        // тот же id
+        assert!(adoption_plan(&sessions, "vps", &[agent_on(4242, "%3", "abc")], 100).is_empty());
+        // другой id, но тот же процесс — это она же (например, после /clear)
+        assert!(adoption_plan(&sessions, "vps", &[agent_on(4242, "%3", "def")], 100).is_empty());
+        // другой id и другой процесс, но пана занята
+        assert!(adoption_plan(&sessions, "vps", &[agent_on(77, "%3", "def")], 100).is_empty());
+        // чужой узел с теми же номерами — это другая машина
+        assert_eq!(adoption_plan(&sessions, "box", &[agent_on(4242, "%3", "abc")], 100).len(), 1);
+    }
+
+    #[test]
+    fn adoption_stays_silent_without_a_transcript() {
+        // Узел не связал процесс с транскриптом. Завести строку без чата и без
+        // заголовка можно, но это была бы догадка поверх догадки.
+        let a = agent_on(4242, "%3", "");
+        assert!(adoption_plan(&HashMap::new(), "vps", &[a], 100).is_empty());
     }
 
     #[test]
@@ -2928,6 +3460,25 @@ mod tests {
 
         let fallback = prefer_final_reply(None, || async { Some("ответ из rollout".into()) }).await;
         assert_eq!(fallback.as_deref(), Some("ответ из rollout"));
+    }
+
+    /// `kimi web` и ACP шлют те же хуки, что CLI, но управлять такой сессией
+    /// нечем — в реестр их не пускаем. Claude и Codex поля не шлют и проходят.
+    #[test]
+    fn only_terminal_clients_are_ingested() {
+        use serde_json::json;
+        let obj = |v: Value| v.as_object().unwrap().clone();
+        assert!(from_terminal_client(&obj(json!({"client_type": "kimi_code_cli"}))));
+        assert!(!from_terminal_client(&obj(json!({"client_type": "kimi_code_desktop"}))));
+        assert!(!from_terminal_client(&obj(json!({"client_type": "kimi_code_web"}))));
+        assert!(
+            from_terminal_client(&obj(json!({"session_id": "abc"}))),
+            "нет поля — это Claude или Codex, пускаем"
+        );
+        assert!(
+            !from_terminal_client(&obj(json!({"client_type": ""}))),
+            "пустая метка — не CLI"
+        );
     }
 
     #[test]
@@ -3156,5 +3707,22 @@ mod tests {
         let content = serde_json::json!({ "branch": true, "model": true, "effort": true });
         let meta = build_meta(&content, &s, 0);
         assert!(meta.is_empty(), "нет полей → нет сегментов");
+    }
+
+    /// Утренняя сводка висит на ТИКЕ, а не только на событиях. Ночь тем и
+    /// отличается, что событий утром может не случиться вовсе: человек не
+    /// написал, ход никто не закончил — и сводка не вышла бы никогда.
+    #[test]
+    fn the_morning_digest_hangs_on_the_tick_not_only_on_events() {
+        let src = include_str!("daemon.rs");
+        let body = src
+            .split("pub async fn reconcile_sessions")
+            .nth(1)
+            .and_then(|t| t.split("let alive:").next())
+            .expect("такт демона на месте");
+        assert!(
+            body.contains("chain::morning_check(&self.app)"),
+            "сводка снова ждёт события, а не времени"
+        );
     }
 }

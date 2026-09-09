@@ -13,7 +13,7 @@ EVENT="${2:-unknown}"
 # Claude Code и Codex парсят stdout Stop-хука как JSON. Пустой вывод
 # теперь считается ошибкой, поэтому до любых exit-путей возвращаем
 # нейтральный объект: событие продолжает работать, не управляя агентом.
-case "$AGENT" in claude|codex) printf '{}\n' ;; esac
+case "$AGENT" in claude|codex|kimi) printf '{}\n' ;; esac
 
 # Служебные запуски claude самим Jarvis (resume-ответ, генерация заголовков)
 # не должны попадать в реестр — демон сам ведёт их жизненный цикл. Нейтральный
@@ -51,7 +51,20 @@ json_safe() {
 }
 AGENT_JSON=$(json_safe "$AGENT")
 EVENT_JSON=$(json_safe "$EVENT")
-PANE_JSON=$(json_safe "${TMUX_PANE:-}")
+# Пана — только со СВОЕГО сервера tmux. Шим не оборачивает запуск, если человек
+# уже сидит в своём tmux (`[ -n "$TMUX" ] && wrap=0` в claude-shim), но хук
+# срабатывает всё равно и раньше слал TMUX_PANE безусловно. Номера пан у разных
+# серверов свои и независимые: записанный оттуда %5 потом гасился бы командой
+# `tmux -L jarvis kill-pane -t %5` — то есть по НАШЕЙ пане с тем же номером, по
+# чужой работе. И проверка живости спрашивала бы тот же не тот сервер, отвечая
+# «жива». Сессия без паны — правда, а не потеря: её гасят по pid и по реестру.
+#
+# $TMUX — это «<путь-к-сокету>,<pid>,<индекс>», имя сокета у нас `jarvis`.
+case "${TMUX:-}" in
+  */jarvis,*) PANE="${TMUX_PANE:-}" ;;
+  *) PANE='' ;;
+esac
+PANE_JSON=$(json_safe "$PANE")
 HOST_JSON=$(json_safe "$HOST_TERM")
 TTY_JSON=$(json_safe "$TTY")
 case "$AGENT" in

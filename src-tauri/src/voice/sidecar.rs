@@ -8,6 +8,10 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// Сколько ждём ответа порта перед запуском своего сайдкара. Проба местная:
+/// доли секунды хватает, а дольше — значит там не наш здоровый сайдкар.
+const PROBE: Duration = Duration::from_millis(400);
+
 /// RAII-страж активного синтеза: пока жив — idle-stop не глушит сайдкар.
 pub struct UseGuard<'a>(&'a AtomicI64);
 impl Drop for UseGuard<'_> {
@@ -102,6 +106,19 @@ impl Sidecar {
             .map(|c| matches!(c.try_wait(), Ok(None)))
             .unwrap_or(false)
         {
+            return;
+        }
+        // Порт уже кто-то обслуживает — почти наверняка наш же сайдкар,
+        // осиротевший от прошлого запуска приложения. Поднимать второй бесполезно:
+        // он упадёт на «address already in use», супервизор увидит труп и поднимет
+        // третий. Ровно так и вышло на боевой машине — двое суток, каждые пять
+        // секунд, с записью «сайдкар запущен» в журнал. Отвечающий сайдкар нам
+        // подходит: демон ходит к нему по порту, а не по pid.
+        if crate::util::port_serves(self.port, "/health", PROBE) {
+            crate::log::line(&format!(
+                "[voice] silero: на :{} уже отвечает сайдкар — беру его, своего не поднимаю",
+                self.port
+            ));
             return;
         }
         match Command::new(&self.py)

@@ -5,12 +5,24 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const QA = require('./question-answer.js');
 
-// --- поле доступно только для Claude (у codex-пикера строки Other нет) ---
+// --- поле доступно тем, кто умеет свой ответ (каталог агентов) ---
 
-test('custom answer is hidden for codex sessions only', () => {
-  assert.equal(QA.customAllowed('codex'), false);
-  assert.equal(QA.customAllowed('claude'), true);
-  assert.equal(QA.customAllowed(undefined), true); // без метки = claude (back-compat)
+const AGENTS = [
+  { id: 'claude', supportsCustomAnswer: true },
+  { id: 'codex', supportsCustomAnswer: false },
+  { id: 'kimi', supportsCustomAnswer: false },
+];
+
+test('custom answer is hidden for agents without the Other row', () => {
+  assert.equal(QA.customAllowed('codex', AGENTS), false);
+  assert.equal(QA.customAllowed('kimi', AGENTS), false);
+  assert.equal(QA.customAllowed('claude', AGENTS), true);
+  assert.equal(QA.customAllowed(undefined, AGENTS), true); // без метки = claude (back-compat)
+});
+
+test('unknown agent and missing catalog do not forbid the custom answer', () => {
+  assert.equal(QA.customAllowed('qwen', AGENTS), true); // чужой агент — не запрещаем
+  assert.equal(QA.customAllowed('codex'), false); // каталога нет — судить не по чему
 });
 
 // --- нормализация текста ---

@@ -23,29 +23,28 @@ pub enum SkillOutcome {
     Rejected(String),
 }
 
-/// Разрешённые модели и уровни effort (fail-closed аллоулисты).
-pub const MODELS: &[&str] = &["opus", "sonnet", "haiku", "fable"];
-pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
-
 /// Значение «чистое»: непустое, без пробелов и control-символов (защита от
 /// инъекции slash-команды в tmux-пану — туда уходит /model {x}, /effort {x}).
 fn clean(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| !c.is_whitespace() && !c.is_control())
 }
 
-pub fn validate_model(m: &str) -> Result<(), String> {
-    if clean(m) && MODELS.contains(&m) {
-        Ok(())
-    } else {
-        Err(format!("неизвестная модель: {m}"))
-    }
+/// Бэкенд сессии по её id. Нет сессии — Claude (как и везде при неизвестной метке).
+fn backend_of(d: &Arc<Daemon>, sid: &str) -> &'static dyn crate::backend::Backend {
+    let agent = d
+        .session(sid)
+        .map(|s| crate::backend::Agent::from_opt(s.agent.as_deref()))
+        .unwrap_or_default();
+    crate::backend::backend(agent)
 }
 
-pub fn validate_effort(e: &str) -> Result<(), String> {
-    if clean(e) && EFFORTS.contains(&e) {
+/// То же для бэкендов: их валидаторы обязаны начинать с этой проверки, каким бы
+/// ни был аллоулист. `what` — что проверяем, для текста ошибки.
+pub(crate) fn ensure_clean(s: &str, what: &str) -> Result<(), String> {
+    if clean(s) {
         Ok(())
     } else {
-        Err(format!("неизвестный effort: {e}"))
+        Err(format!("неизвестн{} {what}: {s}", if what == "модель" { "ая" } else { "ый" }))
     }
 }
 
@@ -254,7 +253,10 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action) -> SkillOutcome {
                 Ok(s) => s,
                 Err(e) => return SkillOutcome::Rejected(e),
             };
-            if let Err(e) = validate_model(model) {
+            // Валидируем политикой бэкенда ЭТОЙ сессии, а не общим Claude-списком:
+            // иначе для codex/kimi-сессии голос отклонял бы их же родные модели.
+            // Проверяем до confirm — незачем спрашивать про заведомо провальное.
+            if let Err(e) = backend_of(d, &sid).validate_model(model) {
                 return SkillOutcome::Rejected(e);
             }
             if crate::convo::confirm(d, &format!("Переключить {} на {model}?", d.session_label(&sid))).await {
@@ -274,7 +276,7 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action) -> SkillOutcome {
                 Ok(s) => s,
                 Err(e) => return SkillOutcome::Rejected(e),
             };
-            if let Err(e) = validate_effort(level) {
+            if let Err(e) = backend_of(d, &sid).validate_effort(level) {
                 return SkillOutcome::Rejected(e);
             }
             if crate::convo::confirm(d, &format!("Поставить {} effort {level}?", d.session_label(&sid))).await {
@@ -288,7 +290,7 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action) -> SkillOutcome {
                 if crate::convo::confirm(d, "Выключить режим «не спать»?").await {
                     // "off" = мастер-выкл (set_auto(false)+stop_manual+persist), а не
                     // "stop" (чистит лишь ручной слот, авто-грант остаётся) — L1/VR-4.
-                    outcome_from_core(&crate::power::Power::cmd(d, "keep-awake", "off", &json!({})).await)
+                    outcome_from_core(&d.plugins.cmd(d, "keep-awake", "off", json!({})).await)
                 } else {
                     SkillOutcome::Cancelled
                 }
@@ -299,7 +301,7 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action) -> SkillOutcome {
                 }
                 if crate::convo::confirm(d, &format!("Не давать маку уснуть {m} минут?")).await {
                     outcome_from_core(
-                        &crate::power::Power::cmd(d, "keep-awake", "start-timer", &json!({ "minutes": m })).await,
+                        &d.plugins.cmd(d, "keep-awake", "start-timer", json!({ "minutes": m })).await,
                     )
                 } else {
                     SkillOutcome::Cancelled
@@ -394,32 +396,14 @@ mod tests {
     }
 
     #[test]
-    fn validate_model_allowlist() {
-        assert!(validate_model("opus").is_ok());
-        assert!(validate_model("sonnet").is_ok());
-        assert!(validate_model("gpt-4").is_err());
-        assert!(validate_model("opus; rm -rf").is_err());
-    }
-
-    #[test]
-    fn validate_effort_enum() {
-        assert!(validate_effort("high").is_ok());
-        assert!(validate_effort("ultra").is_err());
-    }
-
-    #[test]
     fn validate_minutes_range() {
         assert!(validate_minutes(60).is_ok());
         assert!(validate_minutes(0).is_err());
         assert!(validate_minutes(100_000).is_err());
     }
 
-    #[test]
-    fn rejects_whitespace_control_chars() {
-        assert!(validate_model("op us").is_err());
-        assert!(validate_model("opus\n").is_err());
-        assert!(validate_effort("hi gh").is_err());
-    }
+    // Аллоулисты моделей и effort переехали в `trait Backend` (валидация стала
+    // политикой бэкенда). Их тесты — в `backend::tests`.
 
     #[test]
     fn match_prefix_unique_none_ambiguous() {

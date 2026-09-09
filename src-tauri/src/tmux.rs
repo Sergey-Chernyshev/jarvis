@@ -49,9 +49,60 @@ fn focus_args<'a>(command: &'a str, pane: &'a str) -> [&'a str; 5] {
     ["-L", "jarvis", command, "-t", pane]
 }
 
+/// Путь к `tmux`. Звать по имени нельзя: приложение, запущенное из Finder или
+/// дока, получает от macOS урезанный PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), где
+/// Homebrew нет — и вызов не находит бинарь. Симптом коварный: не «tmux не
+/// установлен», а «пана мертва», потому что на ней падает опрос живости, и
+/// сессия молча теряет управляемость. Ищем так же, как проект ищет claude/kimi.
+///
+/// Резолвим один раз: PATH процесса за время жизни демона не меняется, а вызов
+/// уходит на каждый опрос паны.
+fn tmux_bin() -> &'static str {
+    static BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BIN.get_or_init(|| {
+        let mut dirs: Vec<std::path::PathBuf> = std::env::var("PATH")
+            .unwrap_or_default()
+            .split(':')
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+            .collect();
+        for extra in [
+            std::path::PathBuf::from("/opt/homebrew/bin"),
+            std::path::PathBuf::from("/usr/local/bin"),
+            crate::util::home_dir().join(".local/bin"),
+        ] {
+            if !dirs.contains(&extra) {
+                dirs.push(extra);
+            }
+        }
+        for d in dirs {
+            let p = d.join("tmux");
+            if p.is_file() {
+                return p.to_string_lossy().into_owned();
+            }
+        }
+        "tmux".into() // не нашли — пусть падает как раньше, с внятной ошибкой
+    })
+    .as_str()
+}
+
+/// Запускается ли `tmux` вообще. Нужно, чтобы отличать «не смог спросить» от
+/// «паны нет»: путать их — значит стирать живую пану из-за своей же ошибки.
+pub async fn reachable() -> bool {
+    tokio::process::Command::new(tmux_bin())
+        .arg("-V")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// `tmux -L jarvis <args>`: stdout при успехе, текст ошибки при провале.
 pub async fn tmux_j(args: &[&str]) -> Result<String, String> {
-    let mut cmd = tokio::process::Command::new("tmux");
+    let mut cmd = tokio::process::Command::new(tmux_bin());
     // Preserve UTF-8 and tab-delimited metadata under launchd/SSH's C locale.
     cmd.arg("-u").arg("-L")
         .arg("jarvis")
@@ -106,20 +157,33 @@ impl Target {
         }
     }
 
-    pub async fn pane_alive(&self, pane: &str) -> bool {
+    /// Жива ли пана: `Ok(true)` — жива, `Ok(false)` — её нет, `Err` — спросить
+    /// не вышло (tmux не запускается, туннель моргнул).
+    ///
+    /// Третье значение обязательно. Своя транспортная ошибка, выданная за «паны
+    /// нет», стоит дорого: «Завершить» пропускает kill, стирает строку из списка
+    /// — и агент остаётся работать на VPS, жечь токены и быть неуправляемым.
+    pub async fn pane_state(&self, pane: &str) -> Result<bool, String> {
         match self {
-            Target::Local => pane_alive(pane).await,
+            Target::Local => pane_state(pane).await,
             // Отдельного «жива ли пана» у узла нет: список пан всё равно нужен
             // поллеру живости, а лишний эндпоинт — лишний контракт.
-            Target::Remote(n) => match n.client() {
-                Ok(c) => c
-                    .panes()
-                    .await
-                    .map(|r| r.panes.iter().any(|p| p.pane == pane))
-                    .unwrap_or(false),
-                Err(_) => false,
-            },
+            Target::Remote(n) => {
+                let name = &n.cfg.name;
+                let ask = || async {
+                    let panes = n.client()?.panes().await?;
+                    Ok::<bool, String>(panes.panes.iter().any(|p| p.pane == pane))
+                };
+                ask().await.map_err(|e| format!("Узел «{name}» не ответил: {e}"))
+            }
         }
+    }
+
+    /// «Жива ли пана» одним битом — для мест, где «не смогли спросить» и так
+    /// значит «ничего не делаем» (авто-продолжение после лимита). Всё, что
+    /// принимает по этому ответу необратимые решения, зовёт `pane_state`.
+    pub async fn pane_alive(&self, pane: &str) -> bool {
+        self.pane_state(pane).await.unwrap_or(false)
     }
 
     pub async fn reply(&self, pane: &str, prompt: &str) -> Result<(), String> {
@@ -315,9 +379,31 @@ pub async fn kill_pane(pane: &str) -> Result<(), String> {
 }
 
 pub async fn pane_alive(pane: &str) -> bool {
-    tmux_j(&["display-message", "-p", "-t", pane, "ok"])
-        .await
-        .is_ok()
+    pane_state(pane).await.unwrap_or(false)
+}
+
+/// Жива ли местная пана: `Err` — не смогли спросить (см. `Target::pane_state`).
+///
+/// Спрашиваем ИМЕННО `#{pane_id}`, а не печатаем «ok»: `display-message` с
+/// несуществующей целью (tmux 3.7, проверено) не падает — он печатает сообщение
+/// по текущей пане и выходит нулём. Проверка «команда удалась» на нём отвечает
+/// «жива» про любую пану, в том числе давно закрытую. Пустой `#{pane_id}` —
+/// это «цель не нашлась», непустой — настоящий id живой паны.
+///
+/// Отдельно: опрос падает и когда сервера `-L jarvis` нет (все его паны и правда
+/// мертвы), и когда tmux не запускается вовсе (урезанный PATH из Finder —
+/// частый случай). Различаем проверкой самого tmux.
+pub async fn pane_state(pane: &str) -> Result<bool, String> {
+    match tmux_j(&["display-message", "-p", "-t", pane, "#{pane_id}"]).await {
+        Ok(out) => Ok(!out.trim().is_empty()),
+        Err(why) => {
+            if !reachable().await {
+                return Err("tmux не запускается — сессией не поуправлять (brew install tmux)".into());
+            }
+            crate::log::line(&format!("[tmux] пана {pane} не отвечает: {why}"));
+            Ok(false)
+        }
+    }
 }
 
 pub async fn capture_pane(pane: &str) -> Option<String> {
@@ -325,12 +411,19 @@ pub async fn capture_pane(pane: &str) -> Option<String> {
 }
 
 /// Человекочитаемое имя tmux-сессии паны — для бейджа в панели.
+///
+/// `#{pane_id}` спрашиваем не зря: с чужой целью `display-message` отвечает про
+/// ТЕКУЩУЮ пану (см. `pane_state`), и бейдж показал бы имя чужой сессии как своё.
+/// Пустой id — цель не нашлась, имени у нас нет.
 pub async fn session_name(pane: &str) -> Option<String> {
-    tmux_j(&["display-message", "-p", "-t", pane, "#{session_name}"])
+    let out = tmux_j(&["display-message", "-p", "-t", pane, "#{pane_id}\t#{session_name}"])
         .await
-        .ok()
-        .map(|s| crate::util::one_line(&s))
-        .filter(|s| !s.is_empty())
+        .ok()?;
+    let (id, name) = out.split_once('\t')?;
+    if id.trim().is_empty() {
+        return None;
+    }
+    Some(crate::util::one_line(name)).filter(|s| !s.is_empty())
 }
 
 /// Вставка промпта в пану. C-u срезает недописанный черновик в строке ввода —
@@ -375,21 +468,26 @@ pub async fn paste_slash(pane: &str, text: &str) -> Result<(), String> {
 }
 
 /// Метаданные живой паны для адопта осиротевших сессий при рестарте демона.
+///
+/// `created` — когда поднялась tmux-сессия паны, unix-секунды. Нужен там, где
+/// пану ищут ДО первого хука агента: по каталогу их в одном проекте бывает
+/// несколько, и отличить свежепоставленную от вчерашней больше нечем.
 #[derive(Debug, Clone)]
 pub struct PaneInfo {
     pub pane_id: String,
     pub session_name: String,
     pub cwd: String,
     pub pid: i64,
+    pub created: i64,
 }
 
-/// Живые паны сервера jarvis с метаданными (id, имя сессии, cwd, pid процесса
-/// паны). Семантика арм: `Ok(Some)` — успех, `Ok(None)` — tmux не установлен
-/// (реестр не трогаем), `Err` — ошибка/пустой сервер.
-/// Разделитель полей — таб: ни id, ни имя сессии, ни pid его не содержат, а путь
-/// идёт последним полем.
+/// Живые паны сервера jarvis с метаданными (id, имя сессии, pid процесса паны,
+/// время создания сессии, cwd). Семантика арм: `Ok(Some)` — успех, `Ok(None)` —
+/// tmux не установлен (реестр не трогаем), `Err` — ошибка/пустой сервер.
+/// Разделитель полей — таб: ни id, ни имя сессии, ни числа его не содержат, а
+/// путь идёт последним полем.
 pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
-    let mut cmd = tokio::process::Command::new("tmux");
+    let mut cmd = tokio::process::Command::new(tmux_bin());
     cmd.args([
         "-u",
         "-L",
@@ -397,7 +495,7 @@ pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
         "list-panes",
         "-a",
         "-F",
-        "#{pane_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_path}",
+        "#{pane_id}\t#{session_name}\t#{pane_pid}\t#{session_created}\t#{pane_current_path}",
     ])
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
@@ -408,19 +506,21 @@ pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
             String::from_utf8_lossy(&out.stdout)
                 .lines()
                 .filter_map(|line| {
-                    let mut it = line.splitn(4, '\t');
+                    let mut it = line.splitn(5, '\t');
                     let pane_id = it.next()?.trim();
                     if pane_id.is_empty() {
                         return None;
                     }
                     let session_name = it.next().unwrap_or("").trim().to_string();
                     let pid = it.next().unwrap_or("").trim().parse::<i64>().unwrap_or(0);
+                    let created = it.next().unwrap_or("").trim().parse::<i64>().unwrap_or(0);
                     let cwd = it.next().unwrap_or("").trim().to_string();
                     Some(PaneInfo {
                         pane_id: pane_id.to_string(),
                         session_name,
                         cwd,
                         pid,
+                        created,
                     })
                 })
                 .collect(),
@@ -428,6 +528,14 @@ pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         _ => Err(()),
     }
+}
+
+/// Закрыть tmux-сессию целиком по ИМЕНИ (а не пану по id).
+///
+/// Нужно там, где сессии Jarvis ещё нет и гасить нечего по id паны: подъём,
+/// не ставший сессией, знает только имя, которое дал шим (`<каталог><pid>`).
+pub async fn kill_session(name: &str) -> Result<(), String> {
+    tmux_j(&["kill-session", "-t", name]).await.map(|_| ())
 }
 
 /// Подписать tmux-окно заголовком сессии (терминал подписывает сам себя).
@@ -499,6 +607,8 @@ pub async fn ping(pane: &str) -> Result<(), String> {
 const CLAUDE_ADVANCE: &str = "Tab"; // уйти с multiSelect-таба к следующему
 const CLAUDE_SUBMIT_RIGHT: &str = "Right"; // Submit-таб одиночного multiSelect-вопроса
 const CLAUDE_SUBMIT_CONFIRM: &str = "1"; // на Review-экране «1. Submit answers»
+/// Kimi: тот же экран подтверждения — «Ready to submit? [1] Submit».
+const KIMI_SUBMIT_CONFIRM: &str = "1";
 
 /// Клавиша раскладки ответа: именованная (send-keys как есть) либо свой текст
 /// для строки «Other» — его вставляет транспорт через tmux-буфер, как `reply()`.
@@ -613,6 +723,44 @@ pub fn answer_keys(
             }
             keys.push(Key::named(CLAUDE_SUBMIT_CONFIRM));
         }
+        Agent::Kimi => {
+            // Откалибровано на живом пикере Kimi Code 0.37:
+            //
+            //   ? Какой цвет выбрать?
+            //    → [1] Красный
+            //      [2] Зелёный
+            //      [3] Other
+            //    ↑↓ select  1-3 / ↵ choose  ←/→/tab switch  esc cancel
+            //
+            // Цифра выбирает И уводит на экран подтверждения («Ready to submit?
+            // [1] Submit [2] Cancel»), поэтому ответ — всегда ДВА нажатия, даже
+            // на одиночном вопросе. Этим Kimi отличается от Claude, где
+            // одиночный single-select подтверждается сам.
+            //
+            // Строка «Other» есть всегда и стоит последней (индекс = число
+            // опций + 1): выбираешь её, печатаешь текст, Enter сохраняет —
+            // и дальше тот же экран подтверждения.
+            let item = q.questions.first();
+            let n_opts = item.map(|x| x.options.len() as u32).unwrap_or(0);
+            match text_of(0) {
+                // свой ответ: строка Other → текст → сохранить
+                Some(text) => {
+                    keys.push(Key::Text((n_opts + 1).to_string()));
+                    keys.push(Key::Text(text.to_string()));
+                    keys.push(Key::named("Enter"));
+                }
+                // цифры выбранных опций; в мультивыборе их несколько подряд
+                None => {
+                    let mut targets: Vec<u32> = answers.first().cloned().unwrap_or_default();
+                    targets.sort_unstable();
+                    for t in targets {
+                        keys.push(Key::Text(t.to_string()));
+                    }
+                }
+            }
+            keys.push(Key::Text(KIMI_SUBMIT_CONFIRM.to_string())); // «[1] Submit» на экране подтверждения
+        }
+
         Agent::Codex => {
             // Codex всегда один вопрос (скрин-скрейп) и без строки «Other» —
             // свой текст сюда не доставить, texts игнорируем (ipc отфильтрует).
@@ -640,7 +788,7 @@ pub fn answer_keys(
 /// Фокус-лесенка, ступень tmux: switch-client, не вышло — select-window.
 pub async fn focus(pane: &str) -> bool {
     let direct_args = focus_args("switch-client", pane);
-    let direct = tokio::process::Command::new("tmux")
+    let direct = tokio::process::Command::new(tmux_bin())
         .args(direct_args)
         .output()
         .await;
@@ -648,7 +796,7 @@ pub async fn focus(pane: &str) -> bool {
         return true;
     }
     let select_args = focus_args("select-window", pane);
-    let select = tokio::process::Command::new("tmux")
+    let select = tokio::process::Command::new(tmux_bin())
         .args(select_args)
         .output()
         .await;
@@ -888,6 +1036,51 @@ mod answer_keys_tests {
         );
         assert_eq!(keys, seq(&["Down", "Down", "Enter"]));
     }
+
+    // ── Kimi: хореография снята с живого пикера Kimi Code 0.37 ──────────────
+    //
+    //   ? Какой цвет выбрать?     ↑↓ select  1-3 / ↵ choose
+    //    → [1] Красный  [2] Зелёный  [3] Other
+    //
+    // Цифра выбирает И уводит на экран «Ready to submit? [1] Submit [2] Cancel»,
+    // поэтому ответ — всегда два нажатия, даже на одиночном вопросе. Этим Kimi
+    // отличается от Claude, где одиночный single-select подтверждается сам.
+
+    #[test]
+    fn kimi_single_select_is_digit_then_submit() {
+        let keys = answer_keys(Agent::Kimi, &q(vec![item(false, 4)]), &[vec![3]], &[]);
+        assert_eq!(keys, seq(&["~3", "~1"]));
+    }
+
+    // Строка «Other» стоит последней: при 4 опциях её индекс 5.
+    #[test]
+    fn kimi_custom_text_goes_through_other_row() {
+        let keys = answer_keys(
+            Agent::Kimi,
+            &q(vec![item(false, 4)]),
+            &[vec![]],
+            &[Some("манго".into())],
+        );
+        assert_eq!(keys, seq(&["~5", "~манго", "Enter", "~1"]));
+    }
+
+    // Свой текст приоритетнее выбранных опций — как у Claude.
+    #[test]
+    fn kimi_custom_text_wins_over_picked_options() {
+        let keys = answer_keys(
+            Agent::Kimi,
+            &q(vec![item(false, 3)]),
+            &[vec![2]],
+            &[Some("своё".into())],
+        );
+        assert_eq!(keys, seq(&["~4", "~своё", "Enter", "~1"]));
+    }
+
+    #[test]
+    fn kimi_multi_select_presses_each_digit_then_submits() {
+        let keys = answer_keys(Agent::Kimi, &q(vec![item(true, 4)]), &[vec![1, 3]], &[]);
+        assert_eq!(keys, seq(&["~1", "~3", "~1"]));
+    }
 }
 
 #[cfg(test)]
@@ -947,5 +1140,46 @@ mod transport_tests {
             focus_args("select-window", "%3"),
             ["-L", "jarvis", "select-window", "-t", "%3"]
         );
+    }
+
+    /// Резолвер обязан отдавать существующий бинарь либо честное «tmux».
+    /// Именно эта функция чинит баг «сессия вне tmux» у приложения, запущенного
+    /// из дока: там PATH урезан до /usr/bin:/bin:/usr/sbin:/sbin, Homebrew в нём нет.
+    #[test]
+    fn tmux_bin_resolves_to_existing_file_or_plain_name() {
+        let bin = tmux_bin();
+        assert!(!bin.is_empty());
+        if bin != "tmux" {
+            assert!(
+                std::path::Path::new(bin).is_file(),
+                "резолвер вернул путь, которого нет: {bin}"
+            );
+            assert!(bin.ends_with("/tmux"), "должен указывать на сам бинарь: {bin}");
+        }
+    }
+
+    /// Кэш: PATH за время жизни демона не меняется, а резолв дёргается на каждый
+    /// опрос паны — второй вызов обязан вернуть то же самое.
+    #[test]
+    fn tmux_bin_is_stable() {
+        assert_eq!(tmux_bin(), tmux_bin());
+    }
+
+    /// Три значения, а не два: «мертва» говорим только когда сам tmux ответил.
+    /// Иначе «Завершить» пропустит kill, стерев строку из списка при живом
+    /// агенте на той стороне.
+    ///
+    /// И обратная сторона: несуществующая пана не должна отвечать «жива».
+    /// Прежний опрос («удалась ли команда») именно это и делал — `display-message`
+    /// с чужой целью в tmux 3.7 печатает по текущей пане и выходит нулём.
+    #[tokio::test]
+    async fn a_missing_pane_is_dead_only_if_tmux_answered() {
+        let state = pane_state("%9999999").await; // такой паны нет нигде
+        assert_ne!(state, Ok(true), "несуществующая пана не бывает живой");
+        if reachable().await {
+            assert_eq!(state, Ok(false), "tmux отозвался — ответ про пану настоящий");
+        } else {
+            assert!(state.is_err(), "спросить было некого — это не «пана мертва»");
+        }
     }
 }

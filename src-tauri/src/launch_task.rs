@@ -75,6 +75,7 @@ pub struct LaunchTask {
     agent: String,
     instance_id: Option<String>,
     model: Option<String>,
+    bind: Option<crate::capability::native::spawn::Bind>,
     resume: Option<String>,
     since: i64,
     task: Option<String>,
@@ -101,11 +102,13 @@ impl LaunchTask {
         let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(Self {
             id: format!("launch-{since}-{}-{sequence}", std::process::id()), machine, cwd,
-            agent: agent.to_string(), instance_id: None, model: None, resume: resume.map(str::to_string), since,
+            agent: agent.to_string(), bind: None, instance_id: None, model: None, resume: resume.map(str::to_string), since,
             task: task.map(|text| text.trim().to_string()).filter(|text| !text.is_empty()),
             _reservation: reservation, _continuation: None,
         })
     }
+
+    pub fn with_bind(mut self, bind: Option<crate::capability::native::spawn::Bind>) -> Self { self.bind = bind; self }
 
     pub fn with_model(mut self, model: Option<String>) -> Self { self.model = model; self }
 
@@ -185,13 +188,46 @@ impl LaunchTask {
         }));
     }
 
-    pub fn deliver(mut self, d: &Arc<Daemon>, pane: Option<String>) {
+    pub fn deliver(mut self, d: &Arc<Daemon>, mut pane: Option<String>) {
         let d = d.clone();
         tauri::async_runtime::spawn(async move {
+            let prompt_first = !crate::backend::backend(crate::backend::Agent::from_label(&self.agent)).session_before_prompt();
+            let mut _claim = None;
+            let mut ready = crate::launch::ready::ReadyGate::default();
+            let mut prompt_sent = false;
             let attempts = if self._continuation.is_some() { TERMINAL_TTL.as_secs() * 4 } else { 360 };
             for attempt in 0..attempts {
                 if attempt == 360 {
                     self.emit(&d, "failed", None, Some("Агент ещё не подключился. Открой терминал запуска: возможно, он ждёт входа или выбора проекта."));
+                }
+                if prompt_first && self.task.is_some() && !prompt_sent {
+                    if pane.is_none() && self.machine.is_empty() {
+                        _claim = crate::launch::ready::claim_pane(&d, &self.cwd, self.since).await;
+                        pane = _claim.as_ref().map(|p| p.pane.clone());
+                    }
+                    if let Some(pane) = pane.as_deref() {
+                        let target = if self.machine.is_empty() { Ok(crate::tmux::Target::Local) }
+                            else { d.remotes.node(&self.machine).map(crate::tmux::Target::Remote).ok_or_else(|| "Узел пропал из настроек".to_string()) };
+                        let target = match target { Ok(t) => t, Err(e) => { self.emit(&d, "failed", None, Some(&e)); return; } };
+                        if let Ok(screen) = target.screen(pane).await {
+                            match ready.feed(&screen) {
+                                Some(crate::launch::ready::Screen::Ready) => {
+                                    if let Err(error) = target.reply(pane, self.task.as_deref().unwrap()).await {
+                                        self.emit(&d, "failed", None, Some(&error)); return;
+                                    }
+                                    prompt_sent = true;
+                                    self.emit(&d, "sent", None, None);
+                                }
+                                Some(crate::launch::ready::Screen::Blocked(reason)) => {
+                                    self.emit(&d, "failed", None, Some(&reason)); return;
+                                }
+                                Some(crate::launch::ready::Screen::Modal) => {
+                                    self.emit(&d, "failed", None, Some("CLI ждёт выбора в терминале. Задача не отправлена.")); return;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                 }
                 let sessions = d.snapshot();
                 let selected = match self.select(&sessions, pane.as_deref()) {
@@ -199,12 +235,18 @@ impl LaunchTask {
                     Err(error) => { self.emit(&d, "failed", None, Some(&error)); return; }
                 };
                 if let Some(session) = selected {
+                    if let Some(mut bind) = self.bind.take() {
+                        // The requested model is already an argv value on launch.
+                        bind.model = None;
+                        crate::capability::native::spawn::on_bound(&d, &bind, &session.id).await;
+                    }
                     if let Some(model) = &self.model {
                         d.with_session(&session.id, |session| { session.model = Some(model.clone()); session.model_at = Some(crate::util::now_ms()); });
                         d.push();
                     }
                     self.emit(&d, "connected", Some(&session.id), None);
                     if let Some(cwd) = &session.cwd { self.cwd = normalize_cwd(cwd); }
+                    if prompt_sent { self.emit(&d, "ready", Some(&session.id), None); return; }
                     let Some(text) = &self.task else { self.emit(&d, "ready", Some(&session.id), None); return; };
                     let result = match d.pane_target(&session) {
                         Ok(target) => target.reply(session.tmux_pane.as_deref().unwrap(), text).await,
@@ -234,7 +276,7 @@ mod tests {
 
     fn request(machine: &str) -> LaunchTask {
         LaunchTask { id: "request".into(), machine: machine.into(), cwd: "/repo".into(), agent: "codex".into(),
-            instance_id: None, model: None, resume: None, since: 10, task: Some("task".into()), _reservation: None, _continuation: None }
+            instance_id: None, model: None, bind: None, resume: None, since: 10, task: Some("task".into()), _reservation: None, _continuation: None }
     }
     fn session(id: &str, machine: &str, pane: &str, created: i64) -> Session {
         let mut session = Session::new(id.into(), created);

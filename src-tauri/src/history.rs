@@ -41,7 +41,7 @@ struct Meta {
     first_at: i64,
     last_at: i64,
     service: bool,
-    /// Какой агент стоял за сессией: "claude" | "codex". Пусто (старый кэш) → claude.
+    /// Какой агент стоял за сессией: "claude" | "codex" | "kimi". Пусто (старый кэш) → claude.
     /// Нужно фронту, чтобы скопировать ВЕРНУЮ команду resume (codex ≠ claude).
     agent: String,
     instance_id: Option<String>,
@@ -66,6 +66,10 @@ fn projects_dir() -> PathBuf {
 
 fn codex_sessions_dir() -> PathBuf {
     crate::util::codex_dir().join("sessions")
+}
+
+fn kimi_sessions_dir() -> PathBuf {
+    crate::backend::kimi::kimi_home().join("sessions")
 }
 
 /// Rollout Codex → Meta (для истории). session_meta даёт id/cwd, turn_context —
@@ -256,6 +260,89 @@ fn codex_meta_fresh(meta: &Meta, mtime: i64) -> bool {
     meta.mtime == mtime && meta.instance_id.is_some() && meta.parser_revision == CODEX_META_REVISION
 }
 
+/// `state.json` сессии Kimi → Meta (для истории).
+///
+/// Формат бывает двух версий, и обе живые на одной машине: v2 (`id`, `cwd`,
+/// `createdAt`/`updatedAt` числами эпохи) и v1 (`workDir`, даты ISO-строками,
+/// поля `id` нет вовсе — тогда идентификатор берём из имени каталога, оно и есть
+/// `session_<uuid>`). Модели в state.json нет ни в одной из версий, поэтому её
+/// добываем из транскрипта главного агента — как это делает codex-ветка.
+fn parse_kimi_meta(state: &Path, mtime: i64) -> Option<Meta> {
+    let v: Value = serde_json::from_str(&fs::read_to_string(state).ok()?).ok()?;
+    let dir = state.parent()?;
+    let session_id = v
+        .get("id")
+        .and_then(Value::as_str)
+        .map(String::from)
+        .or_else(|| dir.file_name().map(|s| s.to_string_lossy().into_owned()))
+        .filter(|s| !s.is_empty())?;
+    let cwd = v
+        .get("cwd")
+        .or_else(|| v.get("workDir"))
+        .and_then(Value::as_str)
+        .map(String::from);
+    // Одно и то же поле в v2 число, в v1 строка — читаем оба вида, иначе
+    // половина истории приехала бы с нулевым временем и уехала в конец списка.
+    let at = |k: &str| -> i64 {
+        match v.get(k) {
+            Some(Value::Number(n)) => n.as_i64().unwrap_or(0),
+            Some(Value::String(s)) => crate::transcript::parse_ts(s).unwrap_or(0),
+            _ => 0,
+        }
+    };
+    let b = crate::backend::backend(crate::backend::Agent::Kimi);
+    let wire = dir.join("agents/main/wire.jsonl");
+    let model = b.extract_model(&b.read_entries(&wire, 64 * 1024)).unwrap_or_default();
+    // `title` часто равен первому промпту целиком (бывает на экран) — режем так
+    // же, как claude-ветка. «New Session» — заглушка самого CLI, а не заголовок.
+    let title = v.get("title").and_then(Value::as_str).map(one_line).unwrap_or_default();
+    let title = if title.is_empty() || title == "New Session" { String::new() } else { title };
+    Some(Meta {
+        mtime,
+        session_id,
+        cwd: cwd.clone(),
+        project: Some(cwd.as_deref().map(basename).unwrap_or_else(|| "другое".into())),
+        service: is_service_prompt(&title),
+        title: if title.is_empty() { "Kimi-сессия".into() } else { ellipsize(&title, 100) },
+        model: b.friendly_model(&model),
+        first_at: match at("createdAt") {
+            0 => mtime,
+            t => t,
+        },
+        last_at: match at("updatedAt") {
+            0 => mtime,
+            t => t,
+        },
+        agent: crate::backend::Agent::Kimi.label().to_string(),
+        ..Default::default()
+    })
+}
+
+/// `state.json` каждой сессии Kimi под указанным корнем. Глубина ровно два
+/// уровня (`<wd_ключ>/<session_id>/state.json`) — рекурсия тут была бы обходом
+/// транскриптов и блобов ради файлов, лежащих на известном месте.
+fn kimi_states_in(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(workspaces) = fs::read_dir(root) else { return out };
+    for w in workspaces.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+        let Ok(sessions) = fs::read_dir(w.path()) else { continue };
+        for s in sessions.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+            let p = s.path().join("state.json");
+            if p.is_file() {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// Наш служебный `-p` вызов, а не работа человека: узнаётся по первому промпту.
+fn is_service_prompt(first: &str) -> bool {
+    // [0-9A-Za-z_], не \w: в Rust \w юникодный и скрывал бы кириллические команды
+    let single_slash = regex::Regex::new(r"^/[0-9A-Za-z_]+$").unwrap();
+    SERVICE_PREFIXES.iter().any(|p| first.starts_with(p)) || single_slash.is_match(first)
+}
+
 fn first_user_text(msg: &Value) -> String {
     match msg.get("content") {
         Some(Value::String(s)) => s.clone(),
@@ -375,21 +462,9 @@ fn parse_meta(file: &Path, mtime: i64) -> Option<Meta> {
         }
     }
 
-    // [0-9A-Za-z_], не \w: в Rust \w юникодный и скрывал бы кириллические команды
-    let single_slash = regex::Regex::new(r"^/[0-9A-Za-z_]+$").unwrap();
-    meta.service = SERVICE_PREFIXES.iter().any(|p| first_prompt.starts_with(p))
-        || single_slash.is_match(&first_prompt); // одиночная слэш-команда
-    meta.project = Some(
-        meta.cwd
-            .as_deref()
-            .map(basename)
-            .unwrap_or_else(|| "другое".into()),
-    );
-    let title_src = if ai_title.is_empty() {
-        &first_prompt
-    } else {
-        &ai_title
-    };
+    meta.service = is_service_prompt(&first_prompt);
+    meta.project = Some(meta.cwd.as_deref().map(basename).unwrap_or_else(|| "другое".into()));
+    let title_src = if ai_title.is_empty() { &first_prompt } else { &ai_title };
     meta.title = ellipsize(title_src, 100);
     if meta.first_at == 0 {
         meta.first_at = mtime;
@@ -486,6 +561,10 @@ impl History {
         out
     }
 
+    fn list_kimi_files() -> Vec<PathBuf> {
+        kimi_states_in(&kimi_sessions_dir())
+    }
+
     pub fn scan(self: &Arc<Self>) {
         if self.scanning.swap(true, Ordering::SeqCst) {
             return;
@@ -559,6 +638,32 @@ impl History {
                     meta.instance_label = Some(instance.label.clone());
                     meta.provider_home = Some(home);
                 }
+                self.cache.lock().unwrap().insert(key, meta);
+            }
+        }
+        // Kimi (~/.kimi-code/sessions/<wd_*>/<sid>/state.json). Порога по размеру
+        // тут нет: state.json маленький по определению, а «пустая» сессия
+        // отсеивается уже разбором.
+        for file in Self::list_kimi_files() {
+            let key = file.to_string_lossy().into_owned();
+            seen.insert(key.clone());
+            let Ok(st) = fs::metadata(&file) else { continue };
+            let mtime = st
+                .modified()
+                .ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let fresh = self
+                .cache
+                .lock()
+                .unwrap()
+                .get(&key)
+                .is_some_and(|hit| hit.mtime == mtime && !hit.agent.is_empty());
+            if fresh {
+                continue;
+            }
+            if let Some(meta) = parse_kimi_meta(&file, mtime) {
                 self.cache.lock().unwrap().insert(key, meta);
             }
         }
@@ -819,5 +924,76 @@ mod tests {
         assert_eq!(m.session_id, "abc");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// state.json Kimi живёт в двух версиях сразу, и обе встречаются на одной
+    /// машине: v1 остаётся от прежних установок, v2 пишет нынешний CLI.
+    #[test]
+    fn parse_kimi_meta_reads_both_state_versions() {
+        let root = std::env::temp_dir().join("jarvis-history-kimi-test");
+        let _ = fs::remove_dir_all(&root);
+
+        // v2: id/cwd полями, даты числами эпохи.
+        let v2 = root.join("wd_proj_0123456789ab/session_AAA");
+        fs::create_dir_all(v2.join("agents/main")).unwrap();
+        fs::write(
+            v2.join("state.json"),
+            r#"{"id":"session_AAA","version":2,"cwd":"/tmp/proj","createdAt":1787092850964,
+                "updatedAt":1787092856687,"archived":false,"title":"починить парсер","titleKind":"replaceable",
+                "lastTurnReason":"completed"}"#,
+        )
+        .unwrap();
+        fs::write(
+            v2.join("agents/main/wire.jsonl"),
+            "{\"type\":\"llm.request\",\"time\":1,\"modelAlias\":\"kimi-code/k3\"}\n",
+        )
+        .unwrap();
+        let m = parse_kimi_meta(&v2.join("state.json"), 7).expect("kimi v2 meta");
+        assert_eq!(m.agent, "kimi");
+        assert_eq!(m.session_id, "session_AAA");
+        assert_eq!(m.cwd.as_deref(), Some("/tmp/proj"));
+        assert_eq!(m.project.as_deref(), Some("proj"));
+        assert_eq!(m.title, "починить парсер");
+        assert_eq!(m.model, "K3", "модель берётся из wire.jsonl — в state.json её нет");
+        assert_eq!(m.first_at, 1787092850964);
+        assert_eq!(m.last_at, 1787092856687);
+        assert!(!m.service);
+
+        // v1: workDir вместо cwd, ISO-строки вместо чисел, поля id нет вовсе.
+        let v1 = root.join("wd_old_ba9876543210/session_BBB");
+        fs::create_dir_all(&v1).unwrap();
+        fs::write(
+            v1.join("state.json"),
+            r#"{"createdAt":"2026-08-03T09:27:55.181Z","updatedAt":"2026-08-03T10:00:00.000Z",
+                "title":"New Session","isCustomTitle":false,"workDir":"/tmp/old"}"#,
+        )
+        .unwrap();
+        let m = parse_kimi_meta(&v1.join("state.json"), 7).expect("kimi v1 meta");
+        assert_eq!(m.session_id, "session_BBB", "id берётся из имени каталога");
+        assert_eq!(m.cwd.as_deref(), Some("/tmp/old"));
+        assert!(m.first_at > 0 && m.last_at > m.first_at, "ISO-даты обязаны разобраться");
+        assert_eq!(m.title, "Kimi-сессия", "«New Session» — заглушка CLI, а не заголовок");
+        assert_eq!(m.model, "", "транскрипта нет — модель неизвестна, а не выдумана");
+
+        // Наш служебный `-p` вызов в историю не идёт.
+        let svc = root.join("wd_old_ba9876543210/session_CCC");
+        fs::create_dir_all(&svc).unwrap();
+        fs::write(
+            svc.join("state.json"),
+            r#"{"id":"session_CCC","version":2,"cwd":"/tmp/old","title":"Суммаризируй этот диалог"}"#,
+        )
+        .unwrap();
+        assert!(parse_kimi_meta(&svc.join("state.json"), 7).unwrap().service);
+
+        // Обход находит ровно state.json сессий, не залезая в транскрипты.
+        let mut found: Vec<String> = kimi_states_in(&root)
+            .iter()
+            .filter_map(|p| p.parent()?.file_name().map(|s| s.to_string_lossy().into_owned()))
+            .collect();
+        found.sort();
+        assert_eq!(found, ["session_AAA", "session_BBB", "session_CCC"]);
+        assert!(kimi_states_in(&root.join("нет-такого")).is_empty());
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

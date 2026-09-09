@@ -27,7 +27,7 @@ const SCRIPTS = [
   'keys.js',
   'icons.js',
   'markdown.js',
-  'diffview.js',
+  'diffview.js', 'agents.js', 'agent-chat.js',
   'question-answer.js',
   'settings2.js',
   'voice-history.js',

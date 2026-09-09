@@ -1,0 +1,270 @@
+#!/bin/sh
+# jarvis-input-guard — шим, который отказывает в СИНТЕТИЧЕСКОМ ВВОДЕ.
+#
+# Зачем он вообще есть. Весь гейт капабилити (RiskClass, ConfirmPolicy, аудит)
+# держится на одном допущении: карточку подтверждения нажимает ЧЕЛОВЕК. Один
+# `osascript … keystroke` из-под агента это допущение отменяет — опасное
+# действие подтверждается именем человека, и в журнале это выглядит как его
+# решение. Поэтому запрет живёт не в правилах для агента, а в PATH: каталог
+# шимов стоит первым, и `osascript`/`cliclick` резолвятся сюда.
+#
+# Паттерн тот же, что у agent-shim: один скрипт под несколькими именами в
+# ~/.jarvis/shims, поведение выбирается по basename "$0".
+#
+# Отказ ГРОМКИЙ: ненулевой код, текст на stderr и строка в ~/.jarvis/audit.jsonl.
+# Тихий отказ был бы хуже дыры — агент решил бы, что нажал, и соврал в отчёте.
+#
+# Чего этот шим НЕ делает и не может: он не песочница. `/usr/bin/osascript`
+# по абсолютному пути, свой PATH, python с pyobjc, чужой процесс с правами
+# Accessibility — всё это мимо. Смысл шима в том, чтобы обычный путь был
+# закрыт, а попытка — видна человеку.
+
+JARVIS_DIR="${JARVIS_DIR:-$HOME/.jarvis}"
+SHIM_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+BIN_NAME=$(basename -- "$0")
+
+# Код возврата отказа. Отдельный от 1 и 127, чтобы «запрещено» не путалось ни с
+# ошибкой самого скрипта, ни с «бинарь не найден».
+DENY_RC=77
+
+# ---------- аудит: тот же JSONL, что пишет гейт капабилити ----------
+# Формат обязан совпадать с capability::audit::AuditEntry::to_json — журнал
+# один, и читает его одна и та же капабилити audit.query.
+
+json_str() {
+	# Экранируем кавычки/слеши и убиваем переводы строк: строка JSONL должна
+	# остаться одной строкой, даже если внутрь попал многострочный скрипт.
+	#
+	# Порядок звеньев важен, и это не косметика. `cut` в GNU coreutils дописывает
+	# перевод строки, если во входе его не было; шедший следом `tr` превращал его
+	# в ХВОСТОВОЙ ПРОБЕЛ, и в журнал уезжало «bypass:synthetic-input » вместо
+	# «bypass:synthetic-input». На macOS `cut` так не делает — поэтому
+	# расхождение жило только на Linux и только в аудите, который читают глазами.
+	#
+	# Схлопываем в одну строку ПЕРВЫМИ: тогда обрезка считает длину по всей
+	# строке, а не по каждой отдельно (многострочный скрипт иначе пролезал бы в
+	# журнал десятком по 400 символов), а хвостовой перевод строки от `cut`
+	# снимает подстановка команд у каждого вызывающего.
+	printf '%s' "$1" | tr '\r\n\t' '   ' | cut -c1-400 | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+argv_json() {
+	out=''
+	for a in "$@"; do
+		[ -n "$out" ] && out="$out,"
+		out="$out\"$(json_str "$a")\""
+	done
+	printf '[%s]' "$out"
+}
+
+# Кто нас позвал. Человеку в журнале нужно имя виновника, а не только факт.
+parent_name() {
+	ps -o comm= -p "$PPID" 2>/dev/null | tr -d ' ' || true
+}
+
+audit() {
+	outcome=$1
+	hit=$2
+	shift 2
+	# RFC3339 с двоеточием в смещении — как у chrono::Local::now().to_rfc3339().
+	ts=$(date +%Y-%m-%dT%H:%M:%S%z 2>/dev/null | sed 's/\(..\)$/:\1/')
+	args=$(
+		printf '{"bin":"%s","match":"%s","ppid":%s,"parent":"%s","argv":%s}' \
+			"$(json_str "$BIN_NAME")" "$(json_str "$hit")" "${PPID:-0}" \
+			"$(json_str "$(parent_name)")" "$(argv_json "$@")"
+	)
+	line=$(
+		printf '{"ts":"%s","consumer":"shim","id":"input.%s","class":"control","args":%s,"provenance":"trusted","outcome":"%s","ms":0}' \
+			"$ts" "$(json_str "$BIN_NAME")" "$args" "$(json_str "$outcome")"
+	)
+	# Best-effort, как FileAudit: недоступный журнал не должен превращать
+	# отказ в падение с другим текстом.
+	mkdir -p "$JARVIS_DIR" 2>/dev/null
+	printf '%s\n' "$line" >>"$JARVIS_DIR/audit.jsonl" 2>/dev/null
+	return 0
+}
+
+# ---------- отказ ----------
+
+refuse() {
+	why=$1
+	shift
+	audit "denied:synthetic-input" "$why" "$@"
+	cat >&2 <<EOF
+jarvis: ЗАПРЕЩЕНО — синтетический ввод. Команда НЕ выполнена.
+  инструмент: $BIN_NAME
+  сработало:  $why
+
+  Почему. Окно человека — не полигон. Клик или нажатие клавиши из-под агента
+  уводят фокус, пока человек печатает, а главное — способны нажать карточку
+  подтверждения гейта, то есть разрешить опасное действие ЕГО именем. Это не
+  вопрос удобства: так обходится весь слой подтверждений.
+
+  Законные пути вместо этого:
+   1. прогнать интерфейс в headless-обвязке — без живого окна;
+   2. снять пассивный скриншот, НЕ активируя и не поднимая окно;
+   3. попросить человека нажать самому и дождаться ответа.
+
+  Отказ записан в $JARVIS_DIR/audit.jsonl — человек его увидит.
+  Не пиши в отчёте, что нажал: нажатия не было.
+EOF
+	exit $DENY_RC
+}
+
+# ---------- cliclick: назначение утилиты — только ввод ----------
+
+if [ "$BIN_NAME" = cliclick ]; then
+	refuse "cliclick (утилита существует только ради синтетического ввода)" "$@"
+fi
+
+# ---------- разбор скрипта: -e/-c, файл, stdin ----------
+
+case "$BIN_NAME" in
+hs) INLINE_FLAG='-c' ;; # Hammerspoon CLI
+*) INLINE_FLAG='-e' ;;  # osascript
+esac
+
+SCRIPT=''
+SRC_FILE=''
+HAVE_INLINE=0
+STDIN_MODE=0
+INLINE_NEXT=0
+skip_next=0
+seen_operand=0
+
+for a in "$@"; do
+	if [ "$skip_next" = 1 ]; then
+		skip_next=0
+		continue
+	fi
+	if [ "$INLINE_NEXT" = 1 ]; then
+		SCRIPT="$SCRIPT
+$a"
+		HAVE_INLINE=1
+		INLINE_NEXT=0
+		continue
+	fi
+	case "$a" in
+	"$INLINE_FLAG") INLINE_NEXT=1 ;;
+	# Флаги со значением в отдельном аргументе: их значение — не скрипт.
+	-l | -s | -t) skip_next=1 ;;
+	-) [ "$seen_operand" = 0 ] && {
+		STDIN_MODE=1
+		seen_operand=1
+	} ;;
+	-*) ;; # прочие булевы флаги
+	*) [ "$seen_operand" = 0 ] && {
+		SRC_FILE="$a"
+		seen_operand=1
+	} ;;
+	esac
+done
+
+# Буфер stdin живёт до конца процесса: скрипт нужно СНАЧАЛА прочитать целиком,
+# чтобы классифицировать, и только потом отдать настоящему бинарю.
+TMP=''
+cleanup() { [ -n "$TMP" ] && rm -f "$TMP"; }
+
+if [ "$HAVE_INLINE" = 0 ]; then
+	if [ -n "$SRC_FILE" ]; then
+		# Нечитаемый файл не классифицируем: настоящий бинарь тоже его не
+		# прочтёт и сам скажет об этом внятнее нас.
+		[ -r "$SRC_FILE" ] && SCRIPT=$(cat -- "$SRC_FILE" 2>/dev/null)
+	elif [ "$STDIN_MODE" = 1 ] || [ ! -t 0 ]; then
+		# Без файла и без -e osascript читает stdin. Живой tty не трогаем: там
+		# сидит человек, а не пайп, и «буферизовать» его нечем.
+		STDIN_MODE=1
+		TMP=$(mktemp "${TMPDIR:-/tmp}/jarvis-guard.XXXXXX" 2>/dev/null) || TMP=''
+		if [ -n "$TMP" ]; then
+			cat >"$TMP"
+			SCRIPT=$(cat "$TMP")
+		fi
+	fi
+fi
+
+# ---------- классификация ----------
+#
+# Матчим подстроки по всему тексту скрипта, включая строковые литералы.
+#
+# Да, из-за этого `display dialog "нажми activate"` тоже получит отказ. Это
+# осознанный выбор в пользу fail-closed: отличить инертную строку от вложенного
+# скрипта (`run script "tell app \"System Events\" to keystroke \"x\""`)
+# грепом нельзя, а цена ошибок разная. Ложный отказ стоит человеку одной
+# переформулировки и виден сразу; ложный пропуск стоит нажатой за него кнопки
+# подтверждения и не виден вообще. Поэтому слово ловится везде.
+
+patterns() {
+	cat <<'EOF'
+keystroke
+key code
+key down
+key up
+click
+perform action
+set frontmost
+activate
+EOF
+	if [ "$BIN_NAME" = hs ]; then
+		cat <<'EOF'
+eventtap
+keycodes
+setfrontmost
+hs.mouse
+EOF
+	fi
+}
+
+LOWER=$(printf '%s' "$SCRIPT" | tr 'A-Z' 'a-z')
+HIT=''
+OLD_IFS=$IFS
+IFS='
+'
+for p in $(patterns); do
+	case "$LOWER" in
+	*"$p"*)
+		HIT=$p
+		break
+		;;
+	esac
+done
+IFS=$OLD_IFS
+
+if [ -n "$HIT" ]; then
+	# Разовый тумблер для человека в СВОЁМ терминале: каталог шимов лежит и в
+	# его интерактивном PATH, а запрет адресован агенту. Пропуск не тихий —
+	# строка в журнале остаётся, иначе тумблер стал бы дырой без следов.
+	case "${JARVIS_INPUT_GUARD:-}" in
+	off | 0 | no | false | disable)
+		audit "bypass:synthetic-input" "$HIT" "$@"
+		;;
+	*)
+		cleanup
+		refuse "$HIT" "$@"
+		;;
+	esac
+fi
+
+# ---------- пропускаем: резолвим настоящий бинарь мимо себя ----------
+
+CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SHIM_DIR" | paste -sd: -)
+REAL=$(PATH="$CLEAN_PATH" command -v "$BIN_NAME" 2>/dev/null)
+# Вторая страховка от рекурсии: даже если каталог просочился в PATH под другим
+# написанием, звать самого себя нельзя — это форк-бомба, а не ошибка.
+if [ -n "$REAL" ] && [ "$REAL" = "$SHIM_DIR/$BIN_NAME" ]; then
+	REAL=''
+fi
+if [ -z "$REAL" ]; then
+	echo "jarvis-input-guard: настоящий бинарь $BIN_NAME не найден в PATH" >&2
+	cleanup
+	exit 127
+fi
+
+if [ -n "$TMP" ]; then
+	# stdin уже вычитан нами — отдаём буфер, иначе бинарь получит пустой ввод.
+	"$REAL" "$@" <"$TMP"
+	rc=$?
+	cleanup
+	exit $rc
+fi
+
+exec "$REAL" "$@"

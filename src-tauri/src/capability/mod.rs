@@ -217,6 +217,59 @@ mod tests {
         assert_eq!(audit.last().unwrap().outcome, "ok");
     }
 
+    // Авто-одобрение: id из списка пользователя исполняется, хотя confirmer
+    // отвечает «нет» — значит его вообще не спрашивали.
+    #[tokio::test]
+    async fn auto_approved_id_runs_without_confirm() {
+        let reg = test_registry();
+        let audit = MemAudit::new();
+        let agent =
+            Consumer::agent().with_auto_approve(["echo.control".to_string()].into_iter().collect());
+        let out = super::invoke(&reg, (), &agent, "echo.control", json!({"to":"recrew"}), &AutoDeny, &audit, GateConfig::default())
+            .await
+            .expect("авто-одобренная капабилити идёт мимо подтверждения");
+        assert_eq!(out.value["did"]["to"], "recrew");
+        assert_eq!(audit.last().unwrap().outcome, "ok");
+    }
+
+    // …а её сосед по классу — нет: список поимённый, а не «весь Control».
+    #[tokio::test]
+    async fn non_listed_id_still_confirmed() {
+        let reg = test_registry();
+        let audit = MemAudit::new();
+        let agent =
+            Consumer::agent().with_auto_approve(["sessions.reply".to_string()].into_iter().collect());
+        let err = super::invoke(&reg, (), &agent, "echo.control", json!({}), &AutoDeny, &audit, GateConfig::default())
+            .await
+            .unwrap_err();
+        assert_eq!(err, GateError::Rejected);
+        assert_eq!(audit.last().unwrap().outcome, "rejected");
+    }
+
+    // R7 поверх авто-одобрения: даже с авто-одобренным settings.set агент не
+    // выпишет себе новых прав — security-ключ закрыт до подтверждения.
+    #[tokio::test]
+    async fn auto_approve_cannot_be_self_granted() {
+        let reg = test_registry();
+        let audit = MemAudit::new();
+        let agent =
+            Consumer::agent().with_auto_approve(["settings.set".to_string()].into_iter().collect());
+        let err = super::invoke(
+            &reg,
+            (),
+            &agent,
+            "settings.set",
+            json!({ "patch": { "grants": { "agent": { "autoApprove": ["sessions.reply"] } } } }),
+            &AutoApprove,
+            &audit,
+            GateConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, GateError::Denied(_)));
+        assert_eq!(audit.last().unwrap().outcome, "denied:security-key");
+    }
+
     // неизвестная капабилити — NotFound, тоже в аудите.
     #[tokio::test]
     async fn unknown_capability_not_found() {
@@ -289,6 +342,126 @@ mod tests {
         assert!(!names.contains(&"settings.set"));
     }
 
+    // sessions.rename — side-effect (подтверждение обязательно), но класса
+    // Settings у неё быть НЕ может: гейт читает аргументы settings-капабилити
+    // как патч конфига, и 'session_id' сразу упёрся бы в SETTINGS_ALLOWLIST.
+    #[test]
+    fn sessions_rename_is_a_confirmed_capability_the_agent_can_see() {
+        let reg = super::build_registry();
+        let cap = reg.get("sessions.rename").expect("sessions.rename должна быть в реестре");
+        assert!(cap.meta.class.is_side_effect(), "переименование не должно идти без спроса");
+        assert_ne!(cap.meta.class, RiskClass::Settings, "аргументы — не патч настроек");
+        // агент обязан понимать по описанию, когда звать и как снять имя
+        assert!(cap.meta.description.contains("переименовать"));
+        assert!(cap.meta.description.contains("Пустая строка"));
+        assert_eq!(cap.meta.input_schema["required"], json!(["session_id", "title"]));
+        let tools = reg.tools_json(&Consumer::agent().grant);
+        let names: Vec<&str> =
+            tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"sessions.rename"), "агенту инструмент не виден");
+    }
+
+    /// Видеть инструмент мало — надо, чтобы вызов доходил до хендлера. С классом
+    /// Settings гейт отклонил бы его на самоэскалации («ключ 'session_id' не в
+    /// allowlist»), и переименование голосом не работало бы вообще.
+    #[tokio::test]
+    async fn agent_really_gets_through_the_gate_to_rename() {
+        let meta = super::build_registry().get("sessions.rename").unwrap().meta.clone();
+        let mut reg: Registry<()> = Registry::new();
+        reg.register(meta, make_handler(|_ctx: (), args| async move { Ok(json!({ "did": args })) }));
+        let args = json!({ "session_id": "abc", "title": "БД" });
+        let out = super::invoke(
+            &reg, (), &Consumer::agent(), "sessions.rename", args,
+            &AutoApprove, &MemAudit::new(), GateConfig::default(),
+        )
+        .await
+        .expect("агент обязан дойти до переименования");
+        assert_eq!(out.value["did"]["title"], "БД");
+
+        // …но только с подтверждением: молчаливый отказ пользователя = отказ вызова.
+        let denied = super::invoke(
+            &reg, (), &Consumer::agent(), "sessions.rename",
+            json!({ "session_id": "abc", "title": "БД" }),
+            &AutoDeny, &MemAudit::new(), GateConfig::default(),
+        )
+        .await;
+        assert!(matches!(denied, Err(GateError::Rejected)), "переименование прошло без спроса");
+    }
+
+    /// Запуск сессии тратит деньги и плодит процессы — по умолчанию карточка.
+    /// Класс Settings взять нельзя по той же причине, что и у sessions.rename:
+    /// гейт прочитал бы 'agent'/'cwd' как патч конфига и отклонил по allowlist.
+    #[test]
+    fn spawn_is_a_confirmed_capability_the_agent_can_see() {
+        let reg = super::build_registry();
+        let cap = reg.get("sessions.spawn").expect("sessions.spawn должна быть в реестре");
+        assert_eq!(cap.meta.class, RiskClass::Control, "запуск — side-effect, но не патч настроек");
+        assert!(Consumer::agent().grant.needs_confirm("sessions.spawn", cap.meta.class),
+            "по умолчанию запуск обязан спрашивать");
+        // агент обязан понять из описания, что имя обязательно и id придёт сразу
+        assert!(cap.meta.description.contains("ОБЯЗАТЕЛЬНО"));
+        assert!(cap.meta.description.contains("СРАЗУ"));
+        assert_eq!(cap.meta.input_schema["required"], json!(["agent", "name", "cwd", "task"]));
+        let tools = reg.tools_json(&Consumer::agent().grant);
+        let names: Vec<&str> =
+            tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"sessions.spawn"), "агенту инструмент не виден");
+        assert!(names.contains(&"sessions.close"));
+        // read-only плагин запускать сессии не может — это Control
+        let reader = Consumer::plugin("reader", &[RiskClass::Read]);
+        assert!(!reader.grant.allows_id("sessions.spawn", RiskClass::Control));
+    }
+
+    /// Грант на авто-запуск выдаёт ЧЕЛОВЕК настройкой, а не константа в коде:
+    /// без `grants.agent.autoApprove` карточка на месте, с ним — нет.
+    #[tokio::test]
+    async fn auto_launch_is_granted_by_settings_not_by_code() {
+        let meta = super::build_registry().get("sessions.spawn").unwrap().meta.clone();
+        let mut reg: Registry<()> = Registry::new();
+        reg.register(meta, make_handler(|_ctx: (), args| async move { Ok(json!({ "did": args })) }));
+        let args = json!({ "agent": "claude", "name": "Сайдбар·JRV·O5", "cwd": "/p", "task": "работай" });
+
+        // молчаливый отказ пользователя = отказ вызова
+        let denied = super::invoke(&reg, (), &Consumer::agent(), "sessions.spawn", args.clone(),
+            &AutoDeny, &MemAudit::new(), GateConfig::default()).await;
+        assert!(matches!(denied, Err(GateError::Rejected)), "запуск прошёл без спроса");
+
+        // …а с грантом из настроек — идёт молча
+        let granted = Consumer::agent().with_auto_approve(
+            super::grant::auto_approve_from_settings(
+                &json!({"grants":{"agent":{"autoApprove":["sessions.spawn"]}}}), "agent"),
+        );
+        let out = super::invoke(&reg, (), &granted, "sessions.spawn", args,
+            &AutoDeny, &MemAudit::new(), GateConfig::default())
+            .await
+            .expect("грант человека снимает карточку");
+        assert_eq!(out.value["did"]["name"], "Сайдбар·JRV·O5");
+        // соседи по классу остаются со спросом — это не «выключить гейт»
+        assert!(granted.grant.needs_confirm("sessions.reply", RiskClass::Control));
+    }
+
+    /// Закрытие СВОЕЙ дочерней карточки не просит (эффект ограничен тем, что
+    /// потребитель сам и создал), но остаётся Control: read-only плагину не дано.
+    #[tokio::test]
+    async fn closing_your_own_child_needs_no_card() {
+        let reg = super::build_registry();
+        let cap = reg.get("sessions.close").expect("sessions.close должна быть в реестре");
+        assert_eq!(cap.meta.class, RiskClass::Control);
+        assert!(!Consumer::agent().grant.needs_confirm("sessions.close", cap.meta.class));
+        assert!(!Consumer::panel().grant.needs_confirm("sessions.close", cap.meta.class));
+        assert!(!Consumer::plugin("x", &[RiskClass::Read]).grant.allows_id("sessions.close", RiskClass::Control));
+
+        // и вызов доходит до хендлера при confirmer'е, отвечающем «нет»
+        let meta = cap.meta.clone();
+        let mut r: Registry<()> = Registry::new();
+        r.register(meta, make_handler(|_ctx: (), args| async move { Ok(json!({ "did": args })) }));
+        let out = super::invoke(&r, (), &Consumer::agent(), "sessions.close",
+            json!({ "id": "spawn-abc" }), &AutoDeny, &MemAudit::new(), GateConfig::default())
+            .await
+            .expect("закрытие своей дочерней не спрашивает");
+        assert_eq!(out.value["did"]["id"], "spawn-abc");
+    }
+
     // R4/least-priv: агент НЕ видит audit.query в tools/list (denied_ids).
     #[test]
     fn agent_tools_exclude_audit_query() {
@@ -314,10 +487,7 @@ mod tests {
     }
 
     fn fast_cfg() -> super::gate::GateConfig {
-        super::gate::GateConfig {
-            confirm_timeout: std::time::Duration::from_millis(80),
-            handler_timeout: std::time::Duration::from_millis(80),
-        }
+        super::gate::GateConfig { handler_timeout: std::time::Duration::from_millis(80) }
     }
 
     // R3: хендлер дольше дедлайна → Failed(timeout), аудит failed:timeout.
@@ -332,29 +502,56 @@ mod tests {
         assert_eq!(audit.last().unwrap().outcome, "failed:timeout");
     }
 
-    // R3: подтверждение дольше дедлайна → Rejected, аудит rejected:timeout.
+    /// Человек может отойти. Долгое раздумье — не отказ: гейт ждёт и исполняет,
+    /// хотя ответ пришёл много позже любого дедлайна исполнения.
     #[tokio::test]
-    async fn confirm_timeout_rejects() {
+    async fn a_slow_human_is_still_answered() {
         struct SlowConfirm;
         impl super::confirm::Confirmer for SlowConfirm {
             fn confirm<'a>(
                 &'a self,
                 _m: &'a CapabilityMeta,
                 _a: &'a serde_json::Value,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = super::confirm::Outcome> + Send + 'a>>
+            {
                 Box::pin(async {
                     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                    true
+                    super::confirm::Outcome::Approved
                 })
             }
         }
         let reg = test_registry();
         let audit = MemAudit::new();
-        let err = super::invoke(&reg, (), &Consumer::agent(), "echo.control", json!({}), &SlowConfirm, &audit, fast_cfg())
+        let out = super::invoke(&reg, (), &Consumer::agent(), "echo.control", json!({}), &SlowConfirm, &audit, fast_cfg())
+            .await
+            .expect("ответ через 400мс при дедлайне исполнения 80мс — всё ещё ответ");
+        assert_eq!(out.value["did"]["_consumer"], "agent");
+        assert_eq!(audit.last().unwrap().outcome, "ok");
+    }
+
+    /// Ответа не было вовсе (окно закрыли, демон умер) — это НЕ «отказал».
+    /// Агент обязан увидеть разницу, иначе задача пропадает тихо.
+    #[tokio::test]
+    async fn no_answer_is_not_a_refusal() {
+        struct NoAnswer;
+        impl super::confirm::Confirmer for NoAnswer {
+            fn confirm<'a>(
+                &'a self,
+                _m: &'a CapabilityMeta,
+                _a: &'a serde_json::Value,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = super::confirm::Outcome> + Send + 'a>>
+            {
+                Box::pin(async { super::confirm::Outcome::Expired })
+            }
+        }
+        let reg = test_registry();
+        let audit = MemAudit::new();
+        let err = super::invoke(&reg, (), &Consumer::agent(), "echo.control", json!({}), &NoAnswer, &audit, GateConfig::default())
             .await
             .unwrap_err();
-        assert_eq!(err, GateError::Rejected);
-        assert_eq!(audit.last().unwrap().outcome, "rejected:timeout");
+        assert_eq!(err, GateError::Expired);
+        assert_ne!(err.to_string(), GateError::Rejected.to_string(), "агенту два исхода — два текста");
+        assert_eq!(audit.last().unwrap().outcome, "expired", "в журнале тоже не «отказал»");
     }
 
     // R7: агент пишет ключ ВНЕ allowlist → отказ (даже не security-ключ).

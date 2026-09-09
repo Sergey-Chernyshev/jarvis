@@ -4,7 +4,7 @@
 
 <p align="center">
   Mission control for your coding agents, right in the menu bar / tray.<br>
-  Jarvis watches every Claude&nbsp;Code and Codex session you run — and tells you, even out loud, the moment one needs you.
+  Jarvis watches every Claude&nbsp;Code, Codex and Kimi session you run — and tells you, even out loud, the moment one needs you.
 </p>
 
 <p align="center">
@@ -23,7 +23,7 @@
 
 Running several coding agents at once turns **you** into the bottleneck. Sessions are spread across terminals, tabs and macOS Spaces, and you can't see at a glance which agent is **blocked on a permission prompt**, which **finished half an hour ago and is idling** while you think it's working, and which **hit a rate limit**. The agents' own notifications are per-session and terminal-scoped (they don't even fire in the VS Code extension) — there is no single pane showing the aggregate state. And a sleeping Mac **silently freezes** agent processes and severs in-flight API requests, killing long overnight runs; on Apple Silicon, closing the lid forces a sleep that plain `caffeinate` can't prevent.
 
-**Jarvis is that missing single pane.** It sits in the menu bar, watches every interactive Claude Code and Codex CLI session on your machine, and makes sure no agent ever waits on you silently:
+**Jarvis is that missing single pane.** It sits in the menu bar, watches every interactive Claude Code, Codex and Kimi Code CLI session on your machine, and makes sure no agent ever waits on you silently:
 
 - you **see** the aggregate state at all times (live counters in the menu bar, a Raycast-style panel on ⌘J / Ctrl+J);
 - you **hear** it — toast notifications that render over fullscreen apps, and an optional local voice that speaks session events out loud;
@@ -31,12 +31,13 @@ Running several coding agents at once turns **you** into the bottleneck. Session
 
 ## Highlights
 
-- **🖥 Multi-session monitor** — every Claude Code and Codex session across every terminal, with live **⏸ waiting · ⚙ working** counters in the menu bar.
+- **🖥 Multi-session monitor** — every Claude Code, Codex and Kimi session across every terminal, with live **⏸ waiting · ⚙ working** counters in the menu bar.
 - **🔔 Toasts over fullscreen** — "needs permission" is visible even inside a fullscreen app, with customizable content (branch, model, effort, tokens, duration).
 - **🎛 Always-on-top hotkey panel** (⌘J on macOS, Ctrl+J on Linux) — open, glance, act, dismiss (Raycast-style); never steals focus.
 - **↩️ Reply into any session** — type back into a session via tmux even if its window is minimized or on another Space; a `/` command palette included.
 - **⚙️ Remote control** — switch model (Opus / Sonnet / Haiku) and reasoning effort from the panel; answer multi-choice agent questions with native pickers.
 - **🛰 Remote sessions** — agents running on a VPS show up in the same list, over your own SSH; a thin node buffers events while the laptop sleeps ([docs/remote.md](docs/remote.md)).
+- **🔁 Loops and pipelines** — overnight routines the agent runs on its own, with an exit condition and hard walls. Bigger work is assembled as a graph: scout → edit → test, a fork into parallel branches (each in its own `git worktree`), a per-item fan-out over a list computed at runtime, and a join that merges them back. The graph exports to **BPMN 2.0**, is edited in **Camunda Modeler** and comes back without losses ([docs/pipelines.md](docs/pipelines.md)).
 - **📊 Usage, costs and limits** — token and cost tracking per model and project; when a session hits the usage limit, Jarvis shows when it resets and can auto-resume it.
 - **AI workflow analytics** — configurable local Claude/Codex and normalized event sources, explainable harness scores, tool failures, prompt signals, Git attribution with explicit unknowns, and outcome-based model/time/cost comparisons ([guide, Russian](docs/ai-analytics.md), [configuration and adapters](docs/ai-analytics-integrations.md), [industry research](docs/ai-analytics-research.md)).
 - **🗣 Jarvis speaks** — a local TTS voice reads out what a session did or what it's waiting for (Russian-first for now).
@@ -45,6 +46,7 @@ Running several coding agents at once turns **you** into the bottleneck. Session
 - **☕ Keep the Mac awake** — anti-sleep (a `caffeinate` equivalent) plus a guarded closed-lid mode for overnight runs.
 - **✅ Read-only task board** — live `TodoWrite` progress (done / in-progress / queued) per session.
 - **📦 Model manager** — download, delete and hot-swap the local TTS/STT/wake-word models from settings; guided first-run onboarding.
+- **🧩 Capabilities are plugins** — keep-awake, clamshell and whatever comes next all sit on one contract: a manifest declares settings, tray items and permissions, and the core renders the UI from it. Your own integrations run as separate processes in any language — [docs/plugins.md](docs/plugins.md).
 - **🔒 Event-driven & private** — built on the agents' own hooks (no screen scraping), everything runs locally, no telemetry, removable with one command.
 - **📟 Terminal and phone too** — the same fleet from a TUI ([jarvis-cli](https://github.com/arklual/jarvis-cli)) or from Android ([jarvis-mobile](https://github.com/arklual/jarvis-mobile)); see [the stack](#the-jarvis-stack).
 
@@ -75,7 +77,7 @@ reach for when an agent runs on a VPS.
 
 Jarvis is a power-user tool. It pays off once you cross the pain threshold of **3+ parallel agent sessions**:
 
-- **Solo developers running an agent fleet** — several Claude Code / Codex sessions across projects, where checking each terminal by hand eats the very time the agents were supposed to save.
+- **Solo developers running an agent fleet** — several Claude Code / Codex / Kimi sessions across projects, where checking each terminal by hand eats the very time the agents were supposed to save.
 - **Overnight and long unattended runs** — big refactors, test-fix loops, batch migrations on a MacBook: Jarvis keeps the Mac awake (even lid-closed) and auto-resumes sessions when the usage limit window resets.
 - **People who like to stay heads-down** — you keep writing code or reading while agents grind; Jarvis interrupts you only when one of them actually needs a decision, with a toast or a spoken line.
 - **Small teams standardizing agent workflows** — Jarvis is fully local per machine (no server, no accounts), so every developer just installs it and gets the same visibility.
@@ -98,7 +100,7 @@ It's probably **not** for you if you run one session in one terminal (native not
    xattr -dr com.apple.quarantine /Applications/Jarvis.app
    ```
 
-4. On first launch Jarvis offers to set up the Claude Code / Codex integration and download voice models — click **«Настроить»** ("Set up"); progress is shown step by step in the window.
+4. On first launch Jarvis offers to set up the Claude Code / Codex / Kimi integration and download voice models — click **«Настроить»** ("Set up"); progress is shown step by step in the window.
 
 The app checks for updates itself (built-in updater). You can reinstall the integration anytime: menu bar → "Reinstall integration…".
 
@@ -130,7 +132,7 @@ optional helpers (`playerctl`, `wmctrl`, `xdotool`) — [`docs/linux.md`](docs/l
 
 - **macOS 11+** on **Apple Silicon** (M1 or newer) — the prebuilt DMG is aarch64-only; Intel Macs build from source (below). Or **Linux** with WebKitGTK, GTK 3 and an appindicator-capable tray;
 - **tmux** — required for replying into sessions and the remote (`brew install tmux` / `apt install tmux`);
-- **Claude Code** (CLI) and/or **Codex** (CLI) — the agents Jarvis monitors.
+- **Claude Code** (CLI), **Codex** (CLI) and/or **Kimi Code CLI** — the agents Jarvis monitors; each integration is wired up automatically when the corresponding binary (`claude`, `codex`, `kimi`) is found on the system.
 
 <details>
 <summary>Build from source / for developers</summary>
@@ -164,7 +166,7 @@ Check the daemon is alive: `curl -s --unix-socket ~/.jarvis/run.sock http://jarv
 
 ### 🖥 Session monitoring
 
-A registry of every interactive Claude Code / Codex session: status (idle / working / waiting / finished / hit the limit), project, branch, model, activity. The menu-bar counter (**◇ ⏸N ⚙M**) is the cross-terminal summary; the hotkey panel is the detailed view.
+A registry of every interactive Claude Code / Codex / Kimi session: status (idle / working / waiting / finished / hit the limit), project, branch, model, activity. The menu-bar counter (**◇ ⏸N ⚙M**) is the cross-terminal summary; the hotkey panel is the detailed view.
 
 <details>
 <summary>How it works</summary>
@@ -210,7 +212,7 @@ In a session's chat the **Reply** field inserts text straight into the session's
 
 </details>
 
-### 🤝 Claude Code and Codex, side by side
+### 🤝 Claude Code, Codex and Kimi, side by side
 
 If `codex` is found during setup, Jarvis wires it up too: hooks in `~/.codex/hooks.json` and a `codex` shim using the same tmux mechanism. Interactive Codex sessions appear in the panel with a `codex` badge and get the same treatment — status, toasts, voice, chat, reply-into-session, and a resume command (`codex resume <session_id>`).
 
@@ -218,6 +220,15 @@ If `codex` is found during setup, Jarvis wires it up too: hooks in `~/.codex/hoo
 <summary>Codex specifics</summary>
 
 Model and reasoning are changed via Codex's own `/model` picker (there is no separate `/effort`). **Headless `codex exec` does not fire hooks** — such runs aren't monitored (by design, same as `claude -p`). On a fresh machine Codex may ask you to trust `~/.codex/hooks.json`; Jarvis never injects the global `--dangerously-bypass-hook-trust` flag. Codex usage/cost numbers are estimates.
+
+</details>
+
+The third agent is **Kimi Code CLI** (`kimi`, Moonshot AI) — same deal: a `kimi` shim on the same tmux mechanism, a `kimi` badge in the panel, status, toasts, voice, chat, reply-into-session and a resume command (`kimi -S <session_id>`). Hooks live elsewhere, though: Kimi keeps them in `[[hooks]]` sections inside `~/.kimi-code/config.toml` (the home is overridable via `KIMI_CODE_HOME`). That file is the user's shared config — providers, models, permission rules — so Jarvis edits it as a managed block between markers, takes a backup first and runs `kimi doctor` after writing; if the config doesn't pass the check, the backup is restored.
+
+<details>
+<summary>Kimi specifics</summary>
+
+Eleven events. Kimi is the only one of the three that sends `SessionHeartbeat` (a pulse every 60 s → honest session liveness) while also having `PermissionRequest` (the "waiting for permission" status arrives as an event, with no screen reading) and `SessionEnd` (which Codex lacks). Models: K3 · K3-256k · K2.7 Coding · K2.7 Coding Highspeed; thinking effort (low / high / max) is set separately from the model, as in Claude Code — not inside the `/model` picker, as in Codex. Kimi fires hooks from `kimi web` and from the ACP mode for IDEs as well — the panel shows terminal CLI sessions only, because the rest have no tmux pane and can't be controlled; the same goes for `kimi -p`, which does fire hooks but runs outside tmux. Kimi doesn't store the session's git branch anywhere, so the branch comes from the working directory's `.git/HEAD` (the same fallback as for Codex). Kimi usage/cost numbers are estimates too — there are no official prices in the Kimi config.
 
 </details>
 
@@ -329,8 +340,8 @@ The closest in spirit are menu-bar monitors; their edge is zero setup. Jarvis an
 ## How it works
 
 ```
-claude / codex (any terminal)
-  └─ native hooks (~/.claude/settings.json · ~/.codex/hooks.json)  ← installed by setup
+claude / codex / kimi (any terminal)
+  └─ native hooks (~/.claude/settings.json · ~/.codex/hooks.json · ~/.kimi-code/config.toml)  ← installed by setup
        └─ ~/.jarvis/bin/jarvis-hook        ← fail-silent shim, 0.3 s curl
             └─ unix socket ~/.jarvis/run.sock
                  └─ Rust daemon (Tauri) = session registry + effects
@@ -393,7 +404,7 @@ Jarvis is a solo-maintained pre-1.0 project; this is a direction, not a promise.
 
 A pre-1.0 MVP, developed in the open. Deliberate boundaries and known issues:
 
-- **macOS and Linux** (Linux from source; some capabilities differ — [`docs/linux.md`](docs/linux.md)); **Claude Code (CLI)** and **Codex (CLI)** are supported — **interactive** sessions only (headless `claude -p` / `codex exec` don't fire hooks — not monitored); the remote and reply need **tmux**.
+- **macOS and Linux** (Linux from source; some capabilities differ — [`docs/linux.md`](docs/linux.md)); **Claude Code (CLI)**, **Codex (CLI)** and **Kimi Code CLI** are supported — **interactive** sessions only (headless `claude -p` / `codex exec` don't fire hooks — not monitored; `kimi -p` does fire them, but such runs live outside tmux and can't be controlled); the remote and reply need **tmux**.
 - **The UI and voice are currently Russian-first.** Monitoring, notifications, dictation and the remote work regardless of your language; English localization is on the roadmap.
 - **Effort** can't be read from outside → the panel keeps optimistic state.
 - **Hook schemas drift between agent versions.** If events stop arriving after a `claude` update, compare against the current hooks docs and fix `EVENTS`/the format in `src-tauri/src/bin/setup.rs`.
@@ -427,4 +438,4 @@ Jarvis's code is licensed under the **[MIT License](LICENSE)** © 2026 Sergey Ch
 
 > ⚠️ The default voice (`v4_ru`) and wake-word (`hey_jarvis`) are **non-commercial**. For commercial use: voice → Silero `v5_cis_base` (MIT); wake-word → train your own or disable it; STT → Whisper or Qwen3. The full breakdown and third-party obligations are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) (including the BSD-3 attribution for `mediaremote-adapter`).
 
-**Non-affiliation.** Jarvis is an independent open-source project. It is **not affiliated with, or endorsed by, Anthropic, PBC**; "Claude" and "Claude Code" are trademarks of Anthropic, used **nominatively** (to describe compatibility). It is likewise not affiliated with OpenAI; "Codex" is referenced nominatively. Jarvis works on top of the agents' **official hooks**. The project is also unaffiliated with Marvel/Disney; any resemblance to the fictional "J.A.R.V.I.S." is unintentional.
+**Non-affiliation.** Jarvis is an independent open-source project. It is **not affiliated with, or endorsed by, Anthropic, PBC**; "Claude" and "Claude Code" are trademarks of Anthropic, used **nominatively** (to describe compatibility). It is likewise not affiliated with OpenAI or with Moonshot AI; "Codex" and "Kimi" are referenced nominatively. Jarvis works on top of the agents' **official hooks**. The project is also unaffiliated with Marvel/Disney; any resemblance to the fictional "J.A.R.V.I.S." is unintentional.

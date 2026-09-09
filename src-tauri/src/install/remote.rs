@@ -899,7 +899,7 @@ fn build_hint(remote: &Remote, triples: &[String], tried: &[PathBuf]) -> String 
 ///
 /// `include_str!` — по той же причине, что и у остальных шимов: установщик не
 /// должен зависеть от того, лежит ли рядом дерево исходников.
-const NODE_SRC: [(&str, &str); 12] = [
+const NODE_SRC: [(&str, &str); 13] = [
     ("Cargo.toml", include_str!("../../node/Cargo.toml")),
     ("src/main.rs", include_str!("../../node/src/main.rs")),
     ("src/node/mod.rs", include_str!("../../node/src/node/mod.rs")),
@@ -909,6 +909,7 @@ const NODE_SRC: [(&str, &str); 12] = [
     ("src/node/tmux.rs", include_str!("../../node/src/node/tmux.rs")),
     ("src/node/agent.rs", include_str!("../../node/src/node/agent.rs")),
     ("src/node/projects.rs", include_str!("../../node/src/node/projects.rs")),
+    ("src/node/live.rs", include_str!("../../node/src/node/live.rs")),
     ("src/node/sources.rs", include_str!("../../node/src/node/sources.rs")),
     ("src/node/hooks.rs", include_str!("../../node/src/node/hooks.rs")),
     ("src/codex_hooks.rs", include_str!("../codex_hooks.rs")),

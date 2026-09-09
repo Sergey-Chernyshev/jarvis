@@ -1,5 +1,8 @@
 /* Панель Jarvis: сессии, чат сессии, настройки. Все данные — через textContent, без innerHTML. */
 
+// Каталог агентов: модели, усилия, умения — оттуда, а не тернарником по id.
+const AGENTS = window.JarvisAgents;
+
 const panelEl = document.getElementById('panel');
 const listEl = document.getElementById('list');
 const chatEl = document.getElementById('chat');
@@ -32,6 +35,21 @@ function editingText(el = document.activeElement) {
   if (!el) return false;
   return window.jarvisKeys.editing(el);
 }
+
+/* Поле, которое разбирает простые клавиши само (правка имени чата, путь
+ * «Нового проекта», «что сделать»). stopPropagation в таком поле бесполезен:
+ * главный обработчик панели висит на window в фазе ПЕРЕХВАТА и отрабатывает
+ * раньше — Esc успевал спрятать всю панель, ↵ провалиться в чат, ↑↓ перерисовать
+ * список и убить поле под курсором. Помечаем поле, а обработчик его уступает. */
+function ownsKeys(el) {
+  return !!(el && el.dataset && el.dataset.ownkeys !== undefined);
+}
+// Пометить поле как разбирающее клавиши само. Гасить всплытие всё равно нужно
+// отдельно — для локальных обработчиков разделов, слушающих window по-простому.
+function claimKeys(el) {
+  el.dataset.ownkeys = '';
+  return el;
+}
 const footerLeftEl = document.getElementById('footerLeft');
 const tabSessionsEl = document.getElementById('tabSessions');
 const tabSettingsEl = document.getElementById('tabSettings');
@@ -41,6 +59,11 @@ const tabLoopsEl = document.getElementById('tabLoops');
 const bundlePaneEl = document.getElementById('bundlePane');
 const tabBundleEl = document.getElementById('tabBundle');
 const tabVoiceEl = document.getElementById('tabVoice');
+const agentPaneEl = document.getElementById('agentPane');
+const tabAgentEl = document.getElementById('tabAgent');
+// Колонка чатов Джарвиса и её домашнее место внутри переписки (см. dockAgentSide)
+const agChatsEl = document.getElementById('agChats');
+const agWrapEl = agentPaneEl.querySelector('.agwrap');
 
 const STATUS_LABEL = {
   working: 'работает',
@@ -49,6 +72,17 @@ const STATUS_LABEL = {
   idle: 'простаивает',
   limit: 'лимит — ждёт сброса',
 };
+
+/* Сессия не закончила, а умерла. Честного Status::Failed в модели нет: демон
+ * ставит упавшей сессии Done с этой пометкой в detail, и в списке она выглядит
+ * ровно как успешно доработавшая. Пока состояние не завели в Rust, различаем
+ * по detail — врать «готово» про упавшую хуже, чем опереться на строку. */
+const FAILED_RE = /останов|упал|оборв|не отвеча/i;
+const failedSession = (s) => !!(s && s.status === 'done' && FAILED_RE.test(s.detail || ''));
+
+// Состояние словами — для title, aria-label и вообще везде, где точки мало.
+const statusWord = (s) =>
+  (failedSession(s) ? 'упала' : STATUS_LABEL[s && s.status]) || '';
 
 let state = [];
 let sel = 0;
@@ -135,6 +169,41 @@ const detailEmptyEl = document.getElementById('detailEmpty');
  *  который ставит theme.js из настроек; так режим виден и до ответа моста. */
 const windowMode = () => document.documentElement.dataset.mode === 'window';
 
+/** Разделы, при которых список слева что-то значит: только в них его и стоит
+ *  пересобирать на пуш состояния (см. render). */
+const LIST_VIEWS = new Set(['list', 'chat', 'question']);
+
+/** Недописанные ответы по сессиям: id → текст поля. */
+const chatDrafts = new Map();
+
+/* Вкладка «Джарвис» — отдельный экран на всё окно, а не третья колонка внутри
+ * переписки. В оконном режиме его чаты занимают ЛЕВУЮ колонку окна вместо
+ * списка сессий: сетка кладёт в область `list` только своих детей, поэтому
+ * колонку и переселяем. В накладке и в окне из трея левой колонки нет — там она
+ * остаётся дома, внутри .agwrap. */
+let agentTab = null; // рукоятка смонтированной вкладки (agent-chat.js)
+function dockAgentSide(on) {
+  const host = on ? panelEl : agWrapEl;
+  if (agChatsEl.parentElement !== host) {
+    // в переписке колонка идёт ПЕРЕД лентой, в сетке порядок решают области
+    if (on) panelEl.insertBefore(agChatsEl, listEl.nextSibling);
+    else agWrapEl.insertBefore(agChatsEl, agWrapEl.firstChild);
+  }
+  const was = agChatsEl.dataset.dock;
+  agChatsEl.dataset.dock = on ? '1' : '0';
+  // Класс ставим здесь же, а не ждём первой отрисовки колонки: неразмеченный
+  // grid-элемент сетка разложила бы сама — куда попало.
+  agChatsEl.classList.toggle('docked', on);
+  if (was !== agChatsEl.dataset.dock && agentTab) agentTab.redock();
+}
+
+/* Поиск в шапке: в режиме Джарвиса он ищет по ЕГО чатам. Двух почти одинаковых
+ * полей рядом не бывает — сессий на экране нет, и искать общему полю нечего, а
+ * колонка своего поля больше не рисует (agent-chat.js, extFind). */
+const QUERY_PLACEHOLDER = queryEl.placeholder;
+let listQuery = ''; // поиск по сессиям — ждёт возврата таким, каким его оставили
+let agentQuery = ''; // ...и поиск по чатам Джарвиса тоже: это два разных поиска
+
 function routeSnapshot() {
   return { view, query: queryEl.value, sel, sessionId: chatSessionId,
     project: chatTitleEl.textContent, draft: view === 'chat' ? replyEl.value : undefined,
@@ -168,6 +237,8 @@ function goBack() {
 }
 
 function setView(next, options = {}) {
+  const prev = view;
+  const previousQuery = queryEl.value;
   const changed = view !== next;
   if (options.restore) navigation.replace({ ...options.restore, view: next });
   else navigation.go({ view: next, sessionId: next === 'chat' ? chatSessionId : undefined }, options.fromRoute || routeSnapshot());
@@ -197,16 +268,36 @@ function setView(next, options = {}) {
   window.jarvisWorkspace?.changed(next, options.restore);
   window.jarvisSessionWorkspace?.changed(next);
   closeActions();
-  // Оконный режим (14h): список слева живёт всегда, поиск и вкладки — тоже.
+  // Оконный режим (14h): список слева живёт всегда — кроме экрана Джарвиса, где
+  // левая колонка отдана его чатам; поиск и вкладки на месте всегда.
   // В накладке остаётся прежний фокус-режим: чат и вопрос занимают панель целиком.
   const win = windowMode();
-  document.querySelector('.cmdrow').hidden = !['home', 'list', 'history'].includes(next);
+  document.querySelector('.cmdrow').hidden = !['home', 'list', 'history', 'agent'].includes(next);
   queryEl.placeholder = next === 'home' ? 'Найти команду или чат…' : next === 'history' ? 'Найти проект…' : 'Найти чат…';
   document.getElementById('pageNavigation').hidden = next === 'home';
   document.getElementById('launcher').hidden = next !== 'home';
   listEl.hidden = next !== 'list';
   contentEl.hidden = ['home', 'list'].includes(next);
   detailEmptyEl.hidden = true;
+  // Уходим от Джарвиса — снимаем прокрутку его ленты: спрятанному узлу браузер
+  // обнуляет scrollTop, и возврат кидал бы в конец переписки.
+  if (prev === 'agent' && next !== 'agent' && agentTab) agentTab.park();
+  // Поиск меняет адресата вместе с экраном (см. QUERY_PLACEHOLDER выше)
+  if (next === 'agent' && prev !== 'agent') {
+    listQuery = previousQuery;
+    queryEl.value = agentQuery;
+    queryEl.placeholder = 'Найти чат Джарвиса…';
+  } else if (prev === 'agent' && next !== 'agent') {
+    agentQuery = previousQuery;
+    queryEl.value = listQuery;
+    // The destination view already set its own placeholder above.
+  }
+  /* Где живёт колонка чатов Джарвиса, решает режим окна, а не вкладка: в сетке
+   * она просто ждёт своего экрана спрятанной. Зато КОЛОНКА СЕТКИ отдаётся ему
+   * только на его экране — по этой метке ширину тянут за границу сетки. */
+  dockAgentSide(win);
+  agChatsEl.hidden = win && next !== 'agent';
+  panelEl.dataset.agent = win && next === 'agent' ? '1' : '0';
   chatEl.hidden = next !== 'chat';
   qviewEl.hidden = next !== 'question';
   settingsEl.hidden = next !== 'settings';
@@ -216,6 +307,7 @@ function setView(next, options = {}) {
   document.getElementById('meetings').hidden = next !== 'meetings';
   loopsEl.hidden = next !== 'loops';
   bundlePaneEl.hidden = next !== 'bundle';
+  agentPaneEl.hidden = next !== 'agent';
   historyEl.hidden = next !== 'history';
   // чат и вопрос несут собственные нижние бары — парящий футер только тут.
   // В окне полоска не парит, а стоит в сетке под обеими колонками — она нужна всегда.
@@ -232,6 +324,7 @@ function setView(next, options = {}) {
   tabVoiceEl.classList.toggle('active', next === 'voicehist');
   tabLoopsEl.classList.toggle('active', next === 'loops');
   tabBundleEl.classList.toggle('active', next === 'bundle');
+  tabAgentEl.classList.toggle('active', next === 'agent');
   tabSessionsEl.classList.toggle('active', next === 'list' || next === 'chat');
   // Каждый раздел поднимается в своей обёртке: исключение в одном не должно
   // оставлять панель с белым экраном — раньше первая же ошибка обрывала
@@ -289,6 +382,9 @@ function setView(next, options = {}) {
   if (next === 'bundle') {
     safely('bundle', () => window.initBundle(bundlePaneEl), bundlePaneEl);
   }
+  // Разговор с главным агентом: разметка своя, вся логика — в agent-chat.js,
+  // общем с окном из трея. Монтируется один раз, дальше только фокус.
+  if (next === 'agent') safely('agent', () => { agentTab = window.initAgentChat(agentPaneEl); }, agentPaneEl);
   if (next === 'history') safely('history', renderHistory, historyEl);
   else if (recording) { recording = false; recordingBtn.classList.remove('recording'); }
   if (['home', 'list', 'history'].includes(next)) queryEl.focus();
@@ -374,8 +470,9 @@ function filtered() {
   const ordered = orderedSessions();
   const q = queryEl.value.trim().toLowerCase();
   if (!q) return ordered;
+  // имя чата ищется наравне с проектом: его для того и дают, чтобы находить
   return ordered.filter((s) =>
-    `${s.project || ''} ${s.detail || ''} ${s.agent || ''} ${s.remote || ''}`.toLowerCase().includes(q));
+    `${s.project || ''} ${s.name || ''} ${s.detail || ''} ${s.agent || ''} ${s.remote || ''}`.toLowerCase().includes(q));
 }
 
 function render() {
@@ -387,6 +484,16 @@ function render() {
   // его на всё время чата: статусы не обновлялись, а открытый чат никак не
   // выделялся среди строк.
   if (listEl.hidden) return;
+  // …но в оконном режиме список прячется только на экране Джарвиса, а при всех
+  // прочих разделах он виден — и пересобирается целиком до восьми раз в
+  // секунду, включая время, когда человек в настройках или статистике и на
+  // список даже не смотрит. Разделы, при
+  // которых список неактуален, перерисовку не заказывают; вернётся человек —
+  // setView позовёт render() сам.
+  if (!LIST_VIEWS.has(view)) return;
+  // пока правят имя — список не трогаем: пуш состояния прилетает несколько раз
+  // в секунду и стёр бы поле вместе с курсором
+  if (renaming) return;
   // hover-выбор разоружаем на каждую перерисовку: дальше его снова взведёт только
   // реальное mousemove (см. listEl.mousemove). Иначе фон-обновления (data push)
   // пересоздают строки под неподвижным курсором → mouseenter таскает выделение.
@@ -414,9 +521,11 @@ function render() {
   if (!list.length) {
     const empty = document.createElement('div');
     empty.className = 'empty';
+    // перечисляем те CLI, что пульт действительно ведёт, а не один claude:
+    // список берём из каталога агентов, чтобы он не разъезжался с ним
     empty.textContent = state.length
       ? 'Ничего не найдено'
-      : 'Здесь появятся твои чаты. Начни задачу в разделе «Проекты» или запусти Claude / Codex в терминале.';
+      : `Нет активных сессий — запусти ${AGENTS.present().map((a) => a.id).join(', ')} в любом терминале, они появятся здесь сами.`;
     listEl.appendChild(empty);
     return;
   }
@@ -426,12 +535,17 @@ function render() {
     row.setAttribute('role', 'button');
     row.tabIndex = 0;
     row.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); openSession(s); } });
-    row.className = `row ${s.status}${i === sel ? ' selected' : ''}`;
-    row.title = [s.remote ? `узел ${s.remote}` : null, s.cwd, s.title, ...(s.todoList || [])]
+    row.className = `row ${s.status}${failedSession(s) ? ' failed' : ''}${i === sel ? ' selected' : ''}`;
+    row.dataset.sid = s.id; // по нему правка имени находит свою строку
+    row.title = [statusWord(s), s.remote ? `узел ${s.remote}` : null, s.cwd, s.title, ...(s.todoList || [])]
       .filter(Boolean).join('\n');
 
     const dot = document.createElement('span');
     dot.className = 'dot';
+    // состояние словами: точка различает форму и краску, но пара «лимит» и
+    // «ждёт» по яркости — 1.51:1, а дальтонику это одна и та же точка
+    dot.title = statusWord(s);
+    dot.setAttribute('aria-label', statusWord(s));
 
     const name = document.createElement('span');
     name.className = 'name';
@@ -444,13 +558,12 @@ function render() {
       branch.textContent = `⎇ ${s.branch}`;
     }
 
-    // бейдж агента: показываем только для не-claude (codex), чтобы отличать
-    // сессии разных бэкендов в общем списке; для claude — как раньше (без пилла).
+    // пилл у всех, кроме агента по умолчанию: для claude как раньше
     let agentBadge = null;
-    if (s.agent && s.agent !== 'claude') {
+    if (s.agent && s.agent !== AGENTS.DEFAULT_ID) {
       agentBadge = document.createElement('span');
       agentBadge.className = 'badge agent';
-      agentBadge.textContent = s.agent;
+      agentBadge.textContent = AGENTS.title(s.agent).toLowerCase();
     }
 
     // сессия живёт не на этой машине: бейдж с именем узла рядом с бейджем агента.
@@ -465,9 +578,8 @@ function render() {
 
     const badge = document.createElement('span');
     badge.className = 'badge';
-    // claude: s.model||'claude' (как было). codex: модель из payload, иначе «…»
-    // (не дублируем «codex» — его показывает agentBadge).
-    badge.textContent = visibleModel(s.model) || (!s.agent || s.agent === 'claude' ? 'claude' : '…');
+    // модель ещё не названа: имя агента, а рядом с пиллом — многоточие, чтобы не дублировать
+    badge.textContent = modelLabel(s.agent, s.model) || (agentBadge ? '…' : AGENTS.title(s.agent).toLowerCase());
 
     const host = hostLabel(s);
     let hostBadge = null;
@@ -477,18 +589,30 @@ function render() {
       hostBadge.textContent = host;
     }
 
+    // имя чата, данное человеком: оно и есть заголовок этой строки
+    let chatName = null;
+    if (s.name) {
+      chatName = document.createElement('span');
+      chatName.className = 'badge chatname';
+      chatName.textContent = s.name;
+      chatName.title = `Своё имя чата${s.autoTitle ? ` (авто: ${s.autoTitle})` : ''} — клик, чтобы изменить`;
+      chatName.addEventListener('click', (e) => { e.stopPropagation(); startRename(s); });
+    }
+
     const summary = document.createElement('span');
     summary.className = 'summary';
     // контекст по убыванию точности: текущая задача → саммари последних задач → промпт → ai-title
     const live = s.detail || STATUS_LABEL[s.status] || '';
+    // имя уже стоит чипом — вторым эхом в этой же строке оно не нужно
     const ctx = s.task
       ? `${s.taskProgress ? s.taskProgress + ' · ' : ''}${s.task}`
-      : (s.summary || s.lastPrompt || s.title || '');
-    if (s.status === 'working' || s.status === 'waiting') {
-      summary.textContent = ctx && ctx !== live ? `${ctx} — ${live}` : (ctx || live);
-    } else {
-      summary.textContent = ctx || live;
-    }
+      : (s.summary || s.lastPrompt || (s.name ? '' : s.title) || '');
+    // Состояние — первым: многоточие режет конец, и раньше отваливалось ровно
+    // то, ради чего в список и смотрят. У «готово» и «лимита» контекст есть
+    // почти всегда, поэтому слова состояния не показывались никогда.
+    summary.textContent = ctx && ctx !== live ? `${live} — ${ctx}` : (live || ctx);
+    // обрезанное саммари негде дочитать: в title строки ни task, ни summary нет
+    summary.title = summary.textContent;
 
     const time = document.createElement('span');
     time.className = 'time';
@@ -496,6 +620,7 @@ function render() {
     time.title = startTitle(s.createdAt);
 
     row.append(dot, name);
+    if (chatName) row.appendChild(chatName);
     if (branch) row.appendChild(branch);
     if (agentBadge) row.appendChild(agentBadge);
     if (remoteBadge) row.appendChild(remoteBadge);
@@ -526,134 +651,11 @@ function render() {
 
 /* ---------- чат сессии ---------- */
 
-/* --- мини-маркдаун для реплик ассистента: абзацы, списки, код. Без innerHTML. --- */
+/* --- мини-маркдаун для реплик ассистента: абзацы, списки, код. Без innerHTML.
+ * Сам рендер живёт в markdown.js: та же лента есть у вкладки «Джарвис» и у окна
+ * из трея, а renderer.js там не загружен. Здесь — только местное имя. --- */
 
-function renderInline(el, text) {
-  for (const t of text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g)) {
-    if (!t) continue;
-    if (t.length > 2 && t.startsWith('`') && t.endsWith('`')) {
-      const code = document.createElement('code');
-      code.textContent = t.slice(1, -1);
-      el.appendChild(code);
-    } else if (t.length > 4 && t.startsWith('**') && t.endsWith('**')) {
-      const b = document.createElement('strong');
-      b.textContent = t.slice(2, -2);
-      el.appendChild(b);
-    } else {
-      el.appendChild(document.createTextNode(t));
-    }
-  }
-}
-
-// «N заметок» с правильным русским склонением
-function notesWord(n) {
-  const d = n % 100, u = n % 10;
-  if (d >= 11 && d <= 14) return 'заметок';
-  if (u === 1) return 'заметка';
-  if (u >= 2 && u <= 4) return 'заметки';
-  return 'заметок';
-}
-
-function renderMarkdown(root, text) {
-  const para = [];
-  const code = [];
-  let inCode = false;
-  let ul = null;
-  let callout = null; // .callout (свёрнутый Insight), пока открыт для записи
-  let calloutBody = null; // .callout-body — туда пишется содержимое
-  let calloutLabel = null; // span с текстом «Insight», в конце дополняем счётчиком
-
-  const target = () => calloutBody || root;
-
-  // финализировать Insight: посчитать заметки и подписать «· N заметок»
-  const closeCallout = () => {
-    if (!callout) return;
-    const n = calloutBody.querySelectorAll('li, p').length;
-    if (n) calloutLabel.textContent = `Insight · ${n} ${notesWord(n)}`;
-    callout = calloutBody = calloutLabel = null;
-  };
-
-  const flushPara = () => {
-    if (!para.length) return;
-    const p = document.createElement('p');
-    para.forEach((line, i) => {
-      if (i) p.appendChild(document.createElement('br'));
-      renderInline(p, line.replace(/^#+\s+/, ''));
-    });
-    if (/^#+\s/.test(para[0])) p.classList.add('md-h');
-    target().appendChild(p);
-    para.length = 0;
-  };
-  const flushCode = () => {
-    const pre = document.createElement('pre');
-    pre.textContent = code.join('\n');
-    target().appendChild(pre);
-    code.length = 0;
-  };
-
-  for (const raw of String(text).split('\n')) {
-    const line = raw.trimEnd();
-    // фенс — только строка, начинающаяся с ``` (упоминание ``` в тексте — не фенс)
-    if (/^\s*```/.test(line)) {
-      if (inCode) flushCode();
-      else { flushPara(); ul = null; }
-      inCode = !inCode;
-      continue;
-    }
-    if (inCode) { code.push(raw); continue; }
-
-    // `★ Insight ───` → свёрнутая Insight-строка (раскрывается кликом)
-    const co = line.match(/^\s*`?\s*[★✦☆]\s*([^─━`]*?)\s*[─━]{3,}\s*`?\s*$/);
-    if (co) {
-      flushPara();
-      ul = null;
-      closeCallout(); // вложенных Insight не бывает — закрываем предыдущий
-      callout = document.createElement('div');
-      callout.className = 'callout';
-      const title = document.createElement('div');
-      title.className = 'callout-title';
-      title.appendChild(svgEl('svg', { width: '11', height: '11', viewBox: '0 0 12 12', fill: 'none', class: 'istar' }))
-        .appendChild(svgEl('path', { d: 'M6 1 L7.3 4.4 L11 4.6 L8.1 6.9 L9.1 10.4 L6 8.4 L2.9 10.4 L3.9 6.9 L1 4.6 L4.7 4.4 Z', stroke: 'currentColor', 'stroke-width': '1.1', 'stroke-linejoin': 'round' }));
-      calloutLabel = document.createElement('span');
-      calloutLabel.textContent = co[1].trim() || 'Insight';
-      title.appendChild(calloutLabel);
-      const chev = svgEl('svg', { width: '9', height: '9', viewBox: '0 0 10 10', fill: 'none', class: 'ichev' });
-      chev.appendChild(svgEl('path', { d: 'M3 2 L7 5 L3 8', stroke: 'currentColor', 'stroke-width': '1.4', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
-      title.appendChild(chev);
-      title.addEventListener('click', () => title.parentElement.classList.toggle('open'));
-      callout.appendChild(title);
-      calloutBody = document.createElement('div');
-      calloutBody.className = 'callout-body';
-      callout.appendChild(calloutBody);
-      root.appendChild(callout);
-      continue;
-    }
-    // линия из ─ : закрытие Insight либо просто разделитель
-    if (/^\s*`?\s*[─━]{3,}\s*`?\s*$/.test(line)) {
-      flushPara();
-      ul = null;
-      if (callout) closeCallout();
-      else root.appendChild(Object.assign(document.createElement('div'), { className: 'md-hr' }));
-      continue;
-    }
-
-    if (!line.trim()) { flushPara(); ul = null; continue; }
-    const m = line.match(/^\s*[-*•]\s+(.*)$/);
-    if (m) {
-      flushPara();
-      if (!ul) { ul = document.createElement('ul'); target().appendChild(ul); }
-      const li = document.createElement('li');
-      renderInline(li, m[1]);
-      ul.appendChild(li);
-      continue;
-    }
-    ul = null;
-    para.push(line);
-  }
-  flushPara();
-  if (inCode && code.length) flushCode(); // незакрытый фенс — дорендерим как код
-  closeCallout(); // Insight без замыкающей линии ─ — финализируем счётчиком
-}
+function renderMarkdown(root, text) { JarvisMarkdown.renderChat(root, text); }
 
 /* --- лента чата: подряд идущие тулзы группируются в чипы, повторы ×N --- */
 
@@ -815,13 +817,10 @@ function extractAttachments(raw) {
   return { chips, text: text.replace(/[ \t]{2,}/g, ' ').trim() };
 }
 
-// inline-SVG картинки, собранный через DOM (без innerHTML — политика файла)
-const SVGNS = 'http://www.w3.org/2000/svg';
-function svgEl(tag, attrs) {
-  const e = document.createElementNS(SVGNS, tag);
-  for (const k in attrs) e.setAttribute(k, attrs[k]);
-  return e;
-}
+// inline-SVG картинки, собранные через DOM (без innerHTML — политика файла).
+// Живут в markdown.js — оттуда же их берёт Insight в реплике; здесь короткое
+// местное имя, потому что иконок в файле два десятка.
+function svgEl(tag, attrs) { return JarvisMarkdown.svgEl(tag, attrs); }
 function makeImageIcon() {
   const svg = svgEl('svg', { width: '11', height: '11', viewBox: '0 0 12 12', fill: 'none' });
   svg.appendChild(svgEl('rect', { x: '1', y: '1.5', width: '10', height: '9', rx: '1.5', stroke: 'currentColor', 'stroke-width': '1.2' }));
@@ -1031,9 +1030,21 @@ function detSummary(key) {
 function applyCard(key, card) {
   const wrap = chatlogEl.querySelector(`.turn[data-key="${CSS.escape(key)}"]`);
   if (!wrap) return;
+  // Класс done схлопывает всё сырьё хода, а событие приходит асинхронно — ровно
+  // когда человек дочитывает. WebKit не якорит скролл, scrollTop клампится, и
+  // читателя швыряет вниз. Держим место так же, как appendChatItems: у нижнего
+  // края идём за лентой, выше — остаёмся на прочитанном.
+  const nearBottom =
+    chatlogEl.scrollHeight - chatlogEl.scrollTop - chatlogEl.clientHeight < 60;
+  const keepTop = chatlogEl.scrollTop;
+  const keepHeight = chatlogEl.scrollHeight;
+  // ход целиком выше окна — на столько же надо подтянуть скролл вверх
+  const above = wrap.offsetTop < keepTop;
   wrap.querySelector('.turnsum')?.remove();
   wrap.insertBefore(buildCard(key, card), wrap.firstChild);
   wrap.classList.add('done');
+  if (nearBottom) chatlogEl.scrollTop = chatlogEl.scrollHeight;
+  else chatlogEl.scrollTop = Math.max(0, keepTop - (above ? keepHeight - chatlogEl.scrollHeight : 0));
 }
 
 // оптимистично показанные ответы юзера, ждут «эха» из транскрипта (для дедупа)
@@ -1111,6 +1122,18 @@ function trimChatlog() {
     if (!first || (curTurn && first === curTurn.wrap)) break;
     first.remove();
   }
+  // Потолок верхних блоков в главном сценарии не действует вовсе: новый .turn
+  // заводит только реплика ЧЕЛОВЕКА, а всё, что агент делает дальше сам, растёт
+  // внутри ОДНОГО хода. «Дал задачу — агент работает сам» за полчаса — это
+  // тысячи узлов в одном блоке, и каждый тик хвоста меряет вёрстку по ним всем.
+  const raw = curTurn && curTurn.raw;
+  if (!raw) return;
+  let inner = raw.childElementCount - CHATLOG_MAX_BLOCKS;
+  while (inner-- > 0) {
+    const head = raw.firstElementChild;
+    if (!head) break;
+    head.remove();
+  }
 }
 
 function appendChatItems(items) {
@@ -1146,7 +1169,7 @@ function appendChatItems(items) {
 function updateChatChannelMark() {
   const s = state.find((x) => x.id === chatSessionId);
   // модель — бейдж рядом с именем проекта (как в строке списка)
-  const model = s && (visibleModel(s.model) || s.agent);
+  const model = s && (modelLabel(s.agent, s.model) || s.agent);
   chatModelEl.textContent = model || '';
   chatModelEl.hidden = !model;
   // рука связки: ветка в шапке + пометка конфликта. Человек, открывший чат из
@@ -1183,8 +1206,9 @@ function updateChatChannelMark() {
   if (previewBtn) previewBtn.hidden = !s || !s.cwd || !!s.remote;
   // tmux-сессии — без пометки; вне tmux помечаем
   chatChannelEl.hidden = !s || !!s.tmuxPane || s.controlMode === 'external';
-  // статус-точка справа — цвет по состоянию, пульс если работает
-  chatDotEl.className = `chatdot ${s ? s.status : ''}`;
+  // статус-точка справа — форма и краска по состоянию, движение если ждёт
+  chatDotEl.className = `chatdot ${s ? s.status : ''}${failedSession(s) ? ' failed' : ''}`;
+  chatDotEl.title = statusWord(s);
   // правый край: расход сессии (или ветка, пока usage грузится) — тихо, моно
   const subEl = document.getElementById('chatSub');
   subEl.textContent = s && s.branch ? `⎇ ${s.branch}` : '';
@@ -1204,14 +1228,16 @@ function updateChatChannelMark() {
 const tmuxHintEl = document.getElementById('tmuxHint');
 const chatStatusEl = document.getElementById('chatStatus');
 
-const MODELS = [['fable', 'Fable'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku']];
-// Набор моделей Codex — зеркало backend/codex.rs::models(). У codex-сессии
-// `/model`-пикер не должен предлагать модели Claude (issue #10 — тот же класс
-// бага: claude-специфика в codex-сессии). Значение = id для `/model <id>`.
-const MODELS_CODEX = [['gpt-5.5', 'GPT-5.5'], ['gpt-5-codex', 'Codex'], ['gpt-5', 'GPT-5']];
-
+// Пары [id, подпись] для `/model <id>`: чужие модели в сессии предлагать нельзя (#10).
 function modelsFor(agent) {
-  return agent === 'codex' ? MODELS_CODEX : MODELS;
+  return AGENTS.models(agent).map((m) => [m.id, m.name]);
+}
+
+// Короткое имя из каталога: id вроде «kimi-code/k3-256k» в узкую строку не влезает.
+function modelLabel(agent, model) {
+  if (!model) return '';
+  const hit = AGENTS.models(agent).find((m) => m.id === model);
+  return hit ? hit.name : model;
 }
 
 function visibleModel(value) {
@@ -1225,14 +1251,18 @@ function visibleModel(value) {
 // ultracode в help не публикуется — это знание с живого слайдера Fable/Opus
 let effortBase = ['low', 'medium', 'high', 'xhigh', 'max'];
 window.jarvis.getMeta().then((m) => {
-  if (m && Array.isArray(m.effortLevels) && m.effortLevels.length) effortBase = m.effortLevels;
+  if (!m) return;
+  if (Array.isArray(m.effortLevels) && m.effortLevels.length) effortBase = m.effortLevels;
+  AGENTS.setAll(m.agents);
 }).catch(() => {});
 
 const EFFORT_SHORT = { medium: 'med' };
 
-function effortsFor(model) {
+// Уровни у каждого агента свои; общий список из app_meta — запасной.
+function effortsFor(agent, model) {
   const m = (model || '').toLowerCase();
-  const list = [['auto', 'auto'], ...effortBase.map((l) => [l, EFFORT_SHORT[l] || l])];
+  const own = AGENTS.efforts(agent);
+  const list = [['auto', 'auto'], ...(own.length ? own : effortBase).map((l) => [l, EFFORT_SHORT[l] || l])];
   if (m === 'fable' || m === 'opus') list.push(['ultracode', 'ultracode']);
   return list;
 }
@@ -1293,7 +1323,9 @@ function updateChatStatus(s) {
     chatStatusEl.appendChild(document.createTextNode('ждёт твоего ответа'));
     chatStatusEl.hidden = false;
   } else if (s.status === 'limit') {
-    chatStatusEl.className = 'chatstatus waiting';
+    // не «ты нужен»: в списке эта же сессия в тот же момент самая тусклая, и
+    // акцентная полоса в чате читалась ровно наоборот
+    chatStatusEl.className = 'chatstatus limit';
     chatStatusEl.appendChild(document.createTextNode(
       limitInfo && limitInfo.active
         ? `упёрлись в лимит · сброс через ${Math.max(0, Math.round((limitInfo.resetAt - Date.now()) / 60000))}м · продолжу сам`
@@ -1555,6 +1587,15 @@ async function openChat(sessionId, project, navigationOptions = {}) {
   }
   loading.remove(); chatLlmOk = !!res.llm;
   if (res.items.length) {
+    // Мост отдаёт хвост переписки. Без пометки верхняя реплика выглядит началом
+    // разговора, хотя до неё были часы. Признак честный: у хода, чью юзер-реплику
+    // хвост отрезал, complete=false — значит выше него что-то было.
+    if ((res.spans || []).some((sp) => sp.key !== 'pre' && !sp.complete)) {
+      const cut = document.createElement('div');
+      cut.className = 'chatcut';
+      cut.textContent = 'Показан хвост переписки — начало осталось в терминале';
+      chatlogEl.appendChild(cut);
+    }
     appendChatItems(res.items);
     const sess = state.find((x) => x.id === chatSessionId);
     const lastCompleteKey = (res.spans || []).filter((s) => s.complete).map((s) => s.key).pop();
@@ -1709,13 +1750,20 @@ function openVarPanel() {
 
 function closeVarPanel() {
   saveQDraft();
+  const was = varOpen;
   varOpen = false;
   qWrap.hidden = true;
   varBtn.classList.remove('open');
   activeQOpts = qOptsEl;
+  // Клавиатуру возвращаем в поле ответа: openVarPanel сам его разфокусировал,
+  // и после ответа (или Esc) дописать реплику можно было только мышью — ровно
+  // посреди главного сценария «хоткей → ↵ по сессии → ↵ по варианту».
+  if (was && view === 'chat') replyEl.focus?.();
 }
 
 varBtn.addEventListener('click', () => (varOpen ? closeVarPanel() : openVarPanel()));
+// Ради этой кнопки панель чата и открывают — она обязана иметь клавишу.
+varBtn.title = `Выбрать вариант ответа · ${window.jarvisKeys.k('O')}`;
 document.getElementById('qpClose').addEventListener('click', closeVarPanel);
 document.getElementById('qScrim').addEventListener('click', closeVarPanel);
 
@@ -1723,6 +1771,7 @@ document.getElementById('qScrim').addEventListener('click', closeVarPanel);
 // пикера (stopPropagation режет window-обработчики); Enter — отправить,
 // Esc — вернуть клавиши пикеру.
 for (const el of [qCustomEl, qpCustomEl]) {
+  claimKeys(el);
   el.addEventListener('input', () => { qTexts[qIdx] = el.value; saveQDraft(); paintQOptions(); });
   el.addEventListener('keydown', (e) => {
     e.stopPropagation();
@@ -2109,7 +2158,7 @@ async function loadCommands() {
 function curSession() { return state.find((x) => x.id === chatSessionId); }
 
 function srcLabel(src) {
-  return { builtin: 'встр', project: 'проект', user: 'мои', plugin: 'плагин', codex: 'codex' }[src] || '';
+  return { builtin: 'встр', project: 'проект', user: 'мои', plugin: 'плагин', codex: 'codex', kimi: 'kimi' }[src] || '';
 }
 
 // /model и /effort без значения → свой пикер; иначе автокомплит команд
@@ -2150,15 +2199,14 @@ function buildValuePicker(kind) {
   if (kind === 'model') {
     const cur = visibleModel(s?.model).toLowerCase();
     paletteItems = modelsFor(s && s.agent).map(([val, label]) => ({
-      name: label, desc: 'модель сессии', active: cur === label.toLowerCase(),
+      name: label, desc: 'модель сессии', active: cur === val.toLowerCase() || cur === label.toLowerCase(),
       apply: () => applyValue('setModel', val),
     }));
   } else {
-    // У Codex отдельного /effort нет — reasoning меняется в /model-пикере; не
-    // показываем claude-only уровни в codex-сессии (бэкенд их всё равно отклонит).
-    if (s && s.agent === 'codex') { hidePalette(); return; }
-    paletteItems = effortsFor(s && s.model).map(([val, label]) => ({
-      name: label, desc: 'уровень рассуждения', active: !!(s && s.effort === val),
+    // у codex reasoning живёт в /model-пикере — спрашиваем каталог, а не id
+    if (!AGENTS.hasSeparateEffort(s && s.agent)) { hidePalette(); return; }
+    paletteItems = effortsFor(s && s.agent, s && s.model).map(([val, label]) => ({
+      name: label, desc: 'усилие', active: !!(s && s.effort === val),
       apply: () => applyValue('setEffort', val),
     }));
   }
@@ -2414,14 +2462,28 @@ if (typeof window.jarvis.agentsList === 'function') {
   window.jarvis.agentsList().then((r) => { if (r && r.ok) customAgents = r.agents || []; }).catch(() => {});
 }
 
-/* Команда возобновления по агенту: свои агенты несут шаблон в настройках;
- * без шаблона честно запускаем новую сессию тем же шимом, а не выдумываем флаг. */
+/* Один список кнопок на все экраны: раньше их было два, и они разъехались.
+ * Свои агенты живут шимом на этой машине — на узле их нет. */
+function launchAgents(remote) {
+  const list = AGENTS.present().map((a) => ({ id: a.id, name: a.title }));
+  if (!remote) for (const a of customAgents) list.push({ id: a.id, name: a.name || a.id });
+  return list;
+}
+
+/* Флаг возобновления свой у каждого CLI — таблицей, а не лесенкой if-ов.
+ * Свой агент без шаблона получает новую сессию, а не выдуманный флаг. */
+const BUILTIN_RESUME = {
+  claude: (sid) => `claude --resume ${sid}`,
+  codex: (sid) => `codex resume ${sid}`,
+  kimi: (sid) => `kimi -S ${sid}`,
+};
 function resumeBase(agent, sid) {
-  if (agent === 'codex') return `codex resume ${sid}`;
-  if (!agent || agent === 'claude') return `claude --resume ${sid}`;
-  const a = customAgents.find((x) => x.id === agent);
+  const id = agent || AGENTS.DEFAULT_ID;
+  const builtin = BUILTIN_RESUME[id];
+  if (builtin) return builtin(sid);
+  const a = customAgents.find((x) => x.id === id);
   if (a && a.resume) return a.resume.replaceAll('{sid}', sid);
-  return agent; // новая сессия через шим — resume у агента не описан
+  return id; // новая сессия через шим — resume у агента не описан
 }
 
 /* ---------- лимит-баннер ---------- */
@@ -2439,8 +2501,10 @@ function paintLimitBanner() {
   limitBannerEl.hidden = false;
 }
 
+/* limit_get отдаёт баннер И бюджет одним ответом; событие limit-state — только
+ * баннер, поэтому бюджет берём именно отсюда и не даём событию его затереть. */
 window.jarvis.onLimitState((l) => { limitInfo = l; paintLimitBanner(); });
-window.jarvis.getLimit().then((l) => { limitInfo = l; paintLimitBanner(); }).catch(() => {});
+window.jarvis.getLimit().then((l) => { limitInfo = l; paintLimitBanner(); takeBudget(l); }).catch(() => {});
 setInterval(paintLimitBanner, 30000); // тикаем обратный отсчёт
 
 /* ---------- плагины: Не спать (☕) и Крышка (⌒) ---------- */
@@ -2569,6 +2633,99 @@ function refreshFooterUsage() {
     .catch(() => {});
 }
 
+/* ---------- бюджет подписок в футере ----------
+ * Процент отвечает на «сколько осталось», а человеку нужно «до когда хватит»:
+ * 44% при спокойном темпе — это запас, при рывке — завтрашняя стена. Поэтому
+ * словами идёт ЗАПАС ХОДА, а процент стоит рядом мелким.
+ *
+ * Провайдеров два, и складывать их нельзя: две подписки, две шкалы, у каждой
+ * свой день сброса (kimi — вторник, claude — среда). Отсюда две отдельные
+ * строки, а не одна общая цифра. */
+
+const WEEKDAY = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
+const BUDGET_DAY_MS = 86400000;
+
+const footerBudgetEl = document.getElementById('footerBudget');
+let budgetInfo = null;
+
+/** Одна шкала словами: `{ name, text, pct, rung, title }`. */
+function budgetLine(name, p, now) {
+  const day = (ms) => WEEKDAY[new Date(ms).getDay()];
+  const pct = typeof p?.weekLeftPct === 'number' ? Math.round(p.weekLeftPct) : null;
+  // Чисел нет — говорим это словами бюджета, а не прячем строку: молчание
+  // добытчика неотличимо от «всё хорошо».
+  if (!p || p.rung === 'unknown' || pct === null) {
+    return { name, text: 'чисел нет', pct: null, rung: 'unknown',
+             title: p?.reason || 'опросчик ещё не ходил за числами' };
+  }
+  /* Число в футере — то, на котором принимаются решения.
+   *
+   * Раньше показывался голый остаток недели, а отказывал бюджет по другому
+   * числу: остаток минус резерв на последний день минус уже занятое под
+   * разрешённую работу. Человек видел «осталось 30%» и получал отказ — цифра,
+   * по которой нельзя предсказать поведение, хуже отсутствия цифры. Поэтому
+   * крупно идёт свободное, а из чего оно сложилось — в подсказке. */
+  const num = (v) => (typeof v === 'number' ? Math.round(v) : null);
+  const avail = num(p.availablePct);
+  const held = num(p.reservedPct) || 0;
+  const keep = num(p.reservePct) || 0;
+  const split =
+    avail === null || (held === 0 && keep === 0)
+      ? null
+      : `остаток ${pct}% = свободно ${avail}%` +
+        (keep ? ` + резерв на последний день ${keep}%` : '') +
+        (held ? ` + занято под уже разрешённое ${held}%` : '');
+  const title = [p.reason, split, p.staleNote, p.normNote].filter(Boolean).join(' · ');
+  const reset = p.weekResetAt > now ? day(p.weekResetAt) : null;
+  const runway = typeof p.runwayDays === 'number' ? p.runwayDays : null;
+  if (runway === null) {
+    // Прогноза нет (мёртвая зона, мало точек) — обещать день нельзя.
+    return { name, text: reset ? `темпа пока нет, сброс ${reset}` : 'темпа пока нет',
+             pct, free: avail, rung: p.rung, title };
+  }
+  const enough = runway >= (p.daysToReset || 0);
+  const until = day(now + runway * BUDGET_DAY_MS);
+  const text = `хватит до ${until}, до сброса${reset ? ` (${reset})` : ''} ${enough ? 'дотянет' : 'не дотянет'}`;
+  return { name, text, pct, free: avail, rung: p.rung, title };
+}
+
+function takeBudget(l) {
+  budgetInfo = l;
+  paintFooterBudget();
+}
+
+function paintFooterBudget() {
+  if (!footerBudgetEl) return;
+  const provs = budgetInfo?.providers;
+  // В режиме «расход» футер занят деньгами — двум шкалам там места нет.
+  if (!provs || footerBottom !== 'limit') { footerBudgetEl.hidden = true; return; }
+  const now = Date.now();
+  const lines = ['claude', 'kimi'].filter((n) => provs[n]).map((n) => budgetLine(n, provs[n], now));
+  footerBudgetEl.textContent = '';
+  for (const l of lines) {
+    const span = document.createElement('span');
+    span.className = 'fbud';
+    if (l.rung === 'stop' || l.rung === 'queue') span.classList.add('is-crit');
+    else if (l.rung === 'routine' || l.rung === 'warn') span.classList.add('is-warn');
+    span.title = l.title ? `${l.name}: ${l.title}` : '';
+    span.append(`${l.name} ${l.text}`);
+    // Свободное, а не голый остаток: по нему бюджет и отказывает. Разбивка —
+    // в подсказке, чтобы отказ при непустом остатке не выглядел произволом.
+    const shown = typeof l.free === 'number' ? l.free : l.pct;
+    if (shown !== null) {
+      const small = document.createElement('small');
+      small.textContent = `${shown}%`;
+      span.append(' ', small);
+    }
+    footerBudgetEl.append(span);
+  }
+  footerBudgetEl.hidden = lines.length === 0;
+}
+
+function refreshBudget() {
+  window.jarvis.getLimit().then(takeBudget).catch(() => {});
+}
+
 window.jarvis.wakeGet?.().then((w) => { wakeStatus = w; paintFooterWave(); footerLeftEl.textContent = footerText(); }).catch(() => {});
 window.jarvis.onWake?.((p) => {
   if (!p) return;
@@ -2581,15 +2738,20 @@ window.jarvis.onAudioState?.((s) => {
 });
 refreshFooterUsage();
 setInterval(refreshFooterUsage, 60000);
+// Бюджет ходит в сеть по своему расписанию (budget.rs) — панель только читает
+// готовый кэш, поэтому минуты хватает.
+setInterval(refreshBudget, 60000);
 
 const initialSettingsReady = window.jarvis.getSettings().then((s) => {
   footerBottom = s?.footerBottom === 'spend' ? 'spend' : 'limit';
   paintFooterLimit();
+  paintFooterBudget();
 }).catch(() => {});
 // «Внизу панели» переключили в настройках — полоска меняется без перезапуска
 window.addEventListener('jarvis:footer-bottom', (e) => {
   footerBottom = e.detail === 'spend' ? 'spend' : 'limit';
   paintFooterLimit();
+  paintFooterBudget();
 });
 
 /* ---------- титульная полоса оконного режима (14h) ---------- */
@@ -2920,7 +3082,7 @@ function renderPluginRows() {
   // подсказка
   const hint = document.createElement('div');
   hint.className = 'ahint';
-  hint.append('Быстрее: наберите ');
+  hint.append('Быстрее: набери ');
   const code = document.createElement('code');
   code.textContent = '/amf 1ч';
   hint.append(code, ' в поиске');
@@ -2987,6 +3149,8 @@ window.jarvis.onShown(() => {
 });
 
 queryEl.addEventListener('input', () => {
+  // Экран Джарвиса: то же поле фильтрует его чаты — список сессий не показан
+  if (view === 'agent') { if (agentTab) agentTab.search(queryEl.value); return; }
   if (view === 'home') { window.jarvisWorkspace.refresh(); return; }
   if (view === 'history') { if (window.jarvisProjects) window.jarvisProjects.search(); else { histSel = 0; renderHistory(); } return; }
   sel = 0;
@@ -3349,6 +3513,64 @@ function renderArgMode() {
   setTimeout(() => focusArgField(), 20);
 }
 
+/* ---------- своё имя чата ---------- */
+
+// id сессии, чьё имя правят прямо сейчас. Пока он стоит, render() не
+// перерисовывает список (см. render): иначе поле умрёт от первого же пуша.
+let renaming = null;
+
+function startRename(s) {
+  if (!s) return;
+  // прошлую правку бросаем ДО создания новой: иначе blur старого поля прилетит
+  // уже на новое и погасит его
+  if (renaming) { renaming = null; render(); }
+  const row = [...listEl.children].find((r) => r.dataset && r.dataset.sid === s.id);
+  // Говорим вслух: молча ничего не открыть — худший вид отказа.
+  if (!row) { showToast('Строка чата не видна — открой список'); return; }
+  renaming = s.id;
+
+  const inp = claimKeys(document.createElement('input'));
+  inp.className = 'rename';
+  inp.value = s.name || '';
+  inp.placeholder = s.autoTitle || 'имя чата';
+  inp.maxLength = 60; // тот же потолок, что у демона
+  inp.addEventListener('keydown', (e) => {
+    e.stopPropagation(); // хоткеи панели не должны мешать печатать
+    if (e.key === 'Enter') { e.preventDefault(); commitRename(s.id, inp.value); }
+    else if (e.key === 'Escape') { e.preventDefault(); cancelRename(); }
+  });
+  inp.addEventListener('click', (e) => e.stopPropagation()); // клик в поле — не открытие чата
+  inp.addEventListener('blur', () => cancelRename());
+  const chip = row.querySelector('.badge.chatname');
+  if (chip) row.replaceChild(inp, chip); // правим на месте самого имени
+  else row.insertBefore(inp, row.querySelector('.summary'));
+  inp.focus();
+  inp.select?.();
+}
+
+function cancelRename() {
+  if (!renaming) return;
+  renaming = null;
+  render();
+}
+
+// Пустое значение снимает имя — так же, как в капабилити sessions.rename.
+function commitRename(id, value) {
+  renaming = null;
+  window.jarvis.renameSession(id, value).then((res) => {
+    if (!res || res.ok !== true) showToast((res && res.error) || 'Не получилось переименовать');
+    else if (!res.name) showToast('Имя снято — снова автозаголовок');
+    render();
+  });
+}
+
+// Сессия под курсором списка либо открытая в чате — цель ⌘R и меню действий.
+function currentSession() {
+  return view === 'list' ? filtered()[sel]
+    : view === 'chat' ? state.find((x) => x.id === chatSessionId)
+    : null;
+}
+
 /* ---------- завершение сессии ---------- */
 
 // Подтверждение вторым нажатием, как у остальных разрушительных кнопок панели:
@@ -3395,6 +3617,8 @@ function actionItems() {
   if (s) {
     items.push({ label: 'Перейти в терминал', key: K(KN('enter')), run: () => focusTerminal(s.id, s.project) });
     items.push({ label: s.pinned ? 'Открепить' : 'Закрепить', key: K('P'), run: () => window.jarvis.setPin(s.id, !s.pinned) });
+    items.push({ label: s.name ? 'Переименовать чат' : 'Дать чату имя', key: K('R'), run: () => startRename(s) });
+    if (s.name) items.push({ label: 'Вернуть автозаголовок', key: K('R', { shift: true }), run: () => commitRename(s.id, '') });
     if (s.tmuxPane) items.push({ label: 'Где этот терминал?', key: K('G'), run: () => window.jarvis.pingTerminal(s.id) });
     items.push({
       label: killArmedFor(s.id) ? 'Точно завершить?' : 'Завершить сессию',
@@ -3407,6 +3631,7 @@ function actionItems() {
   items.push({ label: 'Машины', key: K('8'), run: () => setView('machines') });
   items.push({ label: 'Аналитика ИИ и расход', key: K('3'), run: () => setView('stats') });
   items.push({ label: 'История голоса', key: K('4'), run: () => setView('voicehist') });
+  items.push({ label: 'Разговор с Джарвисом', key: K('9'), run: () => setView('agent') });
   items.push({ label: 'Настройки', key: K(','), run: () => setView('settings') });
   return items;
 }
@@ -3501,7 +3726,7 @@ function resumeCommand(s, cwd) {
   return (cwd ? `cd ${quote(cwd)} && ${base}` : base) + '\n(+ параметры из настроек «Запуск»)';
 }
 
-// Запуск сессии из настроек: agent='claude'|'codex'; sessionId=null — новая
+// sessionId=null — новая сессия
 // сессия, иначе продолжение; cwd — директория проекта; machine — где запускать
 // ('local' | имя узла). Реальную команду (терминал, прокси, флаги «опасного
 // режима») собирает бэкенд session_launch, он же создаёт каталог.
@@ -3522,10 +3747,10 @@ function renderTaskOpts(host) {
   row.className = 'taskopts';
   // Задача сразу: иначе «поставить агенту работу» — это два шага (подними,
   // потом найди чат и напиши), и именно на втором дело откладывается.
-  const task = Object.assign(document.createElement('input'), {
+  const task = claimKeys(Object.assign(document.createElement('input'), {
     className: 'taskinput', type: 'text', spellcheck: false,
     placeholder: 'что сделать (необязательно)', value: taskOpts.task,
-  });
+  }));
   task.title = 'Уедет агенту, как только он встанет';
   task.addEventListener('input', () => { taskOpts.task = task.value; });
   task.addEventListener('keydown', (e) => { if (!e.metaKey && !e.ctrlKey) e.stopPropagation(); });
@@ -3771,18 +3996,23 @@ function renderHistNew(remote) {
   historyEl.appendChild(row);
   if (!histNewOpen) return;
 
+  // ↵ не должен звать отсутствующий CLI
+  const agents = launchAgents(remote);
+  const defaultAgent = agents.find((a) => a.id === AGENTS.DEFAULT_ID) || agents[0]
+    || { id: AGENTS.DEFAULT_ID, name: AGENTS.title(AGENTS.DEFAULT_ID) };
+
   const form = document.createElement('div');
   form.className = 'hnewform';
-  const input = Object.assign(document.createElement('input'), {
+  const input = claimKeys(Object.assign(document.createElement('input'), {
     type: 'text', placeholder: '~/projects/my-app', value: histNewPath, spellcheck: false,
-  });
+  }));
   input.addEventListener('input', () => { histNewPath = input.value; });
   // поле живёт внутри вкладки с ↑↓/↵/esc на window — гасим всплытие, иначе
   // стрелки будут двигать выбор строки вместо каретки
   input.addEventListener('keydown', (e) => {
     if (e.metaKey || e.ctrlKey) return;
     e.stopPropagation();
-    if (e.key === 'Enter') { e.preventDefault(); start('claude'); }
+    if (e.key === 'Enter') { e.preventDefault(); start(defaultAgent.id); }
     else if (e.key === 'Escape') { e.preventDefault(); histNewOpen = false; renderHistory(); }
   });
 
@@ -3804,16 +4034,15 @@ function renderHistNew(remote) {
     b.addEventListener('click', (e) => { e.stopPropagation(); start(agent); });
     return b;
   };
-  form.append(input, btn('claude', 'Claude'), btn('codex', 'Codex'));
+  form.append(input);
+  for (const a of agents) form.append(btn(a.id, a.name));
   renderTaskOpts(form);
-  // Свои агенты — теми же кнопками: на узлах их шима нет, поэтому только локально.
-  if (!remote) for (const a of customAgents) form.append(btn(a.id, a.name || a.id));
   historyEl.appendChild(form);
   historyEl.appendChild(Object.assign(document.createElement('div'), {
     className: 'hhint',
     textContent: remote
       ? 'Каталог создастся сам. На узле сессия поднимется в tmux — терминал не откроется, чат появится в списке.'
-      : 'Каталог создастся сам, если его ещё нет. ↵ — Claude, кнопка — выбрать агента.',
+      : `Каталог создастся сам, если его ещё нет. ↵ — ${defaultAgent.name}, кнопка — выбрать агента.`,
   }));
   // курсор уводим только при раскрытии: список перерисовывается и на каждую
   // букву в поиске — иначе фокус улетал бы из строки поиска в путь
@@ -3832,17 +4061,14 @@ function renderHistChats(g, q) {
   head.appendChild(back);
   head.appendChild(Object.assign(document.createElement('span'), { textContent: g.project }));
   head.appendChild(Object.assign(document.createElement('span'), { className: 'hcount', textContent: `${g.count} ${plural(g.count, 'чат', 'чата', 'чатов')}` }));
-  // новые сессии в директории проекта — отдельно для Claude и Codex; для групп
-  // без известной директории («другое», g.cwd == null) новая сессия бессмысленна
+  // без известной директории (g.cwd == null) новая сессия бессмысленна
   if (g.cwd) {
-    const newClaude = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Claude' });
-    newClaude.title = 'Новая сессия Claude в этой директории';
-    newClaude.addEventListener('click', (e) => { e.stopPropagation(); launchSession('claude', null, g.cwd, histMachine); });
-    const newCodex = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Codex' });
-    newCodex.title = 'Новая сессия Codex в этой директории';
-    newCodex.addEventListener('click', (e) => { e.stopPropagation(); launchSession('codex', null, g.cwd, histMachine); });
-    head.appendChild(newClaude);
-    head.appendChild(newCodex);
+    for (const a of launchAgents(remote)) {
+      const b = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: `+ ${a.name}` });
+      b.title = `Новая сессия ${a.name} в этой директории`;
+      b.addEventListener('click', (e) => { e.stopPropagation(); launchSession(a.id, null, g.cwd, histMachine); });
+      head.appendChild(b);
+    }
   }
   historyEl.appendChild(head);
   if (g.cwd) renderTaskOpts(historyEl);
@@ -3850,8 +4076,8 @@ function renderHistChats(g, q) {
   historyEl.appendChild(Object.assign(document.createElement('div'), {
     className: 'hhint',
     textContent: remote
-      ? `↵ — поднять продолжение на узле «${histMachineName(histMachine)}» (терминал не откроется) · + Claude / + Codex — новая сессия · esc — к проектам`
-      : '↵ — запустить продолжение в терминале · + Claude / + Codex — новая сессия · esc — к проектам',
+      ? `↵ — поднять продолжение на узле «${histMachineName(histMachine)}» (терминал не откроется) · «+ агент» — новая сессия · esc — к проектам`
+      : '↵ — запустить продолжение в терминале · «+ агент» — новая сессия · esc — к проектам',
   }));
 
   const sessions = q ? g.sessions.filter((s) => (s.title || '').toLowerCase().includes(q)) : g.sessions;
@@ -3909,6 +4135,7 @@ tabStatsEl.addEventListener('click', () => setView('stats'));
 tabVoiceEl.addEventListener('click', () => setView('voicehist'));
 tabLoopsEl.addEventListener('click', () => setView('loops'));
 tabBundleEl.addEventListener('click', () => setView('bundle'));
+tabAgentEl.addEventListener('click', () => setView('agent'));
 
 const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : String(n || 0));
 
@@ -4269,7 +4496,7 @@ async function renderTranscriptsCard() {
       try { res = await window.jarvis.transcriptEnhance(it.text, 'prompt'); } catch (e) {}
       enh.disabled = false; enh.textContent = '→ Промпт';
       if (res && res.ok && res.result) showEnhanceResult(wrap, res.result);
-      else showToast('Не удалось: ' + ((res && res.error) || 'ишка недоступна'));
+      else showToast('Не удалось: ' + ((res && res.error) || 'быстрая модель недоступна'));
     });
     r.appendChild(enh);
     const cp = document.createElement('button');
@@ -4362,7 +4589,7 @@ async function renderIntegrationCard() {
   if (info.foreign_hooks > 0) {
     const h = document.createElement('div');
     h.className = 'ahint';
-    h.textContent = `При удалении сохранятся ${info.foreign_hooks} чужих хук(ов) — трогаем только свои.`;
+    h.textContent = `При удалении сохранятся ${info.foreign_hooks} ${plural(info.foreign_hooks, 'чужой хук', 'чужих хука', 'чужих хуков')} — трогаем только свои.`;
     box.appendChild(h);
   }
 
@@ -5033,6 +5260,11 @@ window.addEventListener('keydown', async (e) => {
     return;
   }
 
+  // Поле само разбирает простые клавиши (см. ownsKeys): без этой уступки Esc в
+  // правке имени прятал панель, а ↵ проваливался в чат — до коммита имени.
+  // Комбинации с модификатором остаются за панелью: ⌘W, ⌘⌫ и прочее.
+  if (!isMod(e) && ownsKeys(e.target)) return;
+
   if (view === 'chat' && isMod(e) && e.key === 'Enter') { // ⌘↵ из чата — в терминал
     e.preventDefault();
     e.stopPropagation();
@@ -5078,6 +5310,7 @@ window.addEventListener('keydown', async (e) => {
     return;
   }
 
+  if (isMod(e) && e.key === '9') { e.preventDefault(); setView('agent'); return; }
   if (isMod(e) && e.key === '0') { e.preventDefault(); setView('home'); render(); return; }
   if (isMod(e) && e.key === '1') { // ⌘1 — Чаты
     e.preventDefault();
@@ -5169,7 +5402,9 @@ window.addEventListener('keydown', async (e) => {
     return;
   }
 
-  // экран вопроса — только клавиатура
+  // экран вопроса — только клавиатура. «Свой ответ…» помечен ownkeys (см.
+  // выше): без этого в него нельзя было напечатать ни пробела, ни цифры —
+  // ветка глотала их, не глядя на e.target, в отличие от близнеца-слайд-овера
   if (view === 'question' && qData) {
     if (qPending || qUnknown) return;
     if (qReview) { if (e.key === 'Enter') { e.preventDefault(); submitQ(); } return; }
@@ -5213,6 +5448,27 @@ window.addEventListener('keydown', async (e) => {
       : view === 'chat' ? state.find((x) => x.id === chatSessionId)
       : null;
     if (s) window.jarvis.setPin(s.id, !s.pinned);
+    return;
+  }
+
+  // ⌘R — имя чата, ⇧⌘R — вернуть авто. Поле поиска не помеха (как и у ⌘P):
+  // само поле правки имени свои нажатия не пропускает наверх.
+  if (isMod(e) && (e.key === 'r' || e.key === 'R')) {
+    e.preventDefault();
+    const s = currentSession();
+    if (!s) return;
+    if (e.shiftKey) { if (s.name) commitRename(s.id, ''); }
+    else startRename(s);
+    return;
+  }
+
+  // ⌘O — варианты ответа. Закрыв слайд-овер по Esc, открыть его снова было
+  // нечем: ни у одной кнопки шапки чата сочетания не было, а эту открывают чаще
+  // всех остальных вместе.
+  if (isMod(e) && (e.key === 'o' || e.key === 'O')) {
+    if (view !== 'chat' || varBtn.hidden) return;
+    e.preventDefault();
+    if (varOpen) closeVarPanel(); else openVarPanel();
     return;
   }
 

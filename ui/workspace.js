@@ -2,6 +2,7 @@
 (() => {
   'use strict';
   const sections = [
+    ['agent', 'Джарвис', 'Разговор с главным агентом', '9', 'sparkle'],
     ['list', 'Чаты', 'Активные сессии Claude и Codex', '1', 'chats-circle'],
     ['history', 'Проекты', 'Начать задачу на компьютере или удалённой машине', '2', 'folder-simple'],
     ['machines', 'Машины', 'Серверы, SSH-подключения и виртуальные машины', '8', 'server', 'VM Teleport hosts connections'],
@@ -12,7 +13,7 @@
     ['stats', 'Аналитика ИИ', 'Харнес, инструменты, код, эффект и расход', '3', 'chart-bar'],
     ['settings', 'Настройки', 'Микрофон, модели и клавиши', ',', 'gear-six'],
   ];
-  const ids = { list: 'tabSessions', history: 'tabHistory', machines: 'tabMachines', voicehist: 'tabVoice', meetings: 'tabMeetings', loops: 'tabLoops', bundle: 'tabBundle', stats: 'tabStats', settings: 'tabSettings' };
+  const ids = { agent: 'tabAgent', list: 'tabSessions', history: 'tabHistory', machines: 'tabMachines', voicehist: 'tabVoice', meetings: 'tabMeetings', loops: 'tabLoops', bundle: 'tabBundle', stats: 'tabStats', settings: 'tabSettings' };
   const icon = (name, size = 18) => window.jarvisIcons.create(name, size);
   const node = (tag, cls, text) => { const n = document.createElement(tag); n.className = cls; if (text) n.textContent = text; return n; };
   const matches = (item, terms) => terms.every(term => `${item.label} ${item.desc} ${item.keywords || ''}`.toLocaleLowerCase().includes(term));
@@ -47,7 +48,8 @@
       b.textContent = ''; b.title = desc; b.setAttribute('aria-label', label); b.dataset.module = id;
       const copy = node('span', 'module-copy'); copy.append(node('strong', '', label), node('small', '', desc));
       const mark = node('span', 'module-icon'); mark.append(icon(glyph, 21));
-      b.append(mark, copy, node('kbd', 'tabkey', window.jarvisKeys.k(key)), icon('caret-right', 13));
+      const shortcut = node('kbd', 'tabkey', window.jarvisKeys.k(key)); shortcut.dataset.key = key;
+      b.append(mark, copy, shortcut, icon('caret-right', 13));
       nav.appendChild(b);
       if (id === 'meetings') b.addEventListener('click', () => api.navigate(id));
       b.addEventListener('focus', () => { rootSelection = `module:${id}`; paintSelection(); });

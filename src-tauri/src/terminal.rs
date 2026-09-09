@@ -78,6 +78,17 @@ pub async fn focus_terminal_by_tty(tty: &str) -> bool {
 mod imp {
     use super::{run, Duration};
 
+    /// Абсолютный путь, а не имя в PATH — намеренно.
+    ///
+    /// В каталоге шимов (`~/.jarvis/shims`, стоит первым в PATH) живёт страж,
+    /// который отказывает в активации окон: это ровно то, чем агент нажимал бы
+    /// карточку подтверждения вместо человека. Здесь активацию просит САМ
+    /// человек — нажатием «перейти к сессии», и запрет к ней не относится.
+    /// Абсолютный путь разводит эти два случая, не создавая агенту обходного
+    /// тумблера (в dev-сборке демон наследует PATH терминала вместе с шимами,
+    /// так что без этого «перейти к сессии» просто перестало бы работать).
+    const OSASCRIPT: &str = "/usr/bin/osascript";
+
     /// Владелец — приложение из бандла: `/…/Foo.app/Contents/MacOS/foo`.
     pub fn match_gui_app(command: &str) -> Option<String> {
         let re = regex::Regex::new(r"/([^/]+)\.app/Contents/MacOS/").ok()?;
@@ -88,7 +99,7 @@ mod imp {
         let script = format!(
             "tell application \"System Events\" to set frontmost of (first application process whose unix id is {pid}) to true"
         );
-        run("osascript", &["-e", &script], Duration::from_secs(4))
+        run(OSASCRIPT, &["-e", &script], Duration::from_secs(4))
             .await
             .is_some_and(|o| o.status.success())
     }
@@ -96,7 +107,7 @@ mod imp {
     pub async fn activate_app_by_name(name: &str) -> bool {
         let quoted = serde_json::to_string(name).unwrap_or_else(|_| "\"\"".into());
         let script = format!("tell application {quoted} to activate");
-        run("osascript", &["-e", &script], Duration::from_secs(4))
+        run(OSASCRIPT, &["-e", &script], Duration::from_secs(4))
             .await
             .is_some_and(|o| o.status.success())
     }
@@ -143,7 +154,7 @@ on run argv
 end run"#;
 
     pub async fn focus_terminal_by_tty(tty: &str) -> bool {
-        run("osascript", &["-e", FOCUS_SCRIPT, tty], Duration::from_secs(5))
+        run(OSASCRIPT, &["-e", FOCUS_SCRIPT, tty], Duration::from_secs(5))
             .await
             .is_some_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "ok")
     }

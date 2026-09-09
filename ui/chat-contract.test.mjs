@@ -34,6 +34,117 @@ test('doc viewer surface exists on top of the summary cards', () => {
   assert.match(renderer, /JarvisMarkdown\.isDocPath\(/); // doc-чипы первыми + CTA
 });
 
+// Рендерер реплик один на всех: чат сессии, вкладка «Джарвис» и окно из трея
+// зовут markdown.js. Своя копия в renderer.js оставляла два языка разметки —
+// вкладке и окну она была недоступна, и ответы агента шли сырым текстом.
+test('assistant markdown lives in markdown.js only', () => {
+  const markdown = readFileSync(new URL('./markdown.js', import.meta.url), 'utf8');
+  assert.match(markdown, /function renderChat\(root, text\)/);
+  assert.match(renderer, /JarvisMarkdown\.renderChat\(/);
+  // признаки собственной копии: разбор Insight и склонение «N заметок»
+  assert.doesNotMatch(renderer, /callout-body/);
+  assert.doesNotMatch(renderer, /\bfunction notesWord\(/);
+});
+
+/* Рендерер один, а стили реплики лежат в двух файлах — и разъезжаются молча.
+ * Заголовок, неотличимый от жирного, и код без переноса — это про чтение: во
+ * вкладке и в окне из трея человек читает один и тот же ответ. */
+test('assistant markdown styles agree between panel and agent window', () => {
+  const win = readFileSync(new URL('./agent-chat.html', import.meta.url), 'utf8');
+  for (const [where, css] of [['index.html', html], ['agent-chat.html', win]]) {
+    const h = css.match(/\.bubble \.md-h[^{]*\{([^}]*)\}/);
+    assert.ok(h, where + ': заголовок ответа не стилизован вовсе');
+    assert.match(h[1], /font-size:\s*15\.5px/, where + ': заголовок неотличим от жирного текста');
+    assert.match(h[1], /margin:\s*16px 0 6px/, where + ': заголовку не дали воздуха сверху');
+
+    const pre = css.match(/\.bubble pre[^{]*\{([^}]*)\}/);
+    assert.ok(pre, where + ': блок кода не стилизован');
+    assert.match(pre[1], /white-space:\s*pre-wrap/, where + ': длинная строка кода уезжает вправо в никуда');
+    assert.doesNotMatch(pre[1], /max-height/, where + ': блок кода — ловушка скролла при погашенных полосах');
+  }
+});
+
+/* Колонка разговоров живёт в двух документах, и стили у неё две копии — они
+ * разъезжаются молча. Строка с диска, отличимая только в одном из окон, — это
+ * снова недостижимый разговор, просто с другой стороны. */
+test('колонка разговоров одинаково размечена во вкладке и в окне', () => {
+  const win = readFileSync(new URL('./agent-chat.html', import.meta.url), 'utf8');
+  for (const [where, css] of [['index.html', html], ['agent-chat.html', win]]) {
+    /* Раскладка: колонка слева на всю высоту, переписка справа, граница
+     * тянется мышью, свёрнутая колонка — рейка, а не пустота. */
+    for (const sel of ['.agwrap', '.agpane', '.agside', '.agside.off', '.aggrip', '.agrail', '.agfold', '.agstop', '.stopmark', '.stoprow', '.stopname']) {
+      assert.ok(css.includes(sel), where + ': ' + sel + ' не стилизован — раскладка колонки разъехалась');
+    }
+    // Строка: имя, время, превью, размер, бейдж «с диска» и вход в действия
+    // .agdraft — пометка «Черновик: …»: без неё неотправленный текст в соседнем
+    // чате не виден вовсе, и его пишут заново либо шлют не туда
+    // .agauto/.agspend — автономный чат и его расход: пропадут в одном из окон,
+    // и «кто работает сам» снова придётся выяснять в файле настроек
+    for (const sel of ['.aglist', '.agchat.on', '.agdisk', '.agtime', '.agprev', '.agdraft', '.agmeta', '.agdots', '.agempty', '.agauto', '.agspend']) {
+      assert.ok(css.includes(sel), where + ': ' + sel + ' не стилизован — строка чата разъехалась');
+    }
+    /* Меню строки и вопрос про удаление — слой ПОВЕРХ колонки: внутри строки их
+     * сносило перерисовкой списка от чужого ответа. «Скрыто N · вернуть»
+     * держит скрытие обратимым. Пропадёт в одном из окон — вернётся та же беда. */
+    for (const sel of ['.agpop', '.agmenu', '.agmi', '.aghidden', '.agask', '.agbtn.danger']) {
+      assert.ok(css.includes(sel), where + ': ' + sel + ' не стилизован — убрать разговор снова нечем');
+    }
+    // Необратимому — единственная краска, которой это можно сказать; обратимым
+    // соседям по меню она не положена: светофор обещал бы потерю там, где её нет.
+    assert.match(css.match(/\.agmi\.danger\s*\{([^}]*)\}/)[1], /var\(--danger\)/, where + ': забвение ничем не выделено');
+    assert.doesNotMatch(css.match(/\.agmi:hover\s*\{([^}]*)\}/)[1], /--danger/, where + ': обратимые пункты меню выкрашены как потеря');
+    /* Занятость разговора — ровно то, ради чего сняли запрет на переключение:
+     * уходя во второй чат, надо видеть, что первый ещё пишет. Отличаем формой и
+     * весом, как состояния циклов, а не второй краской в списке. */
+    for (const sel of ['.agchat.busy .agname', '.agrail .agbusy']) {
+      assert.ok(css.includes(sel), where + ': ' + sel + ' не стилизован — занятость чата не видна');
+    }
+    const dot = css.match(/\.agchat\.busy \.agname::before[^{]*\{([^}]*)\}/);
+    assert.match(dot[1], /background: var\(--accent\)/, where + ': занятость раскрашена мимо единственной краски');
+    // Колонка на всю высоту со своим скроллом: потолок ей больше не нужен, а
+    // без прокрутки двадцать разговоров упрутся в поле ввода.
+    const list = css.match(/\.aglist\s*\{([^}]*)\}/);
+    assert.match(list[1], /overflow-y:\s*auto/, where + ': список чатов нельзя прокрутить');
+    assert.match(list[1], /min-height:\s*0/, where + ': колонка без min-height:0 выдавит переписку');
+    // Узкое окно: колонка кроет переписку, а не делит её пополам
+    assert.ok(css.includes('.agwrap.narrow'), where + ': узкое окно раскладку не меняет — две полосы вместо разговора');
+  }
+  // выпадающая шапка не вернулась: список чатов — колонка, а не меню
+  assert.doesNotMatch(html, /\.agtoggle\b/, 'список чатов снова свернулся в выпадающее меню');
+  assert.doesNotMatch(html, /\.agchats\b/, 'полоска чипов вернулась под другим именем');
+});
+
+/* Вторая точка входа — окно из трея (~460px), и левой колонки приложения там
+ * нет вовсе. Переезд колонки в сетку окна (панель, оконный режим) его не
+ * касается: у себя она по-прежнему стоит внутри переписки и сворачивается в
+ * рейку — иначе в 460px список и разговор стали бы двумя нечитаемыми полосами. */
+test('окно из трея держит колонку внутри себя, а не в чужой сетке', () => {
+  const win = readFileSync(new URL('./agent-chat.html', import.meta.url), 'utf8');
+  assert.doesNotMatch(win, /docked/, 'окно из трея зачем-то узнало про встроенную колонку');
+  assert.doesNotMatch(win, /grid-area/, 'колонку окна из трея переложили на сетку, которой там нет');
+  assert.match(win, /<div class="agwrap">\s*<div class="agside" id="chats">/, 'колонка ушла из переписки');
+  // своё поле поиска у него остаётся: общей строки поиска в окне из трея нет
+  assert.match(win, /\.agfind\b/, 'искать по чатам в окне из трея стало нечем');
+});
+
+/* Мост зовёт демона по имени: разъехавшееся имя команды — тихий отказ, который
+ * видно только на живом маке. Особенно agent_chat_open — он раньше значил
+ * «открыть окно чата», а теперь «привязать разговор с диска». */
+test('каждая команда чата, которую зовёт UI, зарегистрирована у демона', () => {
+  const bridge = readFileSync(new URL('./bridge.js', import.meta.url), 'utf8');
+  const chat = readFileSync(new URL('./agent-chat.js', import.meta.url), 'utf8');
+  const main = readFileSync(new URL('../src-tauri/src/main.rs', import.meta.url), 'utf8');
+  const used = new Set(
+    [...(bridge + chat).matchAll(/invoke\('(agent_[a-z_]+)'/g)].map((m) => m[1]),
+  );
+  assert.ok(used.has('agent_chat_open'), 'разговор с диска открывать нечем');
+  for (const cmd of used) {
+    assert.match(main, new RegExp('ipc::' + cmd + '\\b'), `UI зовёт ${cmd}, а демон такой команды не знает`);
+  }
+  // старый смысл «открыть окно чата» переехал в agent_chat_window и в UI не зовётся
+  assert.ok(!used.has('agent_chat_window'), 'agent_chat_open перепутан с окном чата');
+});
+
 // Легаси-заготовка «саммари сессии» (chatModeSeg/chatSummaryEl/setChatMode)
 // не возвращается: v1 её заменил тумблером сводок, а не воскресил.
 test('legacy summary-mode stub stays absent', () => {
@@ -54,4 +165,52 @@ test('user and agent messages are visually distinct voices', () => {
   assert.match(html, /\.msg\.user \{[^}]*align-self: flex-end/s);
   // у агента подложки нет — его голос остаётся текстом на бумаге
   assert.doesNotMatch(html, /\.msg\.assistant \.bubble \{[^}]*background: var\(--accent/s);
+});
+
+/* Переключатель автономии и счётчик расхода стоят в шапке чата — рядом со
+ * счётчиком контекста и по тем же правилам. Стили у них ОДНИ на два документа
+ * (theme.css), потому что второй копии тут заводить незачем: разъедется —
+ * человек в одном из окон не увидит, что чат работает сам и во сколько это
+ * обходится. Кнопка «стоп» остаётся у поля ввода: она про идущий ход. */
+test('автономия чата видна в шапке и не путается с кнопкой «стоп»', () => {
+  const theme = readFileSync(new URL('./theme.css', import.meta.url), 'utf8');
+  const chat = readFileSync(new URL('./agent-chat.js', import.meta.url), 'utf8');
+  for (const sel of ['.chainsw', '.chainsw.on', '.chainspend']) {
+    assert.ok(theme.includes(sel), sel + ' не стилизован — переключать режим нечем');
+  }
+  // Своей копии в документах быть не должно: у шапки один язык на оба окна.
+  const win = readFileSync(new URL('./agent-chat.html', import.meta.url), 'utf8');
+  for (const [where, css] of [['index.html', html], ['agent-chat.html', win]]) {
+    assert.ok(!css.includes('.chainsw'), where + ': вторая копия стилей шапки — она и разъедется');
+  }
+  // Включённая автономия — той же единственной краской, что и занятость
+  assert.match(theme.match(/\.chainsw\.on\s*\{([^}]*)\}/)[1], /var\(--accent\)/, 'работающий сам чат ничем не выделен');
+  // Переключатель зовёт команду режима, а не общий тумблер настроек
+  assert.match(chat, /function chainNode\(/);
+  assert.match(chat, /api\.chainMode\(id, !auto\)/);
+  // Журнал заходов и расход достижимы оттуда же
+  assert.match(chat, /function chainPop\(/);
+  assert.match(chat, /function spendNode\(/);
+});
+
+/* Ночная работа видна В ЛЕНТЕ, а не только в шапке: заходы, отказы, отложенное
+ * до утра и утренняя сводка. Стили у карточек тоже одни на два документа —
+ * второй копии тут заводить незачем, а разъедется она молча, и в одном из окон
+ * ночь снова станет невидимой. Утренняя сводка размечается общим renderChat:
+ * своей разметки у неё нет и заводить её нельзя. */
+test('карточки цепочки в ленте одни на вкладку и на окно', () => {
+  const theme = readFileSync(new URL('./theme.css', import.meta.url), 'utf8');
+  const chat = readFileSync(new URL('./agent-chat.js', import.meta.url), 'utf8');
+  for (const sel of ['.msg.chain', '.chbox', '.chkind', '.chedit', '.chsum', '.chnum', '.chsec', '.chfoot', '.chainwait']) {
+    assert.ok(theme.includes(sel), sel + ' не стилизован — ночную работу нечем показать');
+  }
+  const win = readFileSync(new URL('./agent-chat.html', import.meta.url), 'utf8');
+  for (const [where, css] of [['index.html', html], ['agent-chat.html', win]]) {
+    assert.ok(!css.includes('.chbox'), where + ': вторая копия стилей карточек — она и разъедется');
+  }
+  // Событие цепочки рисуется целиком: kind с текстом, а не один срез для шапки
+  assert.match(chat, /function chainCard\(/);
+  assert.match(chat, /function morningBox\(/);
+  assert.match(chat, /api\.chainSend\(/); // предложенный заход уходит кнопкой
+  assert.match(chat, /md\.renderChat\(sec\.appendChild/); // сводку размечает общий рендерер
 });

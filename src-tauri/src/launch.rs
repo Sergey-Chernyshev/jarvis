@@ -11,6 +11,11 @@ use crate::util::shell_quote;
 use std::path::PathBuf;
 use std::process::Stdio;
 
+/// Вторая половина подъёма: дождаться готовности CLI, отдать задачу и громко
+/// провалиться, если сессия так и не встала. Отдельным модулем, потому что у
+/// агентов ДВА разных порядка запуска, и различать их — работа не на три строки.
+pub mod ready;
+
 /// Команда агента: новая сессия или `--resume`/`resume`, с dangerous-флагами при
 /// включённом «опасном режиме». Флаги сверены с `resumeCommand` в renderer.js:
 /// claude → `--dangerously-skip-permissions`, codex → `--dangerously-bypass-approvals-and-sandbox`.
@@ -91,6 +96,24 @@ pub fn agent_command_mode(agent: &str, session_id: Option<&str>, mode: Mode) -> 
         match session_id {
             Some(id) => format!("codex resume {id}{flag}"),
             None => format!("codex{flag}"),
+        }
+    } else if agent == "kimi" {
+        // У Kimi два «опасных» флага, и это не синонимы: `--yolo` авто-апрувит
+        // обычные вызовы инструментов, но вопросы агент задавать может, а
+        // `--auto` снимает и их. Берём `--yolo` — это ровный аналог
+        // `--dangerously-skip-permissions` у Claude; `--auto` заодно отключил бы
+        // пикер вопросов, которым Jarvis и рулит из панели.
+        // Режим плана у Kimi настоящий (`--plan`), притворяться не нужно.
+        let flag = match mode {
+            Mode::Yolo => " --yolo",
+            Mode::Plan => " --plan",
+            Mode::Ask => "",
+        };
+        // Возобновление — `-S <id>`: `sid` уже вида `session_<uuid>`, и это тот
+        // же флаг, что отдаёт `resume_cmd` бэкенда.
+        match session_id {
+            Some(id) => format!("kimi -S {id}{flag}"),
+            None => format!("kimi{flag}"),
         }
     } else {
         let flag = match mode {
@@ -180,7 +203,7 @@ mod fork_command_tests {
 /// A per-task model is an argv value, never a slash command or shell fragment.
 pub fn with_model(command: String, agent: &str, model: Option<&str>) -> Result<String, String> {
     let Some(model) = model.filter(|model| !model.is_empty()) else { return Ok(command); };
-    if !matches!(agent, "claude" | "codex") { return Err("Выбор модели пока доступен для Claude и Codex".into()); }
+    if !matches!(agent, "claude" | "codex" | "kimi") { return Err("Выбор модели пока доступен для Claude, Codex и Kimi".into()); }
     if model.len() > 120 || !model.as_bytes()[0].is_ascii_alphanumeric() || !model.bytes().all(|c| c.is_ascii_alphanumeric() || b"-._:/".contains(&c)) {
         return Err("Некорректный идентификатор модели".into());
     }
@@ -199,6 +222,52 @@ mod launch_model_tests {
         }
         assert!(with_model("opencode".into(), "opencode", Some("model")).is_err());
     }
+}
+
+/// Убрать с дороги то, на чём агент встанет колом ещё до первого хука.
+///
+/// Пока такой камень один: Kimi Code в незнакомом каталоге спрашивает «Trust
+/// this folder?» и ждёт клавишу. У панели человек нажал бы сам, а
+/// `sessions.spawn` поднимает сессию без зрителей — вопрос висит, хук старта не
+/// приходит, талон снимается по таймауту, первый промпт уезжает в никуда.
+///
+/// Зовётся ПОСЛЕ того, как рабочий каталог окончательно известен (worktree
+/// песочницы создаётся по дороге) и до открытия терминала. Только для локальных
+/// запусков: у удалённого узла свой дом Kimi, наша отметка туда не относится.
+/// Не смогли — не отказываем в запуске, а говорим вслух: сессия ещё может
+/// подняться, если каталог уже доверен.
+pub fn prepare_workspace(agent: &str, cwd: &str) {
+    let cwd = cwd.trim();
+    if cwd.is_empty() {
+        return;
+    }
+    let res = match agent {
+        "kimi" => crate::backend::kimi::ensure_workspace_trust(std::path::Path::new(cwd)),
+        // У claude ровно тот же камень, проверено вживую: в незнакомом каталоге
+        // он спрашивает «Is this a project you trust?» и ждёт клавишу. Флаг
+        // пропуска разрешений его НЕ снимает. Бьёт по isolate: worktree — всегда
+        // новый каталог, то есть по самому частому случаю подъёма агентом.
+        "claude" => crate::claude_bin::ensure_workspace_trust(std::path::Path::new(cwd)),
+        _ => return, // codex на этой машине не установлен — не гадаем
+    };
+    if let Err(e) = res {
+        crate::log::line(&format!("launch: не пометил {cwd} доверенным для {agent}: {e}"));
+    }
+}
+
+/// Почему сессия могла не появиться за отведённое время. `None` — причин не
+/// знаем; тогда молчим о причине, как раньше.
+///
+/// Единственная известная — незакрытый вопрос о доверии: `prepare_workspace`
+/// не смог записать отметку (нет прав, чужой `KIMI_CODE_HOME`), и kimi встал на
+/// вопросе. Человеку это чинится одним нажатием, но только если он знает.
+pub fn stall_hint(agent: &str, cwd: &str) -> Option<String> {
+    let cwd = cwd.trim();
+    if agent != "kimi" || cwd.is_empty() {
+        return None;
+    }
+    (!crate::backend::kimi::workspace_trusted(std::path::Path::new(cwd)))
+        .then(|| format!("kimi ждёт подтверждения доверия к каталогу {cwd} — открой окно и подтверди"))
 }
 
 /// Каталоги, которые надо явно добавить в PATH запускаемой команды.
@@ -365,8 +434,16 @@ mod imp {
         s.replace('\\', r"\\").replace('"', "\\\"").replace('\n', r"\n").replace('\r', r"\r")
     }
 
+    /// Абсолютный путь, а не имя в PATH — намеренно: в каталоге шимов лежит
+    /// страж синтетического ввода, который режет `activate`. Открытие терминала
+    /// человеком по кнопке «запустить» — не синтетический ввод агента, и
+    /// абсолютный путь разводит эти случаи, не давая агенту обходного тумблера.
+    /// Без этого в dev-сборке (демон наследует PATH терминала вместе с шимами)
+    /// запуск сессии перестал бы открывать окно вовсе.
+    const OSASCRIPT: &str = "/usr/bin/osascript";
+
     async fn osascript(args: &[String]) -> Result<(), String> {
-        let out = tokio::process::Command::new("osascript")
+        let out = tokio::process::Command::new(OSASCRIPT)
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -604,6 +681,15 @@ mod tests {
             agent_command_mode("codex", None, Mode::Yolo),
             "codex --dangerously-bypass-approvals-and-sandbox"
         );
+        // А у Kimi план настоящий — и `--yolo`, а не `--auto`: второй снял бы и
+        // вопросы, которыми Jarvis рулит из панели.
+        assert_eq!(agent_command_mode("kimi", None, Mode::Ask), "kimi");
+        assert_eq!(agent_command_mode("kimi", None, Mode::Plan), "kimi --plan");
+        assert_eq!(agent_command_mode("kimi", None, Mode::Yolo), "kimi --yolo");
+        assert_eq!(
+            agent_command_mode("kimi", Some("session_abc"), Mode::Yolo),
+            "kimi -S session_abc --yolo"
+        );
     }
     use super::*;
 
@@ -615,6 +701,33 @@ mod tests {
         assert_eq!(agent_command("codex", None, false), "codex");
         assert_eq!(agent_command("codex", None, true), "codex --dangerously-bypass-approvals-and-sandbox");
         assert_eq!(agent_command("codex", Some("x1"), false), "codex resume x1");
+        assert_eq!(agent_command("kimi", None, false), "kimi");
+        assert_eq!(agent_command("kimi", None, true), "kimi --yolo");
+        assert_eq!(agent_command("kimi", Some("session_x"), false), "kimi -S session_x");
+    }
+
+    /// Команда возобновления обязана совпадать с той, что бэкенд отдаёт в панель
+    /// «скопировать»: разойдись они — человек скопировал бы нерабочую строку.
+    #[test]
+    fn resume_matches_the_backend_for_every_agent() {
+        for a in crate::backend::Agent::all() {
+            let want = crate::backend::backend(*a).resume_cmd("sid-1");
+            assert_eq!(agent_command(a.label(), Some("sid-1"), false), want, "{}", a.label());
+        }
+    }
+
+    /// Подготовка и подсказка — только про kimi и только при известном каталоге:
+    /// у claude и codex своя механика доверия, чужой отметки мы им не ставим.
+    #[test]
+    fn workspace_prep_and_hint_are_kimi_only() {
+        for agent in ["claude", "codex"] {
+            assert_eq!(stall_hint(agent, "/tmp/nowhere-at-all"), None, "{agent}");
+            prepare_workspace(agent, "/tmp/nowhere-at-all"); // ничего не пишет и не паникует
+        }
+        assert_eq!(stall_hint("kimi", "   "), None, "без каталога причины не выдумываем");
+        // недоверенный каталог у kimi — причина названа вслух, а не «просто не встал»
+        let hint = stall_hint("kimi", "/tmp/jarvis-kimi-never-trusted").unwrap_or_default();
+        assert!(hint.contains("доверия"), "{hint}");
     }
 
     #[test]
@@ -654,6 +767,22 @@ mod tests {
         assert!(path_prefix(&[]).is_none());
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn trust_is_prepared_for_both_cli_and_is_actually_called() {
+        // Оба CLI в незнакомом каталоге ждут клавишу — и оба били по isolate,
+        // где worktree всегда новый. Проверено вживую на kimi 0.38 и claude 2.1.233.
+        let me = include_str!("launch.rs");
+        let src = &me[me.find("pub fn prepare_workspace").expect("подготовка на месте")..me.find("fn trust_is_prepared").unwrap()];
+        assert!(src.contains("\"kimi\" =>"), "ветка kimi ушла из подготовки каталога");
+        assert!(src.contains("\"claude\" =>"), "ветка claude ушла из подготовки каталога");
+        // и её кто-то зовёт: молчаливое зависание возвращается ровно так
+        assert!(include_str!("ipc.rs").contains("launch::prepare_workspace("),
+            "подготовку каталога перестали звать перед запуском");
+    }
+
+    // `imp` с этой функцией существует только на macOS: на Linux тест не
+    // компилировался ВООБЩЕ, унося с собой весь `cargo test`.
     #[cfg(target_os = "macos")]
     #[test]
     fn applescript_escape_quotes_backslash_and_newlines() {

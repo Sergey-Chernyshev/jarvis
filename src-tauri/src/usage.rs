@@ -26,6 +26,35 @@ const STATE_V: i64 = 5; // Rebuild old fork-inflated totals, even for unchanged 
 const DAY_MS: i64 = 86_400_000;
 const CODEX_SCAN_CHUNK: u64 = 8 * 1024 * 1024;
 
+/// Горизонт хранения агрегатов. `hours`/`sessions` не чистились никогда и росли
+/// линейно временем — за 94 дня 1378 часовых записей. Читают их максимум на
+/// неделю назад («сегодня»/«неделя»), 400 дней — с запасом на «а год назад» и
+/// потолок файла примерно на нынешнем размере.
+///
+/// `offsets` НЕ чистим намеренно: смещение — единственная защита от двойного
+/// счёта у Codex и Kimi (дедупа по id сообщения там нет, в отличие от Claude).
+/// Забыть смещение живого файла значит посчитать его расход заново; пара
+/// десятков килобайт этого не стоят.
+const RETAIN_DAYS: i64 = 400;
+
+/// Выбросить агрегаты старше горизонта. `true` — что-то удалили (значит файл
+/// пора переписать).
+fn prune(state: &mut State, now: i64) -> bool {
+    let cutoff = now - RETAIN_DAYS * DAY_MS;
+    // Час из ключа "YYYY-MM-DDTHH|модель|проект|биллинг" — тем же разбором, что
+    // и в `range_hours`: ключ, который там не читается, тут не хранится.
+    let hour_ts = |key: &str| {
+        let hour = key.split('|').next().unwrap_or("");
+        chrono::DateTime::parse_from_rfc3339(&format!("{hour}:00:00Z"))
+            .ok()
+            .map(|d| d.timestamp_millis())
+    };
+    let before = state.hours.len() + state.sessions.len();
+    state.hours.retain(|key, _| hour_ts(key).is_some_and(|ts| ts >= cutoff));
+    state.sessions.retain(|_, s| s.last >= cutoff);
+    before != state.hours.len() + state.sessions.len()
+}
+
 /// $/1M токенов; кэш: запись ×1.25 input, чтение ×0.1 input (подход ccusage).
 fn price(model: &str) -> (f64, f64) {
     match model {
@@ -33,6 +62,9 @@ fn price(model: &str) -> (f64, f64) {
         "Haiku" => (1.0, 5.0),
         "GPT-5" | "Codex" => (1.25, 10.0), // ОЦЕНКА OpenAI gpt-5-класс ($/1M)
         model if model.starts_with("gpt-5") || model.contains("codex") => (1.25, 10.0), // preserve the same family estimate for exact model slugs
+        // ОЦЕНКА Moonshot (то же, что backend::kimi::price) — иначе Kimi считался
+        // бы по дефолту Sonnet и врал в пять раз.
+        "K3" | "K3-256k" | "K2.7 Coding" | "K2.7 Coding Highspeed" => (0.6, 2.5),
         _ => (3.0, 15.0), // Sonnet и дефолт
     }
 }
@@ -371,11 +403,11 @@ pub struct Usage {
     official: Mutex<Option<Official>>,
     /// Откуда приехали лимиты: "local" или имя узла. Пусто — ниоткуда.
     official_source: Mutex<String>,
+    official_busy: AtomicBool,
     /// Почему лимитов нет — по всем источникам разом. Молчание добытчика
     /// неотличимо от «всё хорошо», и его пришлось запретить.
     official_err: Mutex<Option<String>>,
     scanning: AtomicBool,
-    official_busy: AtomicBool,
     persist_pending: AtomicBool,
 }
 
@@ -397,6 +429,23 @@ struct CodexSourceFile {
     home: String,
 }
 
+fn kimi_sessions_dir() -> PathBuf {
+    crate::backend::kimi::kimi_home().join("sessions")
+}
+
+/// Все *.jsonl под каталогом, на любой глубине.
+fn walk_jsonl(dir: &Path, out: &mut Vec<String>) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for e in rd.filter_map(|e| e.ok()) {
+        let p = e.path();
+        if p.is_dir() {
+            walk_jsonl(&p, out);
+        } else if p.extension().is_some_and(|x| x == "jsonl") {
+            out.push(p.to_string_lossy().into_owned());
+        }
+    }
+}
+
 /// cwd + session_id из ПЕРВОЙ строки rollout (session_meta). Нужно при
 /// инкрементальном скане: session_meta уже ниже from_offset, иначе токены
 /// уходят в "unknown"/"другое".
@@ -415,6 +464,30 @@ fn codex_meta_head(file: &str) -> (Option<String>, String) {
         }
     }
     (None, "unknown".into())
+}
+
+/// cwd + session_id для `<...>/sessions/<wd_*>/<sid>/agents/<агент>/wire.jsonl`.
+/// sid — имя каталога сессии, cwd — из `state.json` рядом (на два уровня выше
+/// wire). state.json живёт в двух версиях: v2 с `cwd`, legacy v1 с `workDir`;
+/// в живых сессиях встречаются обе, поэтому читаем обе.
+fn kimi_meta_for(file: &Path) -> (Option<String>, String) {
+    let Some(dir) = file.parent().and_then(Path::parent).and_then(Path::parent) else {
+        return (None, "unknown".into());
+    };
+    let sid = dir
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unknown".into());
+    let cwd = fs::read_to_string(dir.join("state.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|v| {
+            v.get("cwd")
+                .or_else(|| v.get("workDir"))
+                .and_then(Value::as_str)
+                .map(String::from)
+        });
+    (cwd, sid)
 }
 
 impl Usage {
@@ -442,10 +515,9 @@ impl Usage {
             msg_seen: Mutex::new(msg_seen),
             billing_cache: Mutex::new(HashMap::new()),
             official: Mutex::new(None),
-            official_source: Mutex::new(String::new()),
+            official_source: Mutex::new(String::new()), official_busy: AtomicBool::new(false),
             official_err: Mutex::new(None),
             scanning: AtomicBool::new(false),
-            official_busy: AtomicBool::new(false),
             persist_pending: AtomicBool::new(false),
         }
     }
@@ -639,25 +711,26 @@ impl Usage {
         from_offset + consumed
     }
 
+    /// Все транскрипты Claude Code — обходом В ГЛУБИНУ, а не на два уровня.
+    ///
+    /// Хранилище стало вложенным: субагенты пишут в
+    /// `projects/<проект>/<uuid сессии>/subagents/agent-*.jsonl`. Плоский обход
+    /// видел 78 файлов из 1467 — то есть четверть запросов и половину токенов,
+    /// и метрики недосчитывали ровно на сабагентах, которые жгут больше всех.
+    /// Двойного счёта не будет: inline-формат `"isSidechain":true` в родительском
+    /// транскрипте больше не пишется, а дедуп по `message.id` остаётся.
     fn list_transcripts() -> Vec<String> {
         let mut out = Vec::new();
-        let Ok(dirs) = fs::read_dir(projects_dir()) else { return out };
-        for d in dirs.filter_map(|e| e.ok()) {
-            if !d.path().is_dir() {
-                continue;
-            }
-            let Ok(files) = fs::read_dir(d.path()) else { continue };
-            for f in files.filter_map(|e| e.ok()) {
-                let p = f.path();
-                if p.extension().is_some_and(|x| x == "jsonl") {
-                    out.push(p.to_string_lossy().into_owned());
-                }
-            }
-        }
+        walk_jsonl(&projects_dir(), &mut out);
         out
     }
 
     /// backfill + инкрементальные сканы — одним и тем же путём (offsets решают).
+    ///
+    /// Пишем файл ТОЛЬКО когда что-то изменилось. Скан идёт раз в 30 с круглые
+    /// сутки, а usage.json — это сотни килобайт: безусловная запись давала
+    /// ~900 МБ на SSD в день у приложения, которое просто висит в менюбаре.
+    /// Признак изменения тут же под рукой — сдвинулось смещение файла.
     pub fn scan(self: &Arc<Self>) {
         if self.scanning.swap(true, Ordering::SeqCst) {
             return;
@@ -686,6 +759,7 @@ impl Usage {
             }
             if at < size { codex_complete = false; }
         }
+        self.scan_files(Self::list_kimi_wires(), Self::parse_kimi_file_part);
         {
             let mut seen = self.msg_seen.lock().unwrap();
             if seen.len() > 6000 {
@@ -693,6 +767,7 @@ impl Usage {
             }
         }
         self.state.lock().unwrap().backfilled = codex_complete;
+        prune(&mut self.state.lock().unwrap(), now_ms());
         self.persist();
         self.scanning.store(false, Ordering::SeqCst);
     }
@@ -734,6 +809,22 @@ impl Usage {
         let mut out: Vec<_> = logical.into_values().map(|(_, file)| file).collect();
         out.sort_by(|a, b| a.key.cmp(&b.key));
         out
+    }
+
+    /// Разобрать список файлов своим парсером, подвинув смещения.
+    /// `true` — хоть одно смещение сдвинулось, то есть состояние изменилось и
+    /// файл придётся переписать.
+    fn scan_files(&self, files: Vec<String>, parse: fn(&Self, &str, u64) -> u64) -> bool {
+        let mut changed = false;
+        for file in files {
+            let prev = self.state.lock().unwrap().offsets.get(&file).copied().unwrap_or(0);
+            let next = parse(self, &file, prev);
+            if next != prev {
+                self.state.lock().unwrap().offsets.insert(file, next);
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Разбор rollout Codex: дельта `event_msg.token_count.total_token_usage`,
@@ -818,6 +909,82 @@ impl Usage {
             }
         }
         self.state.lock().unwrap().codex_cursors.insert(cursor_key.to_string(), cursor);
+        from_offset + consumed
+    }
+
+    /// Все wire.jsonl Kimi: `<дом>/sessions/<wd_*>/<sid>/agents/<агент>/wire.jsonl`.
+    /// Сабагенты (`agent-N`) жгут те же токены, что и `main`, — берём всех, иначе
+    /// расход сессии с делегированием занижен в разы.
+    fn list_kimi_wires() -> Vec<String> {
+        let mut out = Vec::new();
+        let Ok(wds) = fs::read_dir(kimi_sessions_dir()) else { return out };
+        for wd in wds.filter_map(|e| e.ok()) {
+            let Ok(sessions) = fs::read_dir(wd.path()) else { continue };
+            for s in sessions.filter_map(|e| e.ok()) {
+                let Ok(agents) = fs::read_dir(s.path().join("agents")) else { continue };
+                for a in agents.filter_map(|e| e.ok()) {
+                    let p = a.path().join("wire.jsonl");
+                    if p.is_file() {
+                        out.push(p.to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Разбор wire.jsonl Kimi: считаем ТОЛЬКО `usage.record` (оба scope: `turn` и
+    /// `session` — второй пишется при компакции). Рядом в том же файле лежит
+    /// `context.append_loop_event`/`step.end` с побайтово таким же `usage`
+    /// (сверено на 203 файлах, расхождений 0) — сложить оба значит ровно удвоить
+    /// расход, поэтому step.end не трогаем. billing="kimi", model — полный алиас
+    /// (`kimi-code/k3`) через friendly_model. `usage` всегда четыре поля, без
+    /// total/reasoning: input = inputOther (кэш отдельно, как в общем `Tok`).
+    fn parse_kimi_file_part(&self, file: &str, from_offset: u64) -> u64 {
+        let Ok(meta) = fs::metadata(file) else { return from_offset };
+        let size = meta.len();
+        if size <= from_offset {
+            return from_offset;
+        }
+        let Ok(mut f) = fs::File::open(file) else { return from_offset };
+        if f.seek(SeekFrom::Start(from_offset)).is_err() {
+            return from_offset;
+        }
+        let mut buf = Vec::with_capacity((size - from_offset) as usize);
+        if f.read_to_end(&mut buf).is_err() {
+            return from_offset;
+        }
+        let text = String::from_utf8_lossy(&buf);
+        let Some(last_nl) = text.rfind('\n') else { return from_offset };
+        let consumed = text[..=last_nl].len() as u64;
+        let text = &text[..last_nl];
+
+        // sid — имя каталога сессии, cwd — из state.json: оба переживают
+        // инкрементальный скан, в самих записях расхода их нет
+        let (cwd, sid) = kimi_meta_for(Path::new(file));
+        let project = cwd.as_deref().map(basename).unwrap_or_else(|| "другое".into());
+        for line in text.split('\n') {
+            if !line.contains("usage.record") {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+            if v.get("type").and_then(Value::as_str) != Some("usage.record") {
+                continue;
+            }
+            let Some(u0) = v.get("usage") else { continue };
+            let num = |k: &str| u0.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+            let ts = v.get("time").and_then(Value::as_i64).unwrap_or_else(now_ms);
+            let tok = Tok {
+                input: num("inputOther"),
+                out: num("output"),
+                cw: num("inputCacheCreation"),
+                cr: num("inputCacheRead"),
+                reasoning: 0.0,
+            };
+            let model = v.get("model").and_then(Value::as_str).unwrap_or("");
+            let friendly = crate::backend::backend(crate::backend::Agent::Kimi).friendly_model(model);
+            Self::add_record(&mut self.state.lock().unwrap(), ts, &friendly, &project, "kimi", &sid, tok);
+        }
         from_offset + consumed
     }
 
@@ -1068,11 +1235,24 @@ impl Usage {
 
     /// Свежий /usage как можно скорее (после подтверждённого лимита).
     pub fn refresh_official_soon(self: &Arc<Self>, d: &Arc<Daemon>) {
-        let u = self.clone();
         let d = d.clone();
         tauri::async_runtime::spawn(async move {
-            u.fetch_official(&d).await;
+            crate::budget::ensure_fresh(&d, 0, "подтверждённый лимит").await;
         });
+    }
+
+    pub fn set_official_err(&self, why: &str) {
+        *self.official.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.official_err.lock().unwrap_or_else(|p| p.into_inner()) = Some(why.to_string());
+    }
+
+    pub fn set_official(&self, d: &Arc<Daemon>, session: Option<PctReset>, week: Option<PctReset>, week_model: Option<ModelWeek>, source: &str) {
+        let home = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(claude_dir);
+        let home = crate::agent_instances::canonical_home(&home).ok();
+        let instance_id = if source == "local" { home.as_ref().and_then(|h| crate::agent_instances::provider_instance_id("claude", "local", h).ok()) } else { None };
+        let provider_home = if source == "local" { home.map(|h| h.to_string_lossy().into_owned()) } else { None };
+        let official = Official { session, week, week_model, source: source.into(), at: now_ms(), instance_id, provider_home };
+        self.publish_official(d, official, source.into());
     }
 
     /// Достать текст `/usage`: сначала локально, затем с узлов по порядку.
@@ -1144,6 +1324,10 @@ impl Usage {
                 return;
             }
         };
+        self.publish_official(d, official, source);
+    }
+
+    fn publish_official(&self, d: &Arc<Daemon>, official: Official, source: String) {
         *self.official_err.lock().unwrap_or_else(|p| p.into_inner()) = None;
         let source_changed={
             let mut src = self.official_source.lock().unwrap_or_else(|p| p.into_inner());
@@ -1331,11 +1515,6 @@ fn read_account() -> Account {
     parse().unwrap_or(Account { plan: None, email: String::new(), name: String::new() })
 }
 
-/// "Jun 11 at 9:30pm (Europe/Moscow)" → мс эпохи (МСК = UTC+3 круглый год).
-/// Разбор официального `/usage`: сессия, неделя и недельное окно модели.
-///
-/// Чистая функция ради тестов на живом выводе: формат внутренний и дрейфует,
-/// и каждый дрейф до сих пор замечал пользователь, а не тест.
 fn parse_official(text: &str) -> Option<(Option<PctReset>, Option<PctReset>, Option<ModelWeek>)> {
     let grab = |p: &str| -> Option<PctReset> {
         let re = regex::RegexBuilder::new(p).case_insensitive(true).build().unwrap();
@@ -1443,6 +1622,65 @@ fn parse_reset_date(s: &str) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const REAL_USAGE: &str = "You are currently using your subscription to power your Claude Code usage\n\n\
+Current session: 62% used · resets Aug 10, 6:59pm (UTC)\n\
+Current week (all models): 94% used · resets Aug 10, 10:59pm (UTC)\n\
+Current week (Fable): 54% used · resets Aug 10, 11pm (UTC)\n";
+
+    #[test]
+    fn billing_host_extraction() {
+        assert_eq!(url_host("https://proxy.corp.dev/v1"), Some("proxy.corp.dev".into()));
+        assert_eq!(url_host("http://localhost:8080"), Some("localhost".into()));
+        assert_eq!(url_host("мусор"), None);
+    }
+
+    /// Обход транскриптов Claude Code — В ГЛУБИНУ: субагенты живут в
+    /// `<проект>/<uuid сессии>/subagents/agent-*.jsonl`, и плоский обход на два
+    /// уровня видел четверть запросов. Дедуп по `message.id` при этом остаётся:
+    /// один и тот же ход, попавший в два файла, считается один раз.
+    #[test]
+    fn deep_walk_finds_subagents_and_does_not_double_count() {
+        let root = std::env::temp_dir().join("jarvis-usage-deep");
+        let _ = fs::remove_dir_all(&root);
+        let proj = root.join("-Users-me-proj");
+        let subs = proj.join("2bd7188f-7b81-455c-a711-1dc664dc2462/subagents");
+        fs::create_dir_all(&subs).unwrap();
+        let turn = |id: &str, tok: i64| {
+            format!(
+                "{{\"type\":\"assistant\",\"cwd\":\"/Users/me/proj\",\"sessionId\":\"S1\",\
+                  \"timestamp\":\"2026-08-20T10:00:00.000Z\",\"message\":{{\"id\":\"{id}\",\
+                  \"model\":\"claude-sonnet-4-6\",\"usage\":{{\"input_tokens\":{tok},\"output_tokens\":0,\
+                  \"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0}}}}}}\n"
+            )
+        };
+        fs::write(proj.join("main.jsonl"), turn("msg_main", 100)).unwrap();
+        // сабагент на глубине 3 + повтор родительского хода (страховка дедупа)
+        fs::write(
+            subs.join("agent-ace037da304d4799.jsonl"),
+            turn("msg_sub", 20) + &turn("msg_main", 100),
+        )
+        .unwrap();
+
+        let mut files = Vec::new();
+        walk_jsonl(&root, &mut files);
+        files.sort();
+        assert_eq!(files.len(), 2, "глубокий обход видит и сабагентов: {files:?}");
+        assert!(files.iter().any(|f| f.contains("subagents")));
+
+        let u = fresh_usage();
+        for f in &files {
+            u.parse_file_part(f, 0);
+        }
+        let st = u.state.lock().unwrap();
+        assert_eq!(
+            st.sessions["S1"].tok.total(),
+            120.0,
+            "родитель + сабагент, повтор по message.id не удвоился"
+        );
+        drop(st);
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn fork_usage_skips_parent_prefix_preserves_child_identity_and_restores_ordinal() {
         let child=serde_json::json!({"type":"session_meta","payload":{"id":"child","cwd":"/qa/child","forked_from_id":"parent","subagent_history_start_ordinal":4}});
@@ -1541,12 +1779,14 @@ mod tests {
         let _=fs::remove_file(archived);
     }
 
-    /// Живой вывод `claude /usage` от 2026-08-10 — дословно. Каждый дрейф
-    /// формата до этого замечал пользователь, а не тест; теперь наоборот.
-    const REAL_USAGE: &str = "You are currently using your subscription to power your Claude Code usage\n\n\
-Current session: 62% used · resets Aug 10, 6:59pm (UTC)\n\
-Current week (all models): 94% used · resets Aug 10, 10:59pm (UTC)\n\
-Current week (Fable): 54% used · resets Aug 10, 11pm (UTC)\n";
+    #[test]
+    fn cost_cache_multiplier_compatibility() {
+        let t = Tok { input: 1_000_000.0, out: 0.0, cw: 1_000_000.0, cr: 1_000_000.0, ..Default::default() };
+        // Sonnet: 3 + 3*1.25 + 3*0.1 = 7.05
+        assert!((t.cost("Sonnet") - 7.05).abs() < 1e-9);
+    }
+
+    /* -------- сканер Kimi -------- */
 
     #[test]
     fn unsupported_local_usage_does_not_mask_a_valid_remote_source() {
@@ -1590,67 +1830,182 @@ Current week (Fable): 54% used · resets Aug 10, 11pm (UTC)\n";
         assert!(m.reset_at > 0, "«11pm» без минут обязан разбираться");
     }
 
-    #[test]
-    fn old_sonnet_format_still_parses() {
-        let text = "Current session: 10% used · resets Aug 10 at 6:59pm\n\
-Current week (all models): 20% used · resets Aug 12 at 7am\n\
-Current week (Sonnet only): 30% used\n";
-        let (_, _, model) = parse_official(text).unwrap();
-        let m = model.unwrap();
-        assert_eq!(m.model, "Sonnet only");
-        assert_eq!(m.pct, 30);
+    const KIMI_STATE_V2: &str =
+        r#"{"id":"session_TEST","cwd":"/Users/me/Goool","createdAt":1787091343079}"#;
+    const KIMI_STATE_V1: &str =
+        r#"{"workDir":"/Users/me/Goool","createdAt":"2026-08-03T09:31:21.133Z"}"#;
+
+    /// Запись расхода и её step.end-двойник — в живых логах они всегда парой.
+    fn kimi_pair(other: i64, out: i64, cr: i64, cw: i64, ts: i64) -> String {
+        format!(
+            "{{\"type\":\"usage.record\",\"model\":\"kimi-code/k3\",\"usage\":{{\"inputOther\":{other},\"output\":{out},\"inputCacheRead\":{cr},\"inputCacheCreation\":{cw}}},\"usageScope\":\"turn\",\"time\":{ts}}}\n\
+{{\"type\":\"context.append_loop_event\",\"event\":{{\"type\":\"step.end\",\"step\":1,\"usage\":{{\"inputOther\":{other},\"output\":{out},\"inputCacheRead\":{cr},\"inputCacheCreation\":{cw}}},\"finishReason\":\"tool_use\"}},\"time\":{ts}}}\n"
+        )
+    }
+
+    /// `<root>/wd_*/session_TEST/{state.json,agents/<агент>/wire.jsonl}`.
+    fn kimi_tree(name: &str, state_json: &str, agents: &[(&str, String)]) -> (PathBuf, Vec<String>) {
+        let root = std::env::temp_dir().join(format!("jarvis-kimi-usage-{name}"));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("wd_proj_0123456789ab").join("session_TEST");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("state.json"), state_json).unwrap();
+        let mut files = Vec::new();
+        for (agent, body) in agents {
+            let ad = dir.join("agents").join(agent);
+            fs::create_dir_all(&ad).unwrap();
+            let p = ad.join("wire.jsonl");
+            fs::write(&p, body).unwrap();
+            files.push(p.to_string_lossy().into_owned());
+        }
+        (root, files)
+    }
+
+    /// На диске лежит реальное ~/.jarvis/usage.json — считать по нему нельзя.
+    fn fresh_usage() -> Usage {
+        let u = Usage::load();
+        *u.state.lock().unwrap() = State { v: STATE_V, ..Default::default() };
+        u
+    }
+
+    fn kimi_scan(u: &Usage, files: &[String]) {
+        for f in files {
+            u.parse_kimi_file_part(f, 0);
+        }
     }
 
     #[test]
-    fn reset_date_honors_utc_marker() {
-        use chrono::{Datelike, TimeZone};
-        let ts = parse_reset_date("Aug 10, 6:59pm (UTC)");
-        assert!(ts > 0);
-        let dt = chrono::Utc.timestamp_millis_opt(ts).single().unwrap();
-        assert_eq!((dt.month(), dt.day()), (8, 10));
-        assert_eq!((chrono::Timelike::hour(&dt), chrono::Timelike::minute(&dt)), (18, 59));
+    fn kimi_counts_usage_record_once_ignoring_step_end() {
+        // step.end несёт побайтовый дубль usage.record — сложить оба значит удвоить
+        let mut body = kimi_pair(100, 10, 1000, 5, 1787091343079);
+        body.push_str("{\"type\":\"usage.record\",\"model\":\"kimi-code/k3\",\"usage\":{\"inputOther\":7,\"output\":1,\"inputCacheRead\":0,\"inputCacheCreation\":0},\"usageScope\":\"session\",\"time\":1787091344000}\n");
+        let (root, files) = kimi_tree("nodouble", KIMI_STATE_V2, &[("main", body)]);
+        let u = fresh_usage();
+        kimi_scan(&u, &files);
 
-        // Без пометки — местное время машины, а не зашитый чей-то пояс.
-        let local = parse_reset_date("Aug 10, 6:59pm");
-        let ldt = chrono::Local.timestamp_millis_opt(local).single().unwrap();
-        assert_eq!((chrono::Timelike::hour(&ldt), chrono::Timelike::minute(&ldt)), (18, 59));
+        let st = u.state.lock().unwrap();
+        let s = st.sessions.get("session_TEST").expect("сессия по имени каталога");
+        assert_eq!(s.tok.total(), 1123.0, "одинарный расход: 1115 turn + 8 компакции");
+        assert_eq!((s.tok.input, s.tok.out, s.tok.cr, s.tok.cw), (107.0, 11.0, 1000.0, 5.0));
+        assert_eq!((s.model.as_str(), s.billing.as_str(), s.project.as_str()), ("K3", "kimi", "Goool"));
+        drop(st);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn reset_date_edge_forms() {
-        assert!(parse_reset_date("Aug 10, 11pm (UTC)") > 0, "без минут");
-        assert!(parse_reset_date("Aug 10 at 6:59pm") > 0, "старый формат с at");
-        assert!(parse_reset_date("August 10, 6:59pm (UTC)") > 0, "полное имя месяца");
-        assert_eq!(parse_reset_date("совсем не дата"), 0);
-        assert_eq!(parse_reset_date(""), 0);
-        // 12am — полночь, не полдень.
-        use chrono::Timelike;
-        let ts = parse_reset_date("Aug 10, 12am (UTC)");
-        let dt = chrono::DateTime::from_timestamp_millis(ts).unwrap();
-        assert_eq!(dt.hour(), 0);
+    fn kimi_sums_over_all_agents() {
+        // сабагенты жгут те же токены — расход сессии складывается по main + agent-N
+        let (root, files) = kimi_tree(
+            "agents",
+            KIMI_STATE_V2,
+            &[
+                ("main", kimi_pair(100, 10, 0, 0, 1787091343079)),
+                ("agent-0", kimi_pair(20, 3, 0, 0, 1787091343999)),
+            ],
+        );
+        assert_eq!(files.len(), 2);
+        let u = fresh_usage();
+        kimi_scan(&u, &files);
+
+        let st = u.state.lock().unwrap();
+        assert_eq!(st.sessions.len(), 1, "агенты одной сессии — одна строка");
+        assert_eq!(st.sessions["session_TEST"].tok.total(), 133.0);
+        drop(st);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn billing_host_extraction() {
-        assert_eq!(url_host("https://proxy.corp.dev/v1"), Some("proxy.corp.dev".into()));
-        assert_eq!(url_host("http://localhost:8080"), Some("localhost".into()));
-        assert_eq!(url_host("мусор"), None);
+    fn kimi_cwd_from_both_state_versions() {
+        for (name, state) in [("v2", KIMI_STATE_V2), ("v1", KIMI_STATE_V1)] {
+            let (root, files) = kimi_tree(
+                &format!("state-{name}"),
+                state,
+                &[("main", kimi_pair(1, 1, 0, 0, 1787091343079))],
+            );
+            let u = fresh_usage();
+            kimi_scan(&u, &files);
+            let st = u.state.lock().unwrap();
+            assert_eq!(st.sessions["session_TEST"].project, "Goool", "state.json {name}");
+            drop(st);
+            let _ = fs::remove_dir_all(&root);
+        }
+        // без state.json — проект «другое», но токены не теряются
+        let (root, files) = kimi_tree("state-none", "не json вовсе", &[("main", kimi_pair(1, 1, 0, 0, 1))]);
+        let u = fresh_usage();
+        kimi_scan(&u, &files);
+        let st = u.state.lock().unwrap();
+        assert_eq!(st.sessions["session_TEST"].project, "другое");
+        drop(st);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn reset_date_is_msk() {
-        // 9:30pm МСК = 18:30 UTC того же дня
-        let ts = parse_reset_date("Jun 11 at 9:30pm (Europe/Moscow)");
-        assert!(ts > 0);
-        let d = chrono::DateTime::from_timestamp_millis(ts).unwrap();
-        assert_eq!(d.format("%m-%d %H:%M").to_string(), "06-11 18:30");
+    fn kimi_survives_broken_lines() {
+        let mut body = String::from("{\"type\":\"usage.record\", это не json\n");
+        // подстрока-приманка в чужой записи: тип обязан проверяться после разбора
+        body.push_str("{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"tool.result\",\"text\":\"usage.record\"}}\n");
+        body.push_str(&kimi_pair(50, 5, 0, 0, 1787091343079));
+        let (root, files) = kimi_tree("broken", KIMI_STATE_V2, &[("main", body)]);
+        let u = fresh_usage();
+        kimi_scan(&u, &files);
+
+        let st = u.state.lock().unwrap();
+        assert_eq!(st.sessions["session_TEST"].tok.total(), 55.0, "битая строка не роняет и не искажает");
+        drop(st);
+        let _ = fs::remove_dir_all(&root);
     }
 
+    /// usage.json — сотни килобайт, а скан идёт раз в 30 с круглые сутки:
+    /// безусловная запись давала ~900 МБ на SSD в день у приложения, которое
+    /// просто висит в менюбаре. Признак «писать» ровно один — сдвинулось
+    /// смещение; на неизменившихся файлах его быть не должно.
+    #[test]
+    fn an_unchanged_scan_asks_for_no_write() {
+        let (root, files) = kimi_tree(
+            "nowrite",
+            KIMI_STATE_V2,
+            &[("main", kimi_pair(100, 10, 0, 0, 1787091343079))],
+        );
+        let u = fresh_usage();
+        assert!(
+            u.scan_files(files.clone(), Usage::parse_kimi_file_part),
+            "первый проход разобрал новый файл"
+        );
+        assert!(
+            !u.scan_files(files.clone(), Usage::parse_kimi_file_part),
+            "файлы не менялись — писать нечего"
+        );
+        // дописали ход — снова есть что сохранить
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new().append(true).open(&files[0]).unwrap();
+        f.write_all(kimi_pair(5, 1, 0, 0, 1787091350000).as_bytes()).unwrap();
+        drop(f);
+        assert!(u.scan_files(files, Usage::parse_kimi_file_part), "файл вырос");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Ретеншен: карты агрегатов не росли бы вечно, но и лишнего не теряют.
     #[test]
     fn cost_uses_cache_multipliers() {
         let t = Tok { input: 1_000_000.0, out: 0.0, cw: 1_000_000.0, cr: 1_000_000.0, ..Default::default() };
         // Sonnet: 3 + 3*1.25 + 3*0.1 = 7.05
         assert!((t.cost("Sonnet") - 7.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn prune_drops_only_what_is_past_the_horizon() {
+        let now = 1787091343079;
+        let t = Tok { input: 10.0, ..Default::default() };
+        let mut st = State::default();
+        Usage::add_record(&mut st, now, "Sonnet", "p", "plan", "свежая", t);
+        Usage::add_record(&mut st, now - (RETAIN_DAYS + 5) * DAY_MS, "Sonnet", "p", "plan", "древняя", t);
+        assert_eq!(st.hours.len(), 2);
+
+        assert!(prune(&mut st, now), "что-то удалили — файл пора переписать");
+        assert_eq!(st.hours.len(), 1, "старый час ушёл");
+        assert!(st.sessions.contains_key("свежая"));
+        assert!(!st.sessions.contains_key("древняя"));
+        assert!(!prune(&mut st, now), "второй раз удалять нечего — и записи не будет");
     }
 
     #[test]
@@ -1716,9 +2071,9 @@ Current week (Sonnet only): 30% used\n";
         Usage {
             msg_seen: Mutex::new(OrderedRing::from_iter(state.msg_ids.iter().cloned())),
             state: Mutex::new(state), billing_cache: Mutex::new(HashMap::new()),
-            official: Mutex::new(None), official_source: Mutex::new(String::new()),
+            official: Mutex::new(None), official_source: Mutex::new(String::new()), official_busy: AtomicBool::new(false),
             official_err: Mutex::new(None), scanning: AtomicBool::new(false),
-            official_busy: AtomicBool::new(false), persist_pending: AtomicBool::new(false),
+            persist_pending: AtomicBool::new(false),
         }
     }
 

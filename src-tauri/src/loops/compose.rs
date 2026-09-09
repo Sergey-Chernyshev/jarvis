@@ -192,6 +192,20 @@ mod tests {
         assert!(p.contains("opus"), "список моделей критика не назван");
     }
 
+    /// `models_for` идёт через `Agent::from_label`, поэтому третий агент здесь
+    /// работает без правок — но промт критика собирается из этого списка, и
+    /// молчаливая подстановка чужих моделей стоила бы ночи впустую.
+    #[test]
+    fn models_come_from_the_agent_backend() {
+        assert!(models_for("kimi").contains(&"kimi-code/k3"));
+        assert!(models_for("claude").contains(&"opus"));
+        assert!(!models_for("kimi").contains(&"opus"), "чужих моделей в списке быть не должно");
+        // неизвестная метка — Claude, а не пустой список: цикл не остаётся без модели
+        assert_eq!(models_for("что-то новое"), models_for("claude"));
+        let p = prompt("чини флаки", "", "kimi");
+        assert!(p.contains("kimi-code/k3"), "модели kimi не приехали в промт");
+    }
+
     #[test]
     fn parses_json_wrapped_in_prose_and_fences() {
         let out = "Конечно, вот конфигурация:\n```json\n{\"name\":\"ночной test-fix\",\

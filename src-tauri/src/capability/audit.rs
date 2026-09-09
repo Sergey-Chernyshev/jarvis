@@ -16,14 +16,23 @@ pub struct AuditEntry {
     pub class: &'static str,
     pub args: Value,
     pub provenance: &'static str,
-    /// "ok" | "denied:..." | "rejected" | "failed:..." | "notfound"
+    /// "asked" | "ok" | "denied:..." | "rejected" | "expired" | "stale" |
+    /// "failed:..." | "notfound".
+    ///
+    /// `asked` — не исход, а вопрос: карточка показана, человек ещё думает.
+    /// Пишется ДО ожидания, потому что вопрос, убитый перезапуском демона, иначе
+    /// не оставляет ни строки: агент видит «демон недоступен», а человек —
+    /// ничего. Пара «asked → исход» сходится по полю `ask`; `asked` без пары —
+    /// ровно тот случай, когда спросили и не дождались.
     pub outcome: String,
     pub ms: u128,
+    /// Идентификатор вопроса — только у пары строк подтверждения.
+    pub ask: Option<String>,
 }
 
 impl AuditEntry {
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut v = json!({
             "ts": chrono::Local::now().to_rfc3339(),
             "consumer": self.consumer,
             "id": self.id,
@@ -32,7 +41,14 @@ impl AuditEntry {
             "provenance": self.provenance,
             "outcome": self.outcome,
             "ms": self.ms as u64,
-        })
+        });
+        // Ключ появляется только там, где он что-то значит: строкам без
+        // подтверждения пустое поле `ask` не нужно, а старые строки журнала
+        // обязаны читаться дальше — формат прежний плюс необязательный ключ.
+        if let (Some(ask), Some(obj)) = (self.ask.as_ref(), v.as_object_mut()) {
+            obj.insert("ask".into(), Value::String(ask.clone()));
+        }
+        v
     }
 }
 
@@ -87,8 +103,28 @@ impl AuditSink for MemAudit {
     }
 }
 
+/// Вопросы, на которые никто не ответил: строка `asked` без парной строки
+/// исхода. Ровно этот случай оставляет перезапуск демона — агенту уходит
+/// «демон недоступен», а человеку до появления `asked` не доставалось ничего.
+///
+/// Чистая функция над уже разобранными строками: пары ищутся по полю `ask`,
+/// порядок сохраняется — журнал append-only, и «последний» тут значит «свежий».
+pub fn unanswered(rows: &[Value]) -> Vec<Value> {
+    let asks: std::collections::HashSet<&str> = rows
+        .iter()
+        .filter(|e| e.get("outcome").and_then(Value::as_str) != Some("asked"))
+        .filter_map(|e| e.get("ask").and_then(Value::as_str))
+        .collect();
+    rows.iter()
+        .filter(|e| e.get("outcome").and_then(Value::as_str) == Some("asked"))
+        .filter(|e| !e.get("ask").and_then(Value::as_str).is_some_and(|a| asks.contains(a)))
+        .cloned()
+        .collect()
+}
+
 /// Чтение аудита для капабилити `audit.query`. Фильтры (опц.): `consumer`,
-/// `id`, `outcome`, `limit` (по умолчанию последние 200).
+/// `id`, `outcome`, `limit` (по умолчанию последние 200) и `unanswered` —
+/// «спросили и не дождались».
 pub fn query(filter: &Value) -> Vec<Value> {
     let path = audit_path();
     let Ok(text) = std::fs::read_to_string(&path) else {
@@ -98,9 +134,18 @@ pub fn query(filter: &Value) -> Vec<Value> {
     let (fc, fi, fo) = (want("consumer"), want("id"), want("outcome"));
     let limit = filter.get("limit").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
 
-    let mut out: Vec<Value> = text
-        .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+    let rows: Vec<Value> =
+        text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).collect();
+    // Пары ищем по ВСЕМУ журналу, а не по отфильтрованному куску: иначе фильтр
+    // сам бы и «потерял» строку исхода, а вопрос выглядел бы висящим.
+    let rows = if filter.get("unanswered").and_then(Value::as_bool) == Some(true) {
+        unanswered(&rows)
+    } else {
+        rows
+    };
+
+    let mut out: Vec<Value> = rows
+        .into_iter()
         .filter(|e| {
             let m = |k: &str, f: &Option<String>| {
                 f.as_ref()
@@ -119,7 +164,7 @@ pub fn query(filter: &Value) -> Vec<Value> {
                 .unwrap_or(true);
             m("consumer", &fc) && m("id", &fi) && outcome_ok
         })
-        .collect();
+        .collect::<Vec<Value>>();
     // последние `limit`
     let start = out.len().saturating_sub(limit);
     out.drain(..start);

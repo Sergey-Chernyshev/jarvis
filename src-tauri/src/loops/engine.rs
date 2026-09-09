@@ -161,6 +161,49 @@ pub fn is_sampled(sampling: &Sampling, n: u32) -> bool {
     sampling.every > 0 && n % sampling.every == 0
 }
 
+/// Запуск, с которым продолжаем работу.
+///
+/// Тот же номер — это ПРОДОЛЖЕНИЕ, а не новый прогон: так сюда приходят и ответ
+/// человеку, и «продолжить после ограничителя». Раньше здесь всегда заводился
+/// чистый `Run`, и это стирало журнал ночи, а у пайплайна — ещё и живые ходы,
+/// рабочие места веток и результаты шагов. Снаружи выглядело как «ответил на
+/// вопрос — и пайплайн начался сначала». Тому же противоречил подъём потолка в
+/// `loops_resume`: он имеет смысл ровно потому, что счётчики запуска обязаны
+/// сохраниться.
+fn continued(
+    prev: Option<Run>,
+    run_n: u32,
+    loop_id: &str,
+    started: i64,
+    branch: &str,
+    worktree: &str,
+) -> Run {
+    match prev {
+        Some(mut r) if r.n == run_n => {
+            r.state = RunState::Running;
+            r.stop = StopReason::None;
+            r.stop_note.clear();
+            r.ended_at = 0;
+            if r.branch.is_empty() {
+                r.branch = branch.to_string();
+            }
+            if r.worktree.is_empty() {
+                r.worktree = worktree.to_string();
+            }
+            r
+        }
+        _ => Run {
+            loop_id: loop_id.to_string(),
+            n: run_n,
+            state: RunState::Running,
+            started_at: started,
+            branch: branch.to_string(),
+            worktree: worktree.to_string(),
+            ..Default::default()
+        },
+    }
+}
+
 /// Прогнать один запуск цикла до конца.
 ///
 /// Возвращает управление, когда запуск завершился: условие выхода, ограничитель
@@ -226,6 +269,7 @@ async fn execute(store: Arc<Store>, item: Loop, mut run: Run, on_change: &impl F
     run.branch = branch;
     run.worktree = dir.to_string_lossy().into_owned();
     publish(&store, &mut run, &on_change);
+    if item.pipeline.is_none() { run.ask = None; }
 
     // Пайплайн — другой порядок исполнения, но та же песочница, тот же журнал
     // и те же ограничители: развилка ровно здесь, ниже — прежний линейный цикл.
@@ -422,6 +466,41 @@ fn read_notes(item: &Loop, dir: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Ответ человеку и «продолжить после ограничителя» приходят сюда одним и
+    /// тем же путём — и оба обязаны продолжать, а не начинать заново.
+    #[test]
+    fn the_same_run_number_means_continue_not_restart() {
+        use super::*;
+        let mut prev = Run {
+            loop_id: "l".into(),
+            n: 3,
+            state: RunState::Stopped,
+            stop: StopReason::Iterations,
+            stop_note: "ограничитель".into(),
+            ended_at: 999,
+            branch: "loop/x-3".into(),
+            worktree: "/wt/x-3".into(),
+            iterations: vec![Iteration { n: 1, ..Default::default() }],
+            ..Default::default()
+        };
+        prev.vars.insert("тесты".into(), Default::default());
+        prev.tokens_at = vec![TokenState { node: "правка".into(), ..Default::default() }];
+
+        let go = continued(Some(prev.clone()), 3, "l", 100, "loop/x-3", "/wt/x-3");
+        assert_eq!(go.state, RunState::Running);
+        assert_eq!(go.stop, StopReason::None);
+        assert!(go.stop_note.is_empty() && go.ended_at == 0);
+        assert_eq!(go.iterations.len(), 1, "журнал ночи потерян");
+        assert_eq!(go.tokens_at.len(), 1, "живые ходы потеряны — пайплайн начался бы сначала");
+        assert!(go.vars.contains_key("тесты"), "результаты шагов потеряны");
+
+        // Следующий запуск — чистый лист: это уже другая ночь.
+        let next = continued(Some(prev), 4, "l", 100, "loop/x-4", "/wt/x-4");
+        assert_eq!(next.n, 4);
+        assert!(next.iterations.is_empty() && next.tokens_at.is_empty());
+        assert_eq!(next.branch, "loop/x-4");
+    }
+
     use super::*;
 
     #[test]

@@ -8,7 +8,7 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-use crate::agent::{AgentEvent, StreamLifecycle};
+use crate::agent::{stop, AgentEvent, StreamLifecycle};
 
 /// Итог разбора одной строки `codex exec --json`.
 #[derive(Debug, PartialEq)]
@@ -85,7 +85,7 @@ pub fn classify_codex_line(line: &str) -> CodexLine {
                 .or_else(|| v.get("message").and_then(Value::as_str))
                 .unwrap_or("Codex завершил ход с ошибкой").to_string(),
             session_id: String::new(),
-        }]),
+         lost_session: false,}]),
         _ => CodexLine::Events(vec![]),
     }
 }
@@ -93,10 +93,10 @@ pub fn classify_codex_line(line: &str) -> CodexLine {
 /// Чистый throwaway `CODEX_HOME` для gated agent-host: только auth (симлинк на
 /// живой OAuth) + минимальный config, БЕЗ skills/ и чужих MCP. Это и есть
 /// превентивная замена INV-TOOLS (там, где per-item kill — defense-in-depth).
-fn ensure_codex_agent_home() -> std::io::Result<PathBuf> {
+fn ensure_codex_agent_home(instance_id: Option<&str>) -> std::io::Result<PathBuf> {
     let registry = crate::agent_instances::load_registry(&crate::util::jarvis_dir())
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
-    let instance = registry.resolve(None)
+    let instance = registry.resolve(instance_id)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     let home = crate::util::jarvis_dir().join("codex-agent-homes").join(&instance.id);
     prepare_codex_agent_home(&home, &instance.canonical_home.join("auth.json"))?;
@@ -155,6 +155,8 @@ fn build_codex_args(mcp_bin: &str, token: &str, sock: &str, message: &str, resum
         // PanelConfirmer still authorize every actual capability invocation.
         "-c".to_string(),
         "mcp_servers.jarvis.default_tools_approval_mode=\"approve\"".to_string(),
+        "-c".to_string(),
+        "mcp_servers.jarvis.tool_timeout_sec=86400".to_string(),
         "--".to_string(),
         message.to_string(),
     ]);
@@ -170,6 +172,9 @@ pub struct CodexCliHost {
     pub mcp_bin: String,
     /// Агент-токен (предъявляется демону мостом).
     pub token: String,
+    /// Чат этого хода — выбран при отправке (см. `ClaudeCliHost::chat_id`).
+    pub chat_id: String,
+    pub instance_id: String,
 }
 
 impl CodexCliHost {
@@ -179,12 +184,18 @@ impl CodexCliHost {
 
         let mut state = StreamLifecycle::new(resume);
         let Some(bin) = crate::backend::codex::resolve_codex_bin() else {
-            if let Some(event) = state.fail("Codex CLI не найден") { emit_event(&self.app, &event); }
+            crate::log::line("[codex-agent] codex не найден");
+            // Молча выйти нельзя: окно осталось бы в «думает…» навсегда.
+            self.fail("codex не найден — агент не запустился");
             return;
         };
-        let Ok(home) = ensure_codex_agent_home() else {
-            if let Some(event) = state.fail("Не удалось подготовить окружение Codex") { emit_event(&self.app, &event); }
-            return;
+        let home = match ensure_codex_agent_home(Some(&self.instance_id)) {
+            Ok(h) => h,
+            Err(e) => {
+                crate::log::line(&format!("[codex-agent] CODEX_HOME: {e}"));
+                self.fail(&format!("не смог подготовить окружение codex: {e}"));
+                return;
+            }
         };
 
         let args = build_codex_args(&self.mcp_bin, &self.token,
@@ -200,29 +211,43 @@ impl CodexCliHost {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
+            // Своя группа — чтобы «стоп» дошёл и до детей codex (jarvis-mcp):
+            // осиротев, они пережили бы ход.
+            .process_group(0)
             .spawn()
         {
             Ok(c) => c,
             Err(e) => {
                 crate::log::line(&format!("[codex-agent] spawn: {e}"));
-                if let Some(event) = state.fail(format!("Не удалось запустить Codex: {e}")) { emit_event(&self.app, &event); }
+                self.fail(&format!("codex не запустился: {e}"));
                 return;
             }
         };
         let Some(stdout) = child.stdout.take() else {
-            if let Some(event) = state.fail("Codex не открыл поток ответа") { emit_event(&self.app, &event); }
+            crate::log::line("[codex-agent] нет stdout от codex");
+            self.fail("агент не отдал вывод");
             return;
         };
         let mut reader = BufReader::new(stdout).lines();
+        let mut saved = crate::agent::chat_book(&self.app).session_of(&self.chat_id);
+        // Ручка остановки: без неё Esc снаружи до этого процесса не дотянется.
+        let gate = stop::StopGate::new(&self.chat_id);
         let mut last_error = None;
         loop {
-            let line = match reader.next_line().await {
-                Ok(Some(line)) => line,
-                Ok(None) => break,
-                Err(error) => { last_error = Some(format!("Поток Codex оборвался: {error}")); break; }
+            let line = match stop::next_line(&mut reader, &gate).await {
+                stop::Next::Line(l) => l,
+                stop::Next::End => break,
+                // Человек нажал «стоп»: убиваем процесс с детьми и выходим
+                // молча — пометку в ленту ставит команда остановки.
+                stop::Next::Stopped => {
+                    stop::kill_tree(&mut child).await;
+                    crate::log::line(&format!(
+                        "[codex-agent] ход чата {} остановлен человеком",
+                        self.chat_id
+                    ));
+                    return;
+                }
             };
-            // error может сопровождать reconnect; только turn.failed/EOF
-            // завершает ход. Успешный turn.completed отменяет эту причину.
             if let Ok(value) = serde_json::from_str::<Value>(&line) {
                 if value.get("type").and_then(Value::as_str) == Some("error") {
                     last_error = value.get("message").and_then(Value::as_str).map(String::from);
@@ -231,28 +256,46 @@ impl CodexCliHost {
             match classify_codex_line(&line) {
                 CodexLine::Kill(msg) => {
                     crate::log::line(&format!("[codex-agent] {msg}"));
-                    let _ = child.kill().await;
-                    if let Some(event) = state.fail(msg) { emit_event(&self.app, &event); }
+                    stop::kill_tree(&mut child).await;
+                    // Нарушение изоляции — тоже итог хода, и человек должен его
+                    // увидеть: без события окно ждёт ответа, которого не будет.
+                    self.fail(&msg);
                     return;
                 }
                 CodexLine::Events(evs) => {
                     for ev in evs {
-                        if let Some(event) = state.accept(ev) { emit_event(&self.app, &event); }
+                        let Some(ev) = state.accept(ev) else { continue };
+                        // Как и claude-хост, запоминаем нить чата: без этого чат
+                        // на чистом Codex остаётся одноразовым — окно закрыли,
+                        // и вернуться к разговору неоткуда.
+                        if let Some(id) = crate::agent::event_session_id(&ev) {
+                            if let Some(fresh) =
+                                crate::agent::session_id_to_persist(saved.as_deref(), id)
+                            {
+                                crate::agent::remember_chat_session(
+                                    &self.app,
+                                    &self.chat_id,
+                                    &fresh,
+                                );
+                                saved = Some(fresh);
+                            }
+                        }
+                        crate::agent::emit_event(&self.app, &self.chat_id, &ev);
                     }
                 }
             }
         }
-        crate::agent::finish_cli_stream(&self.app, &mut child, &mut state, "Codex", last_error).await;
-    }
-}
 
-fn emit_event(app: &tauri::AppHandle, ev: &AgentEvent) {
-    use tauri::Emitter;
-    if matches!(ev, AgentEvent::Other) {
-        return;
+        crate::agent::finish_cli_stream(&self.app, &self.chat_id, &mut child, &mut state, "Codex", last_error).await;
     }
-    if let Err(e) = app.emit("agent:event", ev) {
-        crate::log::line(&format!("[codex-agent] emit error: {e}"));
+
+    /// Отказ наружу событием — единая точка, чтобы «тихих» веток выхода не
+    /// заводилось (как `fail` у claude-хоста). Метку берёт из хоста, эмитит
+    /// общим `agent::emit_event`: своего эмита у хоста нет, и непомеченному
+    /// событию отсюда не выйти.
+    fn fail(&self, message: &str) {
+        let ev = AgentEvent::Failed { message: message.to_string(), lost_session: false, session_id: String::new(),};
+        crate::agent::emit_event(&self.app, &self.chat_id, &ev);
     }
 }
 
@@ -437,7 +480,7 @@ mod tests {
     #[test]
     fn failed_turn_surfaces_provider_message_and_reconnect_error_is_not_terminal() {
         assert_eq!(classify_codex_line(r#"{"type":"turn.failed","error":{"message":"Usage limit exceeded"}}"#),
-            CodexLine::Events(vec![AgentEvent::Failed { message: "Usage limit exceeded".into(), session_id: String::new() }]));
+            CodexLine::Events(vec![AgentEvent::Failed { message: "Usage limit exceeded".into(), session_id: String::new(), lost_session: false,}]));
         assert_eq!(classify_codex_line(r#"{"type":"error","message":"Reconnecting 1/5"}"#), CodexLine::Events(vec![]));
     }
 
@@ -446,5 +489,23 @@ mod tests {
         assert!(matches!(classify_codex_line(r#"{"type":"item.updated","item":{"type":"command_execution"}}"#), CodexLine::Kill(_)));
         assert!(matches!(classify_codex_line(r#"{"type":"item.updated","item":{"type":"mcp_tool_call","server":"foreign"}}"#), CodexLine::Kill(_)));
         assert_eq!(classify_codex_line(r#"{"type":"item.updated","item":{"type":"agent_message","text":"partial"}}"#), CodexLine::Events(vec![]));
+    }
+
+    /// Своего эмита у хоста нет: и события потока, и ветки отказов (не найден
+    /// бинарь, не поднялось окружение, нет stdout, kill за изоляцию, обрыв без
+    /// ответа) уходят через `agent::emit_event` с меткой из хоста. Непомеченное
+    /// событие отсюда окно бы не разложило по чатам — это и был баг.
+    #[test]
+    fn every_outgoing_path_is_tagged_by_the_host() {
+        let src = include_str!("codex_agent.rs");
+        // Иглы склеиваем: иначе тест нашёл бы сам себя.
+        let own_emit = format!("{}{}", "emit(\"agent", ":event\"");
+        assert!(!src.contains(&own_emit), "свой эмит вернулся — метка снова необязательна");
+        let call = format!("crate::agent::{}", "emit_event(");
+        let calls: Vec<&str> = src.lines().filter(|l| l.contains(&call)).collect();
+        assert!(!calls.is_empty(), "хост обязан эмитить через общий помеченный эмит");
+        for l in calls {
+            assert!(l.contains("&self.chat_id"), "эмит без метки чата: {l}");
+        }
     }
 }

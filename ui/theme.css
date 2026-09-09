@@ -449,9 +449,13 @@ body {
   flex: none; box-sizing: border-box;
   background: var(--dot-sleep);
 }
+/* Азбука одна на все точки панели (см. .row .dot в index.html): гало у «ждёт»
+   — оно, а не краска, различает «ждёт» и «работает» там, где акцент равен
+   чернилам, и переживает выключенное движение. */
 .j-dot.is-working { background: var(--ink); }
-.j-dot.is-waiting { background: var(--accent); }
+.j-dot.is-waiting { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-line); }
 .j-dot.is-done    { background: transparent; border: 1.5px solid var(--ink); }
+.j-dot.is-failed  { background: transparent; border: 1.5px solid var(--danger); }
 .j-dot.is-limit   { background: var(--ink-faint); }
 .j-dot.is-idle    { background: var(--dot-sleep); }
 
@@ -984,3 +988,101 @@ textarea.lp-ask-text { width: 100%; min-height: 66px; }
 .pl-add, .pl-presets { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .pl-start { position: absolute; top: -8px; left: 10px; padding: 1px 7px; border-radius: var(--r-chip);
   background: var(--accent); color: var(--on-accent, #fff); font: 600 10.5px/1.5 var(--font); }
+/* Шлюз (развилка, ветвление, слияние) ничего не делает — он направляет ход.
+   Карточка у него поэтому тише: полосой слева и приглушённым фоном, чтобы
+   взгляд по списку цеплялся за РАБОТУ, а между ней читал форму графа. */
+.pl-step.pl-gate { background: transparent; border: 1px dashed var(--line);
+  border-left: 3px solid var(--accent); padding-left: 10px; }
+.pl-bpmn { display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding-top: 8px; border-top: 1px solid var(--line); }
+.pl-bpmn .lp-hint { flex-basis: 100%; }
+
+/* Счётчик контекста чата с Джарвисом (agent-chat.js): сколько разговор уже
+   занял и сколько осталось до потолка. Правила общие: вкладка панели и окно из
+   трея обязаны показывать это одинаково, а не расходиться на первой правке.
+   Мелким и тихим в шапке — подробности по клику. */
+.ctxhost { display: flex; align-items: center; gap: 8px; max-width: none; }
+.ctx { display: flex; align-items: center; gap: 6px; flex: none; cursor: default;
+  -webkit-app-region: no-drag; }
+.ctxbar { flex: none; width: 42px; height: 4px; border-radius: 2px;
+  background: var(--fill-1); overflow: hidden; }
+.ctxfill { height: 100%; width: 0; background: var(--accent-line); }
+.ctxnum { font-size: 11.5px; color: var(--ink-faint); white-space: nowrap;
+  font-variant-numeric: tabular-nums; }
+.ctx:hover .ctxnum { color: var(--ink-mute); }
+/* У границы — краска предупреждения: дальше часть разговора уедет или сожмётся. */
+.ctx.near .ctxfill { background: var(--warn); }
+.ctx.near .ctxnum { color: var(--warn); }
+/* Подробности — слоем поверх: в строке шапки точным числам места нет. */
+.ctxpop {
+  position: fixed; z-index: 9; max-width: 320px; padding: 12px 14px;
+  border-radius: var(--r-card); background: var(--paper); box-shadow: var(--shadow-pop);
+  -webkit-app-region: no-drag; -webkit-user-select: text; user-select: text;
+}
+.ctxline { margin-bottom: 5px; font: 400 12.5px/1.5 var(--font); color: var(--ink-2); }
+.ctxline:last-child { margin-bottom: 0; }
+.ctxsep { height: 1px; margin: 9px 0; background: var(--line); }
+
+/* Переключатель автономии и расход автономного чата — соседи счётчика контекста
+   и живут по тем же правилам: вкладка панели и окно из трея показывают их
+   одинаково. С кнопкой «стоп» тумблер не путается — та стоит у поля ввода.
+   Включённая автономия — единственная краска, которой это можно сказать: чат,
+   который работает сам, обязан отличаться от соседей и в шапке, и в списке. */
+.chainsw { flex: none; padding: 1px 7px; border-radius: var(--r-chip); cursor: pointer;
+  font: 500 11.5px/1.6 var(--font); color: var(--ink-faint); background: var(--fill-1);
+  white-space: nowrap; -webkit-app-region: no-drag; }
+.chainsw:hover { color: var(--ink-mute); }
+.chainsw.on { color: var(--accent); background: var(--accent-soft); }
+.chainspend { flex: none; cursor: pointer; font: 400 11.5px/1.6 var(--font);
+  color: var(--ink-faint); white-space: nowrap; font-variant-numeric: tabular-nums;
+  -webkit-app-region: no-drag; }
+.chainspend:hover { color: var(--ink-mute); }
+/* Отложенное до утра стоит рядом с расходом и говорит краской предупреждения:
+   это не поломка, а решение, которого ждут от человека. */
+.chainwait { flex: none; cursor: pointer; font: 500 11.5px/1.6 var(--font);
+  color: var(--warn); white-space: nowrap; -webkit-app-region: no-drag; }
+.chainwait:hover { filter: brightness(1.08); }
+
+/* Карточки цепочки в ленте (agent-chat.js): заход, отказ, отложенное до утра и
+   утренняя сводка. Стили общие на два документа — как у шапки: разъедутся, и
+   ночная работа в одном из окон станет невидимой. */
+.msg.chain { align-self: stretch; align-items: stretch; max-width: 560px; }
+.chbox { width: 100%; padding: 14px 16px; border-radius: var(--r-card); background: var(--surface); }
+.chbox .bubble { white-space: normal; font-size: 13.5px; line-height: 1.6;
+  color: var(--ink-2); word-break: break-word; }
+.chkind { margin-bottom: 6px; font: 500 11.5px/1.2 var(--font); color: var(--ink-faint);
+  text-transform: uppercase; letter-spacing: .04em; }
+.chbox.warn .chkind { color: var(--warn); }
+.chbox.stop .chkind { color: var(--danger); }
+.chbox.wait .chkind { color: var(--accent-text); }
+/* Оживление — не тревога и не сбой: работа сделана, и цвет тревоги сказал бы
+   про неё «сломалось». Но и потеряться в ленте она не должна: это строка про
+   потраченные деньги, и единственная, которую человек про них увидит. */
+.chbox.revived .chkind { color: var(--accent-text); }
+/* Поправить предложенный заход — на месте: переписывать его в поле ввода значит
+   отправить обычной репликой не туда. */
+.chedit { width: 100%; margin-top: 8px; min-height: 62px; resize: vertical;
+  padding: 8px 10px; border: 0; outline: none; border-radius: var(--r-chip);
+  background: var(--paper); color: var(--ink); font: 400 13px/1.5 var(--font);
+  -webkit-user-select: text; user-select: text; }
+.chedit:focus { box-shadow: inset 0 0 0 1px var(--accent); }
+.chedit[disabled] { opacity: .6; }
+
+/* Утренняя сводка. Строка чисел сверху — ответ на «куда он ушёл, пока я спал»
+   за десять секунд; разделы под ней сложены, кроме тех двух, ради которых её и
+   открывают. Иначе пять разделов подряд читаются как простыня и не читаются. */
+.chtitle { margin-bottom: 8px; font: 600 14.5px/1.45 var(--font); color: var(--ink); }
+.chsum { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+.chnum { padding: 2px 8px; border-radius: var(--r-chip); background: var(--fill-1);
+  font: 500 12px/1.5 var(--font); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.chnum.bad { color: var(--danger); }
+.chnum.wait { color: var(--accent); background: var(--accent-soft); }
+.chsec { margin-top: 10px; }
+.chsechead { display: flex; align-items: center; gap: 6px; cursor: default; user-select: none;
+  font: 600 12.5px/1.5 var(--font); color: var(--ink-2); }
+.chsechead:hover { color: var(--ink); }
+.chsechead .agchev { color: var(--ink-faint); }
+.chsec.open .chsechead .agchev { transform: rotate(90deg); }
+.chsec .bubble { margin-top: 6px; }
+.chsec:not(.open) .bubble { display: none; }
+.chfoot { margin-top: 12px; font: 400 12px/1.5 var(--font); color: var(--ink-faint); }

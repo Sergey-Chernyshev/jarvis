@@ -27,6 +27,13 @@ fn main() {
     println!("cargo:rustc-env=JARVIS_UI_FINGERPRINT={}", ui_fingerprint());
     println!("cargo:rustc-env=JARVIS_BUILD_REF={}", build_ref());
 
+    // ВНИМАНИЕ на будущее: `jarvis-mcp` НЕ требует ни `externalBin`, ни
+    // `resources` — бандлер сам кладёт в пакет каждый `[[bin]]` этого манифеста
+    // (см. install/mod.rs, `mcp_src`). Попытка «доложить» мост через
+    // `externalBin` роняет ровно эту функцию: `tauri_build::build()` копирует
+    // внешние бинари отсюда, из build.rs, то есть ДО того, как cargo соберёт
+    // `jarvis-mcp` — цель того же манифеста; отсутствующий файл там жёсткая
+    // ошибка, и обычный `cargo build`/`cargo test` падает у всех.
     tauri_build::build()
 }
 

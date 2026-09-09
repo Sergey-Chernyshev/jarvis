@@ -18,6 +18,36 @@ pub fn claude_dir() -> std::path::PathBuf {
     home_dir().join(".claude")
 }
 
+/// Отвечает ли на порту живой сайдкар (`GET <path>` → любой 2xx).
+///
+/// Синхронно и без клиента: зовётся из супервизоров, которые крутятся вне
+/// tokio, и тащить туда рантайм ради одной пробы незачем.
+///
+/// Нужна она вот зачем. Сайдкар, осиротевший от прошлого запуска приложения,
+/// продолжает слушать свой порт. Новый супервизор видел только «мой процесс
+/// мёртв», поднимал ещё один, тот падал на `address already in use`, и так по
+/// кругу — на этой машине двое суток, каждые пять секунд, с записью «сайдкар
+/// запущен» в журнал. Спросить порт дешевле, чем плодить обречённые процессы,
+/// а ответивший сайдкар — рабочий: демон и так ходит к нему по порту.
+pub fn port_serves(port: u16, path: &str, timeout: std::time::Duration) -> bool {
+    use std::io::{Read, Write};
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut s) = std::net::TcpStream::connect_timeout(&addr, timeout) else {
+        return false;
+    };
+    let _ = s.set_read_timeout(Some(timeout));
+    let _ = s.set_write_timeout(Some(timeout));
+    let req = format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n");
+    if s.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    // Хватит первой строки ответа: нам нужен код, а не тело.
+    let mut buf = [0u8; 64];
+    let n = s.read(&mut buf).unwrap_or(0);
+    String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.1 2")
+        || String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.0 2")
+}
+
 /// Каталог Codex: $CODEX_HOME или ~/.codex.
 pub fn codex_dir() -> std::path::PathBuf {
     match std::env::var("CODEX_HOME") {
@@ -35,6 +65,33 @@ pub fn selected_codex_dir() -> Result<std::path::PathBuf, String> {
 
 pub fn home_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()))
+}
+
+/// Раскрыть `~` в пути, который набрал человек. Шелла на пути к `create_dir_all`
+/// нет, и без этого `~/projects/app` превращается в каталог с именем `~` рядом с
+/// рабочим — то есть проект заводится не там, где его просили.
+///
+/// Раскрывает ТОЛЬКО от домашнего каталога ЭТОЙ машины: путь на узле считает
+/// сам узел, он один знает свой `$HOME`.
+pub fn expand_home(path: &str) -> String {
+    let path = path.trim();
+    let Some(rest) = path.strip_prefix('~') else {
+        return path.to_string();
+    };
+    // `~user` — не наш случай: чужой домашний каталог мы не ищем и подменять
+    // его своим не имеем права.
+    if rest.starts_with(|c: char| c.is_alphanumeric()) {
+        return path.to_string();
+    }
+    let home = home_dir();
+    let home = home.to_string_lossy();
+    let home = home.trim_end_matches('/');
+    let rest = rest.trim_start_matches('/');
+    if rest.is_empty() {
+        home.to_string()
+    } else {
+        format!("{home}/{rest}")
+    }
 }
 
 /// Путь к unix-сокету демона (JARVIS_SOCK переопределяет — нужно тестам).
@@ -122,9 +179,63 @@ mod tests {
         assert_eq!(ellipsize("abc", 10), "abc");
     }
 
+    /// Проба порта. Отвечает — берём чужой сайдкар; молчит или отвечает не тем —
+    /// поднимаем свой. Ошибка в любую сторону дорогая: ложное «отвечает» оставит
+    /// голос без сайдкара навсегда, ложное «не отвечает» вернёт тот самый цикл
+    /// обречённых запусков, ради которого проба и заведена.
+    #[test]
+    fn port_probe_tells_a_live_sidecar_from_silence_and_from_a_stranger() {
+        use std::io::{Read, Write};
+        let quick = std::time::Duration::from_millis(400);
+
+        // Свободный порт: слушателя нет — connect не удастся.
+        let free = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let free_port = free.local_addr().unwrap().port();
+        drop(free);
+        assert!(!port_serves(free_port, "/health", quick), "на пустом порту померещился сайдкар");
+
+        // Отвечает как сайдкар.
+        let ok = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let ok_port = ok.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut c, _)) = ok.accept() {
+                let mut b = [0u8; 128];
+                let _ = c.read(&mut b);
+                let _ = c.write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok");
+            }
+        });
+        assert!(port_serves(ok_port, "/health", quick), "живой сайдкар не опознан");
+
+        // Порт занят кем-то другим: соединение есть, ответ не наш. Поднимать свой
+        // всё равно бесполезно (порт занят), но и молча считать это сайдкаром
+        // нельзя — иначе голос будет «работать» через чужую программу.
+        let alien = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let alien_port = alien.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut c, _)) = alien.accept() {
+                let mut b = [0u8; 128];
+                let _ = c.read(&mut b);
+                let _ = c.write_all(b"HTTP/1.0 404 Not Found\r\n\r\n");
+            }
+        });
+        assert!(!port_serves(alien_port, "/health", quick), "чужая программа сошла за сайдкар");
+    }
+
     #[test]
     fn one_line_collapses_whitespace() {
         assert_eq!(one_line("  a\n\tb   c "), "a b c");
+    }
+
+    #[test]
+    fn expand_home_handles_tilde_but_not_other_users() {
+        let home = home_dir();
+        let home = home.to_string_lossy().trim_end_matches('/').to_string();
+        assert_eq!(expand_home("~/projects/app"), format!("{home}/projects/app"));
+        assert_eq!(expand_home("~"), home);
+        assert_eq!(expand_home("/srv/x"), "/srv/x");
+        assert_eq!(expand_home("  /srv/x  "), "/srv/x");
+        // чужой домашний каталог не наше дело — оставляем как есть
+        assert_eq!(expand_home("~bob/x"), "~bob/x");
     }
 
     #[test]

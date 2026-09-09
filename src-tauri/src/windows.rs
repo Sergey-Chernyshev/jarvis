@@ -38,6 +38,8 @@ pub const ONBOARD_W: f64 = 560.0;
 pub const ONBOARD_H: f64 = 660.0;
 pub const AGENT_W: f64 = 460.0;
 pub const AGENT_H: f64 = 600.0;
+pub const AGENT_MIN_W: f64 = 360.0;
+pub const AGENT_MIN_H: f64 = 380.0;
 
 /// Оконный режим (макет 14h): список слева 264px + диалог справа.
 pub const WINDOW_W: f64 = 1120.0;
@@ -45,17 +47,75 @@ pub const WINDOW_H: f64 = 740.0;
 pub const WINDOW_MIN_W: f64 = 760.0;
 pub const WINDOW_MIN_H: f64 = 500.0;
 
+/// Где в настройках живёт геометрия окна и какой она бывает по умолчанию.
+/// Точка — на равных с размером: окно, растянутое на внешнем мониторе, обязано
+/// открыться там же, а не в центре встроенного экрана.
+struct Geom {
+    w: &'static str,
+    h: &'static str,
+    x: &'static str,
+    y: &'static str,
+    min: (f64, f64),
+    def: (f64, f64),
+}
+
+const GEOM_MAIN: Geom = Geom {
+    w: "windowW",
+    h: "windowH",
+    x: "windowX",
+    y: "windowY",
+    min: (WINDOW_MIN_W, WINDOW_MIN_H),
+    def: (WINDOW_W, WINDOW_H),
+};
+const GEOM_CHAT: Geom = Geom {
+    w: "chatW",
+    h: "chatH",
+    x: "chatX",
+    y: "chatY",
+    min: (AGENT_MIN_W, AGENT_MIN_H),
+    def: (AGENT_W, AGENT_H),
+};
+
 /// Запомненный размер окна (или размер из макета, если ещё не меняли).
-fn window_size(app: &AppHandle) -> (f64, f64) {
+fn saved_size(app: &AppHandle, g: &Geom) -> (f64, f64) {
     let Some(d) = app.try_state::<Arc<Daemon>>() else {
-        return (WINDOW_W, WINDOW_H);
+        return g.def;
     };
     let cfg = d.settings.load();
     let num = |k: &str, def: f64| cfg.get(k).and_then(|v| v.as_f64()).unwrap_or(def);
-    (
-        num("windowW", WINDOW_W).max(WINDOW_MIN_W),
-        num("windowH", WINDOW_H).max(WINDOW_MIN_H),
-    )
+    (num(g.w, g.def.0).max(g.min.0), num(g.h, g.def.1).max(g.min.1))
+}
+
+/// Запомненная точка окна — только если она попадает хоть в один экран.
+/// Внешний монитор могли отключить: честнее центр, чем окно за краем мира.
+fn saved_pos(app: &AppHandle, g: &Geom) -> Option<(f64, f64)> {
+    let d = app.try_state::<Arc<Daemon>>()?;
+    let cfg = d.settings.load();
+    let x = cfg.get(g.x)?.as_f64()?;
+    let y = cfg.get(g.y)?.as_f64()?;
+    on_any_screen(x, y, &screens(app)).then_some((x, y))
+}
+
+/// Экраны в логических координатах: (x, y, ширина, высота). Каждый переводим
+/// его собственным масштабом — на смешанном DPI общий множитель врёт.
+fn screens(app: &AppHandle) -> Vec<(f64, f64, f64, f64)> {
+    app.available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .map(|m| {
+            let sf = m.scale_factor();
+            let p = m.position().to_logical::<f64>(sf);
+            let s = m.size().to_logical::<f64>(sf);
+            (p.x, p.y, s.width, s.height)
+        })
+        .collect()
+}
+
+/// Точка попадает хоть в один экран?
+fn on_any_screen(x: f64, y: f64, screens: &[(f64, f64, f64, f64)]) -> bool {
+    screens
+        .iter()
+        .any(|(sx, sy, sw, sh)| x >= *sx && x < sx + sw && y >= *sy && y < sy + sh)
 }
 
 /// Тема нативного материала окна. Панель — непрозрачная «бумага», но по
@@ -212,12 +272,37 @@ pub fn apply_mode(d: &Arc<Daemon>) {
     }
 }
 
-/// Запомнить размер окна, чтобы следующий запуск открылся таким же.
 pub fn remember_window_size(d: &Arc<Daemon>, w: f64, h: f64) {
     if !w.is_finite() || !h.is_finite() || w < WINDOW_MIN_W || h < WINDOW_MIN_H { return; }
+    d.settings.save(serde_json::Map::from_iter([("windowW".into(), json!(w)), ("windowH".into(), json!(h))]));
+}
+
+fn window_size(app: &AppHandle) -> (f64, f64) { saved_size(app, &GEOM_MAIN) }
+
+/// Запомнить геометрию окна, чтобы следующий запуск открылся таким же — и там же.
+/// Снимаем один раз (закрытие, выход), а не на каждом кадре ресайза.
+pub fn remember_geometry(d: &Arc<Daemon>, label: &str) {
+    let g = match label {
+        // накладка не тянется и живёт под курсором — её геометрию считает place_panel
+        "workspace" => &GEOM_MAIN,
+        "agent-chat" => &GEOM_CHAT,
+        _ => return,
+    };
+    let Some(win) = d.app.get_webview_window(label) else {
+        return;
+    };
+    let (Ok(size), Ok(sf)) = (win.inner_size(), win.scale_factor()) else {
+        return;
+    };
+    let size = size.to_logical::<f64>(sf);
     let mut patch = serde_json::Map::new();
-    patch.insert("windowW".into(), json!(w.round()));
-    patch.insert("windowH".into(), json!(h.round()));
+    patch.insert(g.w.into(), json!(size.width.round()));
+    patch.insert(g.h.into(), json!(size.height.round()));
+    if let Ok(pos) = win.outer_position() {
+        let pos = pos.to_logical::<f64>(sf);
+        patch.insert(g.x.into(), json!(pos.x.round()));
+        patch.insert(g.y.into(), json!(pos.y.round()));
+    }
     d.settings.save(patch);
 }
 
@@ -255,19 +340,22 @@ pub fn create_onboarding(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     Ok(win)
 }
 
-/// Окно чата с агентом (фаза 7): стеклянное, по центру, ресайзится. Повторный
-/// вызов — показать существующее, а не плодить копии.
+/// Окно чата с агентом (фаза 7): стеклянное, ресайзится, помнит размер и место.
+/// Повторный вызов — показать существующее, а не плодить копии: закрытие окна —
+/// это hide (см. обработчик CloseRequested), поэтому нить разговора переживает
+/// ⌘W вместе с геометрией.
 pub fn create_agent_chat(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     if let Some(win) = app.get_webview_window("agent-chat") {
         let _ = win.show();
         let _ = win.set_focus();
         return Ok(win);
     }
-    let win =
+    let (w, h) = saved_size(app, &GEOM_CHAT);
+    let mut b =
         WebviewWindowBuilder::new(app, "agent-chat", WebviewUrl::App("agent-chat.html".into()))
             .title("Jarvis · агент")
-            .inner_size(AGENT_W, AGENT_H)
-            .min_inner_size(360.0, 380.0)
+            .inner_size(w, h)
+            .min_inner_size(AGENT_MIN_W, AGENT_MIN_H)
             .visible(true)
             .decorations(false)
             .transparent(true)
@@ -282,10 +370,13 @@ pub fn create_agent_chat(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             .maximizable(false)
             .skip_taskbar(true)
             .shadow(true)
-            .center()
             .theme(window_theme(app))
-            .accept_first_mouse(true)
-            .build()?;
+            .accept_first_mouse(true);
+    b = match saved_pos(app, &GEOM_CHAT) {
+        Some((x, y)) => b.position(x, y),
+        None => b.center(),
+    };
+    let win = b.build()?;
     let _ = win.set_focus();
     Ok(win)
 }
@@ -516,8 +607,15 @@ pub fn position_panel(d: &Arc<Daemon>) {
     platform::place_panel(&panel, PANEL_W, PANEL_H, corner);
 }
 
-/// Тихий режим: трей, клик по уведомлению — показать, не забирая фокус
-/// у кино/терминала.
+/// Показать панель по осознанному жесту человека — с фокусом.
+///
+/// Фокус здесь не про вежливость, а про то, чтобы панель ЗАКРЫВАЛАСЬ. Окно,
+/// показанное через orderFrontRegardless, не становится key: до него не доходит
+/// ни Esc, ни событие «фокус ушёл», по которому накладка прячется при клике
+/// мимо. Такая панель висит поверх всего (включая чужой фуллскрин), и снять её
+/// можно только вторым кликом по трею. Поэтому все входы, за которыми стоит
+/// человек — клик по трею, пункт меню, хоткей, клик по тосту, `jarvis --show` —
+/// зовут именно эту функцию.
 pub fn show_panel(d: &Arc<Daemon>) {
     // пока интеграция не установлена — основное приложение «заперто»: ведём к онбордингу
     if !crate::native_smoke::enabled() && !crate::install::integration_health().ok() {
@@ -553,7 +651,8 @@ pub fn show_application(d: &Arc<Daemon>) {
     }
 }
 
-/// Raycast-режим: хоткей — с фокусом, потеря фокуса спрячет панель.
+/// То же самое под именем, которое подчёркивает фокус в месте вызова
+/// (хоткей, клик по тосту).
 pub fn show_panel_focused(d: &Arc<Daemon>) {
     if !crate::native_smoke::enabled() && !crate::install::integration_health().ok() {
         let _ = create_onboarding(&d.app);
@@ -584,6 +683,7 @@ pub fn hide_panel(d: &Arc<Daemon>) {
     }
 }
 
+/// Тумблер панели: клик по трею, ⌘J, `jarvis --toggle`.
 pub fn toggle_panel(d: &Arc<Daemon>) {
     if panel_visible(d) {
         // Та же логика, что у хоткея: окно обычно стоит под чужими окнами,
@@ -597,6 +697,23 @@ pub fn toggle_panel(d: &Arc<Daemon>) {
     } else {
         show_panel(d);
     }
+}
+
+/// Панель прямо перед глазами? «Видно» — ещё не значит «видно тебе»: обычное
+/// окно стоит под чужими окнами, а накладка может висеть на другом мониторе.
+/// В обоих случаях жест читается как «покажи», а не «спрячь», — прячем, только
+/// когда человек смотрит на панель прямо сейчас.
+fn panel_in_sight(d: &Arc<Daemon>) -> bool {
+    if window_mode(d) {
+        panel_focused(d)
+    } else {
+        panel_on_cursor_screen(d)
+    }
+}
+
+/// Оконный режим по настройкам.
+fn window_mode(d: &Arc<Daemon>) -> bool {
+    d.settings.string("mode") == "window"
 }
 
 /// Окно сейчас в фокусе?
@@ -619,6 +736,33 @@ pub fn toggle_hotkey_panel(d: &Arc<Daemon>) {
     } else {
         show_panel_focused(d);
     }
+}
+
+/// Панель на том же экране, где сейчас курсор (то есть где человек)?
+/// Всё в физических координатах одного пространства — сравнение честное.
+/// Не смогли выяснить — считаем, что на том же: это прежнее поведение.
+fn panel_on_cursor_screen(d: &Arc<Daemon>) -> bool {
+    let Some(win) = d.app.get_webview_window("main") else {
+        return true;
+    };
+    let (Ok(cursor), Ok(pos), Ok(size)) =
+        (d.app.cursor_position(), win.outer_position(), win.outer_size())
+    else {
+        return true;
+    };
+    let Ok(Some(mon)) = d.app.monitor_from_point(cursor.x, cursor.y) else {
+        return true;
+    };
+    let (mp, ms) = (mon.position(), mon.size());
+    let (cx, cy) = (
+        pos.x as f64 + size.width as f64 / 2.0,
+        pos.y as f64 + size.height as f64 / 2.0,
+    );
+    on_any_screen(
+        cx,
+        cy,
+        &[(mp.x as f64, mp.y as f64, ms.width as f64, ms.height as f64)],
+    )
 }
 
 /* ================= тост-окно ================= */
@@ -679,6 +823,23 @@ mod tests {
         let e = preview_url("https://example.com").unwrap_err();
         assert!(e.contains("example.com"), "{e}");
         assert!(preview_url("").is_err());
+    }
+
+    /// Сохранённую точку применяем, только если она попадает хоть в один экран:
+    /// внешний монитор отключили — окно должно вернуться в центр, а не уехать
+    /// за край мира.
+    #[test]
+    fn saved_point_counts_only_inside_some_screen() {
+        let builtin = (0.0, 0.0, 1440.0, 900.0);
+        let external = (-1920.0, -300.0, 1920.0, 1080.0);
+
+        assert!(on_any_screen(100.0, 100.0, &[builtin, external]));
+        assert!(on_any_screen(-1800.0, -200.0, &[builtin, external]));
+        // тот же внешний монитор, но отключённый — точки больше нет ни на одном
+        assert!(!on_any_screen(-1800.0, -200.0, &[builtin]));
+        // ровно на правой границе экрана — уже за ним
+        assert!(!on_any_screen(1440.0, 10.0, &[builtin]));
+        assert!(!on_any_screen(10.0, 10.0, &[]));
     }
 
     #[test]

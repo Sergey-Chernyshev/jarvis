@@ -128,7 +128,67 @@
     loopsReview: (id, n, accept, comment) => invoke('loops_review', { id, n, accept, comment }),
     loopsResume: (id, extraTokens) => invoke('loops_resume', { id, extraTokens }),
     loopsDiff: (id) => invoke('loops_diff', { id }),
+    /* Обмен пайплайна с Camunda Modeler. `open` — открыть файл системой сразу
+     * после выгрузки: чем на этой машине открывается .bpmn, знает она, а не мы. */
+    loopsBpmnExport: (id, path, open) => invoke('loops_bpmn_export', { id, path: path ?? null, open: !!open }),
+    loopsBpmnImport: (id, path) => invoke('loops_bpmn_import', { id, path: path ?? null }),
+    loopsBpmnUnlink: (id) => invoke('loops_bpmn_unlink', { id }),
     onLoopsState: (cb) => on('loops-state', cb),
+
+    // главный агент: нить разговора, прошлая переписка, отправка и подтверждения.
+    // События демон шлёт всем окнам — вкладка и окно из трея видят один поток.
+    agentChatState: () => invoke('agent_chat_state'),
+    agentChatHistory: (chatId) => invoke('agent_chat_history', { chatId }),
+    agentChatReset: () => invoke('agent_chat_reset'),
+    // Список разговоров: по чату на проект. Каждая правка возвращает весь
+    // список с пометкой открытого — второй ход за списком не нужен.
+    agentChatsList: () => invoke('agent_chats_list'),
+    agentChatSwitch: (chatId) => invoke('agent_chat_switch', { chatId }),
+    agentChatCreate: (name) => invoke('agent_chat_create', { name }),
+    agentChatRename: (chatId, name) => invoke('agent_chat_rename', { chatId, name }),
+    agentChatDelete: (chatId) => invoke('agent_chat_delete', { chatId }),
+    agentChatReorder: (chatId, toIndex) => invoke('agent_chat_reorder', { chatId, toIndex }),
+    // Привязать к чату разговор, найденный на диске, и открыть его. Не «открыть
+    // окно чата» — окно поднимает agent_chat_window.
+    agentChatOpen: (sessionId) => invoke('agent_chat_open', { sessionId }),
+    // Недописанная реплика — у каждого чата своя. Общее поле означало, что текст
+    // для одного Джарвиса можно отправить другому, а чаты раздают промпты в
+    // сессии с доступом к файлам. Хранилище своё (agent-drafts.json): в
+    // settings.json такому потоку записей делать нечего.
+    agentDraftsGet: () => invoke('agent_drafts_get'),
+    agentDraftSet: (chatId, text, caret) => invoke('agent_draft_set', { chatId, text, caret }),
+    // Убрать разговор из списка, оставив файл на диске, — и вернуть все убранные.
+    // Забыть насовсем стирает транскрипт: подтверждение спрашивает окно, ядро
+    // его не дублирует.
+    agentHistoryHide: (sessionId) => invoke('agent_history_hide', { sessionId }),
+    agentHistoryUnhideAll: () => invoke('agent_history_unhide_all'),
+    agentHistoryForget: (sessionId) => invoke('agent_history_forget', { sessionId }),
+    agentSend: (message, chatId, sessionId, provider) => invoke('agent_send', { message, chatId, sessionId, provider }),
+    // Остановка хода. Рвёт ТОЛЬКО названный чат: у соседей свои ходы, и Esc в
+    // одном разговоре не должен гасить второй. Дочерние CLI остаются жить —
+    // их список приезжает ответом (и событием `stopped`), закрывает человек.
+    agentStop: (chatId) => invoke('agent_stop', { chatId }),
+    // Авто-продолжение: срез и возврат. Цепочку Esc гасит через agent_stop —
+    // иначе остановленный ход через минуту сменился бы следующим; отсюда нужен
+    // только срез (была ли она жива) и дорога назад.
+    agentChainState: (chatId) => invoke('agent_chain_state', { chatId }),
+    agentChainMode: (chatId, auto) => invoke('agent_chain_mode', { chatId, auto }),
+    // Предложенный заход уходит по кнопке — в режиме «спроси меня» это
+    // единственная дорога дальше. `text` — поправка человека; пусто значит
+    // «уходит предложенное», и подменять его своей копией незачем.
+    agentChainSend: (chatId, text) => invoke('agent_chain_send', { chatId, text }),
+    agentChainResume: (chatId) => invoke('agent_chain_resume', { chatId }),
+    agentChainStop: (chatId) => invoke('agent_chain_stop', { chatId }),
+    // Свой канал цепочки: режим, заходы, расход и «ждёт тебя». Опрашивать это
+    // командой на каждый ход значило бы узнавать про ночную работу с опозданием.
+    onAgentChain: (cb) => on('agent:chain', cb),
+    // Оживление мёртвой сессии — строкой в ленту. Карточки у мелких оживлений
+    // больше нет (они разрешены грантом), и это единственное место, где человек
+    // узнаёт о потраченных на них деньгах.
+    onAgentResumed: (cb) => on('agent:resumed', cb),
+    agentConfirm: (nonce, approved, armed) => invoke('agent_confirm', { nonce, approved, armed }),
+    onAgentEvent: (cb) => on('agent:event', cb),
+    onAgentConfirm: (cb) => on('agent:confirm', cb),
 
     // тема/краска сменились в другом окне (демон рассылает всем)
     onAppearance: (cb) => on('appearance', cb),
@@ -173,7 +233,7 @@
     // а не общей настройки: разведать чужой код и переписать свой требуют
     // разного доверия
     launchSession: (cwd, agent, sessionId, machine, opts) => invoke('session_launch', {
-      cwd: cwd ?? null, agent, sessionId: sessionId ?? null, machine: machine ?? null,
+      cwd: cwd ?? null, agent: agent || 'claude', sessionId: sessionId ?? null, machine: machine ?? null,
       instanceId: opts?.instanceId || null,
       model: opts?.model || null,
       isolate: !!(opts && opts.isolate), mode: (opts && opts.mode) || 'ask',
@@ -216,6 +276,8 @@
     setModel: (sessionId, model) => invoke('session_set_model', { sessionId, model }),
     setEffort: (sessionId, level) => invoke('session_set_effort', { sessionId, level }),
     setPin: (sessionId, pinned) => invoke('session_set_pin', { sessionId, pinned }),
+    // своё имя чата вместо автозаголовка; пустая строка — вернуть автозаголовок
+    renameSession: (sessionId, title) => invoke('session_rename', { sessionId, title }),
     // завершить сессию: закрыть пану, если жива, и убрать из списка в любом случае
     killSession: (sessionId) => invoke('session_kill', { sessionId }),
     getMeta: () => invoke('app_meta'),
@@ -224,6 +286,8 @@
     onPlugins: (cb) => on('plugins', cb),
     getPlugins: () => invoke('plugins_status'),
     pluginCmd: (id, cmd, args) => invoke('plugins_cmd', { id, cmd, args: args ?? null }),
+    // запись одной настройки плагина по схеме его манифеста (вкладка «Плагины»)
+    pluginSet: (id, key, value) => invoke('plugin_set', { id, key, value }),
     getUsage: (period) => invoke('usage_summary', { period }),
     analyticsReport: (options = {}) => invoke('analytics_report', { options }),
     analyticsSaveOutcome: (outcome) => invoke('analytics_save_outcome', { outcome }),

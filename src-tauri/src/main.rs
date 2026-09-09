@@ -20,6 +20,7 @@ mod codex_hooks;
 mod analytics; // локальная аналитика качества процесса, Git и результатов задач
 #[allow(dead_code)] // Codex-методы наполняются по инкрементам (codex CLI support)
 mod backend;
+mod budget; // бюджет лимитов: живые проценты подписок, резерв, темп, лестница
 mod bundle; // режим «Связка»: несколько агентов в worktree над одним проектом + очередь слияний
 #[allow(dead_code)] // проекции/фасады подключаются по фазам (инкр. 8)
 mod capability;
@@ -41,15 +42,19 @@ mod log;
 mod loops; // режим «Циклы»: рутина, которую агент крутит сам — с концом и стенами
 mod platform; // окна, медиа, звук: платформенное за общим API (macos.rs / linux.rs)
 mod meetings;
+mod plugin; // плагинное ядро: «всё есть плагин» (спека 2026-08-19)
 mod metrics;
 mod model;
 mod native_smoke;
 mod native_smoke_checks;
 mod onboarding;
+mod origin; // происхождение промпта: человек / заход цепочки / оживление — ставит транспорт
 mod power;
 #[allow(dead_code)] // потребитель — daemon (маршрутизация удалённых сессий), следующий шаг инкремента
 mod remote; // удалённые узлы: ssh-туннель, HTTP-клиент узла, поллер событий
 mod remote_observer;
+#[allow(dead_code)] // проводка (IPC/команды) — отдельным шагом, не этим инкрементом
+mod revive; // оживление старых сессий: целостность транскрипта, оценка цены до запуска
 mod route; // голосовая маршрутизация: скоринг → tie-break → пикер → stage-then-send
 mod ru;
 mod screen_prompt;
@@ -87,6 +92,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::Manager;
+use tauri_plugin_autostart::ManagerExt; // autolaunch().is_enabled() — старт по логину или рукой
 
 use daemon::Daemon;
 
@@ -184,7 +190,7 @@ fn main() {
                     } else if let Some(n) = ipc::is_select_hotkey(&d, shortcut) {
                         d.answer_question_hotkey(n);
                     } else {
-                        windows::toggle_hotkey_panel(&d);
+                        windows::toggle_panel(&d);
                     }
                 })
                 .build(),
@@ -223,6 +229,9 @@ fn main() {
             loops::ipc::loops_compose,
             loops::ipc::loops_save,
             loops::ipc::loops_remove,
+            loops::ipc::loops_bpmn_export,
+            loops::ipc::loops_bpmn_import,
+            loops::ipc::loops_bpmn_unlink,
             loops::ipc::loops_start,
             loops::ipc::loops_stop,
             loops::ipc::loops_intervene,
@@ -266,6 +275,7 @@ fn main() {
             ipc::app_relaunch,
             ipc::plugins_status,
             ipc::plugins_cmd,
+            ipc::plugin_set,
             ipc::usage_summary,
             ipc::analytics_report,
             ipc::analytics_save_outcome,
@@ -285,6 +295,7 @@ fn main() {
             ipc::teleport_login,
             ipc::usage_session,
             ipc::session_set_pin,
+            ipc::session_rename,
             ipc::session_kill,
             ipc::session_set_model,
             ipc::session_set_effort,
@@ -314,7 +325,29 @@ fn main() {
             ipc::voice_audio_state,
             ipc::voice_confirm_resolve,
             ipc::voice_abort,
+            ipc::agent_chat_window,
             ipc::agent_chat_open,
+            ipc::agent_chat_state,
+            ipc::agent_chat_history,
+            ipc::agent_chat_reset,
+            ipc::agent_chats_list,
+            ipc::agent_chat_switch,
+            ipc::agent_chat_create,
+            ipc::agent_chat_rename,
+            ipc::agent_chat_delete,
+            ipc::agent_chat_reorder,
+            ipc::agent_drafts_get,
+            ipc::agent_draft_set,
+            ipc::agent_history_hide,
+            ipc::agent_history_unhide_all,
+            ipc::agent_history_forget,
+            ipc::agent_chain_state,
+            ipc::agent_chain_mode,
+            ipc::agent_chain_stop,
+            ipc::agent_chain_resume,
+            ipc::agent_stop,
+            ipc::agent_chain_watch,
+            ipc::agent_chain_send,
             ipc::terminal_focus,
             ipc::session_launch,
             ipc::session_continue_managed,
@@ -422,8 +455,9 @@ fn main() {
 
             // Накладка ⌘J — чистое меню-бар приложение без иконки в доке.
             // Оконный режим (макет 14h) — обычное приложение: док, ⌘Tab, меню.
-            // Политика ставится один раз на старте; смена режима на лету
-            // перестраивает окно сразу, а иконку в доке — со следующего запуска.
+            // Стартуем всегда как Accessory (LSUIElement в Info.plist), поэтому
+            // здесь бывает только повышение до Regular; смена режима на лету
+            // делает то же самое сама (windows::apply_mode).
             // Понятие политики активации есть только у AppKit: на Linux место
             // приложения в панели задач решает сам оконный менеджер по
             // skip_taskbar, который выставляется при создании окна.
@@ -447,8 +481,12 @@ fn main() {
             windows::create_toast(app.handle())?;
             tray::init(&d)?;
 
-            // первый запуск без интеграции — онбординг; иначе показываем панель,
-            // чтобы запуск приложения был видимым (а не «ничего не открылось»).
+            // Первый запуск без интеграции — онбординг. Иначе показываем панель,
+            // чтобы запуск был видимым (а не «ничего не открылось»), — но только
+            // когда приложение запустил человек. При включённом автозапуске старт
+            // случается на КАЖДОМ логине, и панель поверх всего в момент, когда
+            // человек уже что-то печатает, — не приветствие, а помеха; признак
+            // жизни там — иконка в меню-баре.
             if !install::integration_health().ok() {
                 let _ = windows::create_onboarding(app.handle());
             } else {
@@ -458,9 +496,12 @@ fn main() {
             // unix-сокет — канал событий от хуков
             tauri::async_runtime::spawn(server::serve(d.clone()));
 
-            // плагины питания (Не спать, Крышка) — после трея:
-            // их changed() обновляет title
+            // Плагины — после трея: их статусы обновляют его заголовок.
+            // Сначала общий кэш процессов power (им пользуется трей «Не спать»),
+            // потом хост поднимает всё, что включено тумблером.
             power::Power::init(&d);
+            d.plugins.init(&d); // плагины: поднять всё, что включено
+            power::Power::sweep_stale_lid(&d); // выключенная «Крышка» — не повод не спать
 
             // Прогрев кэша размеров моделей в фоне: первое открытие настроек не
             // ждёт обхода venv (~21k файлов) — см. install::dir_size_cached.
@@ -540,13 +581,14 @@ fn main() {
                 }
                 return;
             }
-            if window.label() != "main" {
+            if !matches!(window.label(), "main" | "agent-chat") {
                 return;
             }
             match event {
                 // ⌘W и крестик — просто прячем, демон живёт
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
+                    windows::remember_geometry(&Daemon::get(window.app_handle()), window.label());
                     let _ = window.hide();
                 }
                 // клик вне панели — спрятать. Но с задержкой и перепроверкой:
@@ -555,6 +597,11 @@ fn main() {
                 // один кадр. Гасим только если фокус реально ушёл из приложения и
                 // не вернулся за 120 мс — иначе панель моргала бы на каждой стрелке.
                 tauri::WindowEvent::Focused(false) => {
+                    // обычное окно не исчезает от клика мимо — это поведение
+                    // накладки; чат с агентом — тоже обычное окно
+                    if window.label() != "main" {
+                        return;
+                    }
                     let w = window.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(120));
@@ -584,10 +631,14 @@ fn main() {
                         windows::remember_window_size(&d, l.width, l.height);
                     }
                 }
+                windows::remember_geometry(&d, "workspace");
+                windows::remember_geometry(&d, "agent-chat");
                 // ssh-дети не должны пережить приложение: без этого туннели
                 // висят до конца сессии терминала и держат порты
                 d.remotes.stop_all_now();
-                power::Power::dispose(&d); // снять assertion, вернуть disablesleep
+                // Погасить плагины: «Не спать» снимет assertion, «Крышка» вернёт
+                // disablesleep, сайдкары получат SIGTERM и лишатся токенов.
+                d.plugins.dispose(&d);
                 d.voice.dispose(); // погасить Silero-сайдкар, если был поднят
                 d.stt.dispose(); // погасить Qwen3-MLX-сайдкар, если был поднят
                 d.wake.dispose(); // остановить wake-word consumer-поток
@@ -761,15 +812,10 @@ fn spawn_timers(d: &Arc<Daemon>) {
         }
     });
 
-    // официальные лимиты подписки — через 5с и далее раз в 5 минут
-    let dd = d.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        loop {
-            dd.usage.fetch_official(&dd).await;
-            tokio::time::sleep(Duration::from_secs(5 * 60)).await;
-        }
-    });
+    // Бюджет лимитов: ОДИН опросчик на всё приложение, частота по надобности
+    // (см. budget.rs). Прежний безусловный опрос раз в 5 минут через мёртвый
+    // скрейпинг `claude -p /usage` заменён им целиком.
+    budget::spawn_poller(d);
 
     // история чатов по проектам — через 1.2с и далее раз в минуту
     let dd = d.clone();

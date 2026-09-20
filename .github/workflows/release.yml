@@ -128,7 +128,7 @@ jobs:
           --work "$RUNNER_TEMP/jarvis-node-cross"
           --out "node-artifacts/${{ matrix.target }}"
       - name: Preserve node and manifest for the macOS bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: jarvis-node-${{ matrix.target }}
           path: node-artifacts/${{ matrix.target }}/

@@ -19,10 +19,10 @@ default-run = "jarvis"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 
 [dependencies]
-sha2 = "0.10"
+sha2 = "0.11"
 # macos-private-api нужен прозрачным окнам на macOS; на Linux фича
 # просто не задействуется — код за ней и так под cfg внутри tauri.
 tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }

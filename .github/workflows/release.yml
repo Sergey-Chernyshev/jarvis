@@ -32,7 +32,7 @@ jobs:
         run: npm ci
 
       - name: Download nodes built from this exact workflow commit
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: jarvis-node-*
           path: node-artifacts
